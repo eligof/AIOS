@@ -17,10 +17,39 @@ fn luks_uuid_comes_from_rd_luks_name() {
 }
 
 #[test]
+fn luks_uuid_must_be_canonical() {
+    let upper = UUID.to_ascii_uppercase();
+    for good in [UUID, upper.as_str()] {
+        let cmdline = format!("rd.luks.name={good}=aios");
+        assert_eq!(luks_uuid_from_cmdline(&cmdline).as_deref(), Some(good));
+    }
+    for bad in [
+        "1111",
+        "0b6c2e7f5d0a4c2e9a713f1d2c4b5a69",
+        "0b6c2e7f-5d0a-4c2e-9a71-3f1d2c4b5a6",
+        "0b6c2e7f-5d0a-4c2e-9a71-3f1d2c4b5a690",
+        "0b6c2e7f-5d0a-4c2e-9a71_3f1d2c4b5a69",
+        "0b6c2e7g-5d0a-4c2e-9a71-3f1d2c4b5a69",
+        "../../../../dev/sda-5d0a-4c2e-9a71-3f1d",
+        "0b6c2e7f-5d0a-4c2e-9a71-3f1d2c4b5a69-",
+    ] {
+        let cmdline = format!("rd.luks.name={bad}=aios root=/dev/mapper/aios");
+        assert_eq!(luks_uuid_from_cmdline(&cmdline), None, "{bad}");
+    }
+    let mixed = format!("rd.luks.name=1111=aios rd.luks.name={UUID}=aios");
+    assert_eq!(
+        luks_uuid_from_cmdline(&mixed),
+        None,
+        "a malformed aios token"
+    );
+}
+
+#[test]
 fn conflicting_luks_tokens_are_none() {
     let same = format!("rd.luks.name={UUID}=aios rd.luks.name={UUID}=aios");
     assert_eq!(luks_uuid_from_cmdline(&same).as_deref(), Some(UUID));
-    let conflict = format!("rd.luks.name={UUID}=aios rd.luks.name=2222=aios");
+    let other = "1b6c2e7f-5d0a-4c2e-9a71-3f1d2c4b5a69";
+    let conflict = format!("rd.luks.name={UUID}=aios rd.luks.name={other}=aios");
     assert_eq!(luks_uuid_from_cmdline(&conflict), None);
 }
 
@@ -66,6 +95,29 @@ fn efivar_strings_skip_attributes_and_the_nul() {
     assert_eq!(parse_efivar_utf16(&[7, 0, 0]), None);
     assert_eq!(parse_efivar_utf16(&[7, 0, 0, 0, 0, 0]), None);
     assert_eq!(parse_efivar_utf16(&[7, 0, 0, 0, b'a']), None);
+}
+
+#[test]
+fn efivar_strings_end_at_the_first_nul() {
+    let mut bytes = vec![0x07, 0, 0, 0];
+    for unit in "aios-gen-0007-cachyos.efi\0stale-tail\0".encode_utf16() {
+        bytes.extend(unit.to_le_bytes());
+    }
+    assert_eq!(
+        parse_efivar_utf16(&bytes).as_deref(),
+        Some("aios-gen-0007-cachyos.efi")
+    );
+    let unterminated: Vec<u8> = [7, 0, 0, 0]
+        .into_iter()
+        .chain("abc".encode_utf16().flat_map(u16::to_le_bytes))
+        .collect();
+    assert_eq!(parse_efivar_utf16(&unterminated).as_deref(), Some("abc"));
+    assert_eq!(parse_efivar_utf16(&[7, 0, 0, 0, 0, 0, b'a', 0]), None);
+    // An unpaired surrogate after the NUL is ignored.
+    assert_eq!(
+        parse_efivar_utf16(&[7, 0, 0, 0, b'a', 0, 0, 0, 0x00, 0xd8]).as_deref(),
+        Some("a")
+    );
 }
 
 #[test]

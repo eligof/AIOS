@@ -1,22 +1,32 @@
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The LUKS UUID from `rd.luks.name=<uuid>=aios`. `None` if absent, empty or conflicting.
+/// The LUKS UUID from `rd.luks.name=<uuid>=aios`. `None` if absent, conflicting, or not a
+/// canonical UUID (8-4-4-4-12 hex digits): it becomes a `/dev/disk/by-uuid/` path.
 pub fn luks_uuid_from_cmdline(cmdline: &str) -> Option<String> {
     let mut found: Option<&str> = None;
     for value in cmdline
         .split_whitespace()
         .filter_map(|t| t.strip_prefix("rd.luks.name="))
     {
-        match value.split_once('=') {
-            Some((uuid, "aios")) if !uuid.is_empty() => match found {
-                Some(prev) if prev != uuid => return None,
-                _ => found = Some(uuid),
-            },
-            _ => {}
+        if let Some((uuid, "aios")) = value.split_once('=') {
+            if !is_canonical_uuid(uuid) || found.is_some_and(|prev| prev != uuid) {
+                return None;
+            }
+            found = Some(uuid);
         }
     }
     found.map(str::to_string)
+}
+
+/// 8-4-4-4-12 hex digits (either case), as `RenderCtx` requires.
+fn is_canonical_uuid(s: &str) -> bool {
+    let groups: Vec<&str> = s.split('-').collect();
+    groups.len() == 5
+        && groups
+            .iter()
+            .zip([8, 4, 4, 4, 12])
+            .all(|(g, len)| g.len() == len && g.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 fn epoch_secs(t: SystemTime) -> u64 {
@@ -63,7 +73,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// An efivarfs string variable: 4 attribute bytes, then NUL-terminated UTF-16LE.
+/// An efivarfs string variable: 4 attribute bytes, then UTF-16LE up to the first NUL.
 /// `None` when malformed or empty.
 pub fn parse_efivar_utf16(bytes: &[u8]) -> Option<String> {
     let data = bytes.get(4..)?;
@@ -71,14 +81,12 @@ pub fn parse_efivar_utf16(bytes: &[u8]) -> Option<String> {
         return None;
     }
     let units: Vec<u16> = data
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| u16::from_le_bytes(*pair))
+        .chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .take_while(|&unit| unit != 0)
         .collect();
     let text = String::from_utf16(&units).ok()?;
-    let text = text.trim_end_matches('\0');
-    (!text.is_empty()).then(|| text.to_string())
+    (!text.is_empty()).then_some(text)
 }
 
 /// Free bytes from `df --output=avail -B1 <dir>`: the last non-empty line.

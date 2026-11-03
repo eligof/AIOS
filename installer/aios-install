@@ -16,6 +16,13 @@
 # AIOS_LIVE_REPO (/opt/aios-repo), and those of the libraries.
 set -euo pipefail
 
+# The passwords must never reach a trace: refuse `bash -x aios-install` and SHELLOPTS=xtrace.
+if [[ $- == *x* ]]; then
+    set +x
+    echo "aios-install: error: refusing to run with xtrace (bash -x): the trace would show the passwords" >&2
+    exit 1
+fi
+
 LIB=${AIOS_INSTALL_LIB:-/usr/local/lib/aios-install}
 # shellcheck source=lib/common.sh
 . "$LIB/common.sh"
@@ -23,6 +30,8 @@ LIB=${AIOS_INSTALL_LIB:-/usr/local/lib/aios-install}
 . "$LIB/config.sh"
 # shellcheck source=lib/disk.sh
 . "$LIB/disk.sh"
+# shellcheck source=lib/network.sh
+. "$LIB/network.sh"
 # shellcheck source=lib/cpu.sh
 . "$LIB/cpu.sh"
 # shellcheck source=lib/manifest.sh
@@ -115,12 +124,13 @@ summary() {
 }
 
 main() {
-    local config="" auto=0 unattended=0
+    local config="" config_file="" auto=0 unattended=0 policy
     while (($#)); do
         case $1 in
             --config)
                 [[ $# -ge 2 ]] || die "--config needs a file"
                 config=$2
+                config_file=$2
                 shift 2
                 ;;
             --auto) auto=1 && shift ;;
@@ -147,6 +157,7 @@ main() {
     if [[ -n $config ]]; then
         unattended=1
         log "unattended install from $config"
+        [[ -z $config_file ]] || warn_readable_config "$config_file"
         parse_config "$config" || die "invalid install config $config"
     else
         prompt_config
@@ -161,8 +172,7 @@ main() {
     validate_disk "$DISK" || die "unusable disk $DISK"
     ESP_PART=$(part_path "$DISK" 1)
     ROOT_PART=$(part_path "$DISK" 2)
-    curl -sI --max-time 20 --retry 3 --retry-connrefused https://geo.mirror.pkgbuild.com >/dev/null ||
-        die "no network: https://geo.mirror.pkgbuild.com is unreachable (Wi-Fi: iwctl)"
+    check_network || die "the package mirrors are unreachable"
     if cpu_supports_v3; then
         V3=1
         log "the CPU supports x86-64-v3: the CachyOS v3 repos stay enabled"
@@ -173,6 +183,13 @@ main() {
     check_cachyos_keys "${AIOS_CACHYOS_KEYS:-}" || die "untrusted package keyring"
     [[ -f $DEFAULTS/manifest.toml ]] || die "no default manifest in $DEFAULTS (aios-base)"
     [[ -f $LIVE_REPO/aios-local.db.tar.gz ]] || die "no local package repo in $LIVE_REPO"
+    # Whatever can fail without touching the disk fails here: the password hash and the USB
+    # policy are made now and written in steps 6 and 12. The password is not needed again.
+    PASSWD_HASH=$(hash_password "${CFG[USER_PASSWORD]}") ||
+        die "cannot hash the password of ${CFG[USERNAME]}"
+    unset 'CFG[USER_PASSWORD]'
+    policy=$(usbguard generate-policy) || die "usbguard generate-policy failed"
+    USBGUARD_RULES=$(usbguard_rules "$policy") || die "unusable USBGuard policy"
 
     step 2 confirm
     log "$DISK: $(disk_identity)"
@@ -201,12 +218,13 @@ main() {
     run_cmd mkfs.fat -F32 -n EFI "$ESP_PART"
 
     step 4 encrypt
-    local luks=${CFG[LUKS_PASSPHRASE]}
-    run_stdin "$luks" cryptsetup luksFormat --type luks2 --pbkdf argon2id --batch-mode \
-        --key-file - "$ROOT_PART"
-    luks_open_tracked "$luks" "$ROOT_PART"
+    run_stdin "${CFG[LUKS_PASSPHRASE]}" cryptsetup luksFormat --type luks2 --pbkdf argon2id \
+        --batch-mode --key-file - "$ROOT_PART"
+    luks_open_tracked "${CFG[LUKS_PASSPHRASE]}" "$ROOT_PART"
     log "recovery key (shown only now, stored nowhere: write it down):"
-    run_stdin "$luks" systemd-cryptenroll --unlock-key-file=/dev/stdin --recovery-key "$ROOT_PART"
+    run_stdin "${CFG[LUKS_PASSPHRASE]}" systemd-cryptenroll --unlock-key-file=/dev/stdin \
+        --recovery-key "$ROOT_PART"
+    unset 'CFG[LUKS_PASSPHRASE]'
     LUKS_UUID=$(cryptsetup luksUUID "$ROOT_PART")
     [[ $LUKS_UUID =~ ^[0-9a-f-]{36}$ ]] || die "unexpected LUKS UUID ${LUKS_UUID@Q}"
 
@@ -241,8 +259,7 @@ main() {
     run_cmd git -C "$config_dir" -c user.name=aios -c user.email=aios@localhost \
         commit -q -m "aios: initial manifest"
     run_cmd install -d -m 0700 "$secrets" "$secrets/passwd"
-    text=$(hash_password "${CFG[USER_PASSWORD]}")
-    printf '%s\n' "$text" | run_write "$secrets/passwd/${CFG[USERNAME]}" 0600
+    printf '%s\n' "$PASSWD_HASH" | run_write "$secrets/passwd/${CFG[USERNAME]}" 0600
     run_cmd cp -a "$LIVE_REPO" "$TOP/@persist/aios/repo"
 
     step 7 esp
@@ -280,15 +297,13 @@ main() {
     fi
 
     step 12 usbguard
-    local policy
-    policy=$(usbguard generate-policy)
-    text=$(usbguard_rules "$policy")
     run_cmd install -d -m 0700 "$TOP/@persist/var/lib/usbguard"
-    printf '%s\n' "$text" | run_write "$TOP/@persist/var/lib/usbguard/rules.conf" 0600
+    printf '%s\n' "$USBGUARD_RULES" | run_write "$TOP/@persist/var/lib/usbguard/rules.conf" 0600
 
     step 13 finish
     cleanup
     summary
+    [[ -z $config_file ]] || log "delete $config_file now: it holds the passwords in clear text"
     if ((unattended)); then
         log "rebooting into AIOS"
         run_cmd systemctl reboot

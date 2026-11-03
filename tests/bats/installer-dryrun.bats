@@ -41,6 +41,8 @@ setup() {
     export AIOS_INSTALL_LIB="$T/lib" AIOS_INSTALL_DRYRUN=1 AIOS_EFI_DIR="$T/efi"
     export AIOS_DEFAULTS="$ROOT/manifest" AIOS_LIVE_REPO="$T/repo" AIOS_ZONEINFO="$T/zoneinfo"
     export AIOS_PASSWD_FILE=/dev/null AIOS_LDSO="$T/ld.so" AIOS_FWCFG_DIR="$T/fw_cfg"
+    export AIOS_CACHYOS_MIRRORLIST="$T/cachyos-mirrorlist"
+    echo 'Server = https://cdn77.cachyos.org/repo/$arch/$repo' >"$AIOS_CACHYOS_MIRRORLIST"
     unset AIOS_INSTALL_DRYRUN_FAILS
     DEFAULTS=$AIOS_DEFAULTS LIVE_REPO=$AIOS_LIVE_REPO
 
@@ -54,6 +56,7 @@ TIMEZONE=UTC
 WIPE=yes
 EXTRA_CMDLINE=console=ttyS0,115200
 EOF
+    command -p chmod 0600 "$T/install.conf"
 
     # Queries answer from $FAKE_SYS. Every other tool is `record`: dry-run must never call it.
     # (So the tests below write files with redirections, not with cp.)
@@ -203,13 +206,14 @@ lsblk -nro NAME,TYPE /dev/vda
 lsblk -ndbro SIZE /dev/vda
 lsblk -ndo MODEL /dev/vda
 lsblk -ndo SERIAL /dev/vda
-curl -sI --max-time 20 --retry 3 --retry-connrefused https://geo.mirror.pkgbuild.com
+curl -fsI --max-time 20 --retry 3 --retry-connrefused https://geo.mirror.pkgbuild.com
+curl -fsI --max-time 20 --retry 3 --retry-connrefused https://cdn77.cachyos.org/repo/x86_64/cachyos/cachyos.db
 gpg --homedir /etc/pacman.d/gnupg --batch --no-permission-warning --with-colons --list-keys -- admin@cachyos.org
+mkpasswd -m yescrypt -s
+usbguard generate-policy
 lsblk -o NAME,SIZE,FSTYPE,LABEL,MODEL /dev/vda
 cryptsetup luksUUID /dev/vda2
-mkpasswd -m yescrypt -s
 sbctl status --json
-usbguard generate-policy
 findmnt -rno TARGET -S /dev/mapper/aios
 EOF
 }
@@ -366,6 +370,87 @@ EOF
     [ -z "$DRY" ]
     [[ "$LOG" == *"no network"* ]]
     [[ "$LOG" == *"step 1 (preflight) failed"* ]]
+}
+
+@test "the password hash, the USB policy and EXTRA_CMDLINE are checked before anything changes" {
+    echo 'block id 1234:5678' >"$FAKE_SYS/usbguard-policy"
+    install_dry --config "$T/install.conf"
+    [ "$status" -eq 1 ]
+    [ -z "$DRY" ]
+    [[ "$LOG" == *"not an allow rule: block id 1234:5678"* ]]
+    [[ "$LOG" == *"step 1 (preflight) failed"* ]]
+
+    rm "$FAKE_SYS/usbguard-policy"
+    install_dry --config "$T/install.conf"
+    [ "$status" -eq 1 ]
+    [ -z "$DRY" ]
+    [[ "$LOG" == *"usbguard generate-policy failed"* ]]
+
+    echo 'allow id 1d6b:0002' >"$FAKE_SYS/usbguard-policy"
+    echo 1 >"$FAKE_SYS/mkpasswd.rc"
+    install_dry --config "$T/install.conf"
+    [ "$status" -eq 1 ]
+    [ -z "$DRY" ]
+    [[ "$LOG" == *"mkpasswd -m yescrypt -s failed"* ]]
+
+    rm "$FAKE_SYS/mkpasswd.rc"
+    sed -i 's/^EXTRA_CMDLINE=.*/EXTRA_CMDLINE=quiet x=@USERNAME@/' "$T/install.conf"
+    install_dry --config "$T/install.conf"
+    [ "$status" -eq 1 ]
+    [ -z "$DRY" ]
+    [[ "$LOG" == *"EXTRA_CMDLINE word 'x=@USERNAME@' may only hold"* ]]
+}
+
+@test "the passwords are forgotten as soon as they have been used" {
+    # A probe: at the start of each step, save what the installer still holds.
+    export PROBE="$T/probe"
+    cat >>"$T/lib/keys.sh" <<'EOF'
+eval "orig_$(declare -f step)"
+step() {
+    { declare -p CFG; declare -p PASSWD_HASH; } >"$PROBE.$1" 2>&1 || true
+    orig_step "$@"
+}
+EOF
+
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 0 ]
+    # The user password is hashed in preflight, then dropped.
+    run ! grep -q -e USER_PASSWORD -e e2e-user-pass "$PROBE.2"
+    grep -qF 'PASSWD_HASH="\$y\$j9T\$fakesalt' "$PROBE.2"
+    # The LUKS passphrase is gone once step 4 used it.
+    grep -q '\[LUKS_PASSPHRASE\]="e2e-luks-passphrase"' "$PROBE.4"
+    run ! grep -q -e LUKS_PASSPHRASE -e e2e-luks-passphrase "$PROBE.5"
+}
+
+@test "aios-install refuses to run under xtrace, which would print the passwords" {
+    run --separate-stderr bash -x "$SCRIPT" --config "$T/install.conf" </dev/null
+
+    [ "$status" -eq 1 ]
+    [[ "$stderr" == *"aios-install: error: refusing to run with xtrace (bash -x): the trace would show the passwords"* ]]
+    [[ "$output$stderr" != *DRYRUN* ]]
+    [[ "$output$stderr" != *e2e-user-pass* ]]
+}
+
+@test "a --config file is warned about when others can read it, and the summary says to delete it" {
+    install_dry --config "$T/install.conf"
+    [ "$status" -eq 0 ]
+    [[ "$LOG" != *"is readable by group or others"* ]]
+    [[ "$LOG" == *"delete $T/install.conf now: it holds the passwords in clear text"* ]]
+
+    command -p chmod 0644 "$T/install.conf"
+    install_dry --config "$T/install.conf"
+    [ "$status" -eq 0 ]
+    [[ "$LOG" == *"warning: $T/install.conf is readable by group or others (mode 644)"* ]]
+
+    # The fw_cfg file is the VM's, not the user's: no warning, nothing to delete.
+    mkdir -p "$AIOS_FWCFG_DIR/by_name/opt/aios/install.conf"
+    cat "$T/install.conf" >"$AIOS_FWCFG_DIR/by_name/opt/aios/install.conf/raw"
+    command -p chmod 0644 "$AIOS_FWCFG_DIR/by_name/opt/aios/install.conf/raw"
+    install_dry --auto
+    [ "$status" -eq 0 ]
+    [[ "$LOG" != *"is readable by group or others"* ]]
+    [[ "$LOG" != *"delete "* ]]
 }
 
 @test "a mount point the installer needs that is already in use stops the preflight" {

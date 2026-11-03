@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
-# installer/lib/disk.sh and cpu.sh: target disk validation, x86-64-v3 detection and the
-# pacman.conf v3 strip (spec §6.2 steps 1 and 3, §9).
+# installer/lib/disk.sh, cpu.sh and network.sh: target disk validation, x86-64-v3 detection,
+# the pacman.conf v3 strip and the network check (spec §6.2 steps 1-3, §9).
+# Literal $ in single quotes is test data (mirrorlists).
+# shellcheck disable=SC2016
 
 setup() {
     LIB="$BATS_TEST_DIRNAME/../../installer/lib"
@@ -10,10 +12,13 @@ setup() {
     source "$LIB/disk.sh"
     # shellcheck source=/dev/null
     source "$LIB/cpu.sh"
+    # shellcheck source=/dev/null
+    source "$LIB/network.sh"
     BIN="$BATS_TEST_TMPDIR/bin"
     mkdir -p "$BIN"
     ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$BIN/lsblk"
     ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$BIN/findmnt"
+    ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$BIN/curl"
     PATH="$BIN:$PATH"
     export FAKE_SYS="$BATS_TEST_TMPDIR/sys" CALLS="$BATS_TEST_TMPDIR/calls"
     export AIOS_SYS_BLOCK="$BATS_TEST_TMPDIR/sysfs"
@@ -24,6 +29,12 @@ setup() {
     blk sr0 rom $((1 * GIB)) 1 "/run/archiso/bootmnt"
     live /dev/sr0
     PACMAN_CONF="$BATS_TEST_DIRNAME/../../manifest/files/pacman.conf"
+    export AIOS_CACHYOS_MIRRORLIST="$BATS_TEST_TMPDIR/cachyos-mirrorlist"
+    printf '%s\n' '## CachyOS mirrors' '# Server = https://old.example/repo/$arch/$repo' '' \
+        'Server = https://cdn77.cachyos.org/repo/$arch/$repo' \
+        'Server = https://mirror.cachyos.org/repo/$arch/$repo' >"$AIOS_CACHYOS_MIRRORLIST"
+    ARCH_PROBE="curl -fsI --max-time 20 --retry 3 --retry-connrefused https://geo.mirror.pkgbuild.com"
+    CACHY_PROBE="curl -fsI --max-time 20 --retry 3 --retry-connrefused https://cdn77.cachyos.org/repo/x86_64/cachyos/cachyos.db"
 }
 
 # blk NAME TYPE SIZE RO MOUNTPOINTS: a fake block device /dev/NAME with nothing on it: lsblk
@@ -253,6 +264,40 @@ ldso() {
     blk vdb disk $((20 * GIB)) 0 ""
     run check_partitions /dev/vdb
     [[ "$output" == *"but has: none" ]]
+}
+
+@test "the network check asks Arch's mirror and the first CachyOS mirror, failing on HTTP errors" {
+    run check_network
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$CALLS")" = "$ARCH_PROBE"$'\n'"$CACHY_PROBE" ]
+}
+
+@test "an unreachable Arch or CachyOS mirror fails the network check" {
+    echo https://cdn77.cachyos.org/repo/x86_64/cachyos/cachyos.db >"$FAKE_SYS/curl.fail"
+    run check_network
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: the CachyOS mirror https://cdn77.cachyos.org/repo/x86_64/cachyos/cachyos.db is unreachable (the first Server in $AIOS_CACHYOS_MIRRORLIST)" ]
+
+    echo https://geo.mirror.pkgbuild.com >"$FAKE_SYS/curl.fail"
+    : >"$CALLS"
+    run check_network
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: no network: https://geo.mirror.pkgbuild.com is unreachable (Wi-Fi: iwctl)" ]
+    [ "$(cat "$CALLS")" = "$ARCH_PROBE" ]
+}
+
+@test "a CachyOS mirrorlist without an https Server fails the network check" {
+    printf '%s\n' '# Server = https://x.example/$arch/$repo' 'Server = http://plain.example/$arch/$repo' \
+        >"$AIOS_CACHYOS_MIRRORLIST"
+    run check_network
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: no https Server line in $AIOS_CACHYOS_MIRRORLIST" ]
+
+    rm "$AIOS_CACHYOS_MIRRORLIST"
+    run check_network
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: no https Server line in $AIOS_CACHYOS_MIRRORLIST" ]
 }
 
 @test "x86-64-v3 is detected from the loader's hwcaps list" {

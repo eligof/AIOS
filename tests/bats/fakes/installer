@@ -13,10 +13,13 @@
 #   gpg        ...                 prints $FAKE_SYS/gpg.out (a --with-colons listing)
 #   mkpasswd   ...                 reads the password from stdin, appends it to
 #                                  $FAKE_SYS/mkpasswd.stdin, prints a fixed yescrypt hash
+#                                  (or exits with $FAKE_SYS/mkpasswd.rc if that exists)
 #   cryptsetup luksUUID DEV        prints $FAKE_SYS/luks-uuid
 #   sbctl      status --json       prints $FAKE_SYS/sbctl-status.json
 #   usbguard   generate-policy     prints $FAKE_SYS/usbguard-policy
-#   curl, modprobe                 exit with $FAKE_SYS/<name>.rc (default 0)
+#   curl       ... URL             exit 22 (an HTTP error) if URL is a line of
+#                                  $FAKE_SYS/curl.fail, else like modprobe
+#   modprobe                       exit with $FAKE_SYS/<name>.rc (default 0)
 set -euo pipefail
 
 name=${0##*/}
@@ -57,6 +60,7 @@ case "$name" in
         ;;
     mkpasswd)
         cat >>"$FAKE_SYS/mkpasswd.stdin"
+        [ ! -f "$FAKE_SYS/mkpasswd.rc" ] || exit "$(cat "$FAKE_SYS/mkpasswd.rc")"
         echo "\$y\$j9T\$fakesalt\$fakehashfakehashfakehashfakehashfake0"
         ;;
     cryptsetup)
@@ -72,6 +76,9 @@ case "$name" in
         cat "$FAKE_SYS/usbguard-policy"
         ;;
     curl | modprobe)
+        if [ "$name" = curl ] && [ -f "$FAKE_SYS/curl.fail" ] && grep -qxF -- "${!#}" "$FAKE_SYS/curl.fail"; then
+            exit 22
+        fi
         exit "$(cat "$FAKE_SYS/$name.rc" 2>/dev/null || echo 0)"
         ;;
     *)

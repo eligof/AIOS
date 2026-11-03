@@ -132,13 +132,14 @@ is_reserved_cmdline_key() {
 }
 
 # valid_extra_cmdline WORDS: space-separated kernel parameters the manifest may append.
+# No "@": the words go into the manifest template, whose placeholders are @NAME@.
 valid_extra_cmdline() {
     local -a words
     local w
     read -ra words <<<"$1"
     for w in "${words[@]}"; do
-        if [[ ! $w =~ ^[A-Za-z0-9._,:=/+@-]+$ ]]; then
-            log "error: EXTRA_CMDLINE word ${w@Q} may only hold letters, digits and . _ , : = / + @ -"
+        if [[ ! $w =~ ^[A-Za-z0-9._,:=/+-]+$ ]]; then
+            log "error: EXTRA_CMDLINE word ${w@Q} may only hold letters, digits and . _ , : = / + -"
             return 1
         fi
         if is_reserved_cmdline_key "${w%%=*}"; then
@@ -174,6 +175,17 @@ validate_config() {
         errors=$((errors + 1))
     fi
     ((errors == 0))
+}
+
+# warn_readable_config FILE: FILE (a --config file) holds the passwords in clear text; warn
+# when group or others may read it.
+warn_readable_config() {
+    local mode
+    mode=$(stat -L -c %a -- "$1" 2>/dev/null) || return 0
+    if ((8#$mode & 8#044)); then
+        log "warning: $1 is readable by group or others (mode $mode) and holds the passwords" \
+            "in clear text: chmod 0600 it, and delete it after the install"
+    fi
 }
 
 # fwcfg_config: print the QEMU fw_cfg install config path if the VM has one.

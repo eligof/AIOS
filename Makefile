@@ -17,9 +17,9 @@ PYTEST ?= $(shell $(PYTHON) -c 'import pytest' 2>/dev/null && echo '$(PYTHON) -m
 
 # What the shell and unit checks cover. installer/lib/keys.sh is generated (make keys).
 INSTALLER_LIBS := installer/lib/common.sh installer/lib/config.sh installer/lib/disk.sh \
-	installer/lib/cpu.sh installer/lib/manifest.sh installer/lib/skeleton.sh \
-	installer/lib/secrets.sh installer/lib/usbguard.sh installer/lib/boot.sh \
-	installer/lib/keyring.sh installer/lib/cleanup.sh
+	installer/lib/network.sh installer/lib/cpu.sh installer/lib/manifest.sh \
+	installer/lib/skeleton.sh installer/lib/secrets.sh installer/lib/usbguard.sh \
+	installer/lib/boot.sh installer/lib/keyring.sh installer/lib/cleanup.sh
 # Scripts that source the installer libraries; shellcheck follows the sources (-x).
 INSTALLER_SCRIPTS := installer/aios-install installer/gen-keys.sh
 SH_SCRIPTS := initrd/aios-root.sh base/aios-health.sh

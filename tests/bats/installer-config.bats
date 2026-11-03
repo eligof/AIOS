@@ -222,6 +222,29 @@ EOF
     done
 }
 
+@test "EXTRA_CMDLINE refuses @, so it can never carry a manifest placeholder" {
+    for bad in @USERNAME@ x=@HOSTNAME@ netconsole=6665@10.0.0.1/eth0; do
+        run valid_extra_cmdline "quiet $bad"
+        [ "$status" -eq 1 ] || { echo "accepted $bad"; return 1; }
+        [[ "$output" == *"may only hold letters, digits and . _ , : = / + -" ]]
+    done
+}
+
+@test "a config file that group or others can read gets a warning" {
+    good_config
+    chmod 0600 "$CONF"
+    run warn_readable_config "$CONF"
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+
+    for mode in 0640 0604 0644; do
+        chmod "$mode" "$CONF"
+        run warn_readable_config "$CONF"
+        [ "$status" -eq 0 ]
+        [ "$output" = "aios-install: warning: $CONF is readable by group or others (mode ${mode#0}) and holds the passwords in clear text: chmod 0600 it, and delete it after the install" ]
+    done
+}
+
 @test "the reserved parameter list matches aios-manifest" {
     src="$BATS_TEST_DIRNAME/../../aios-cli/crates/aios-manifest/src/validate.rs"
     rust=$(sed -n '/^const RESERVED_CMDLINE_KEYS/,/^];/p' "$src" | grep -o '"[^"]*"' | tr -d '"' | sort)

@@ -29,7 +29,8 @@ BASH_SCRIPTS := initrd/install/aios tests/bats/fakes/btrfs tests/bats/fakes/reco
 BATS_FILES := tests/bats/aios-root.bats tests/bats/install-hook.bats tests/bats/aios-health.bats \
 	tests/bats/installer-config.bats tests/bats/installer-disk.bats \
 	tests/bats/installer-target.bats tests/bats/installer-keys.bats \
-	tests/bats/installer-dryrun.bats tests/bats/iso-profile.bats tests/bats/makefile.bats
+	tests/bats/installer-dryrun.bats tests/bats/iso-profile.bats tests/bats/makefile.bats \
+	tests/bats/pacstrap-layout.bats
 UNITS := initrd/aios-root.service initrd/sysroot-etc.mount base/aios-health.service \
 	iso/airootfs/etc/systemd/system/aios-install-auto.service
 

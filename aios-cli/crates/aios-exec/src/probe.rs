@@ -13,9 +13,9 @@ pub struct DirProbe<'a> {
     /// The directory standing in for `/etc`.
     pub etc_root: PathBuf,
     pub runner: &'a dyn CommandRunner,
-    /// `None`: ask the running system (`pacman -Qqe`, `systemctl is-enabled`).
+    /// `None`: ask the running system (`pacman -Qqe`, `systemctl is-enabled -- UNIT`).
     /// `Some(root)`: ask a candidate root (`arch-chroot ROOT pacman -Qqe`,
-    /// `systemctl --root=ROOT is-enabled`).
+    /// `systemctl --root=ROOT is-enabled -- UNIT`).
     pub root: Option<PathBuf>,
 }
 
@@ -60,7 +60,8 @@ impl SystemProbe for DirProbe<'_> {
         if let Some(root) = &self.root {
             cmd = cmd.arg(format!("--root={}", root.display()));
         }
-        let cmd = cmd.args(["is-enabled", unit]);
+        // `--`: a unit name is never parsed as an option.
+        let cmd = cmd.args(["is-enabled", "--", unit]);
         let out = self
             .runner
             .run(&cmd)

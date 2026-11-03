@@ -39,7 +39,7 @@ fn synced() -> Fixture {
         .respond(&["pacman", "-Qqe"], Output::ok(packages))
         .respond(&["systemctl", "is-enabled"], Output::ok("enabled\n"))
         .respond(
-            &["systemctl", "is-enabled", "bluetooth.service"],
+            &["systemctl", "is-enabled", "--", "bluetooth.service"],
             Output {
                 status: 1,
                 stdout: b"disabled\n".to_vec(),
@@ -47,7 +47,7 @@ fn synced() -> Fixture {
             },
         )
         .respond(
-            &["systemctl", "is-enabled", "sshd.socket"],
+            &["systemctl", "is-enabled", "--", "sshd.socket"],
             Output {
                 status: 1,
                 stdout: b"masked\n".to_vec(),
@@ -79,10 +79,10 @@ fn plan_mounts_read_only_and_asks_the_running_system() {
             "
             mount -t btrfs -o subvolid=5,ro /dev/mapper/aios {top}
             pacman -Qqe
-            systemctl is-enabled NetworkManager.service
-            systemctl is-enabled bluetooth.service
-            systemctl is-enabled fwupd-refresh.timer
-            systemctl is-enabled sshd.socket
+            systemctl is-enabled -- NetworkManager.service
+            systemctl is-enabled -- bluetooth.service
+            systemctl is-enabled -- fwupd-refresh.timer
+            systemctl is-enabled -- sshd.socket
             umount {top}
             "
         )

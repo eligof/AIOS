@@ -118,10 +118,19 @@ fn unit_state_asks_systemctl() {
     assert_eq!(
         fake.calls(),
         [
-            "systemctl is-enabled sshd.socket",
-            "systemctl --root=/cand is-enabled sshd.socket",
+            "systemctl is-enabled -- sshd.socket",
+            "systemctl --root=/cand is-enabled -- sshd.socket",
         ]
     );
+}
+
+#[test]
+fn a_unit_name_is_never_an_option() {
+    let mut fake = FakeRunner::new();
+    fake.respond(&["systemctl"], Output::ok("enabled\n"));
+    let live = DirProbe::new("/etc", &fake, None);
+    live.unit_state("--root=/tmp/evil").unwrap();
+    assert_eq!(fake.calls(), ["systemctl is-enabled -- --root=/tmp/evil"]);
 }
 
 #[test]

@@ -170,9 +170,11 @@ shell  = "/usr/bin/zsh"
 ".zshenv"                        = "home/eli/zshenv"
 ".zprofile"                      = "home/eli/zprofile"
 ".zlogin"                        = "home/eli/zlogin"
+".zlogout"                       = "home/eli/zlogout"
 ".profile"                       = "home/eli/profile"
 ".bashrc"                        = "home/eli/bashrc"
 ".bash_profile"                  = "home/eli/bash_profile"
+".bash_logout"                   = "home/eli/bash_logout"
 ".ssh/authorized_keys"           = "home/eli/authorized_keys"
 ".ssh/authorized_keys2"          = "home/eli/authorized_keys2"
 ".ssh/rc"                        = "home/eli/ssh-rc"
@@ -271,7 +273,7 @@ Each step aborts on failure. Abort deletes the candidate subvolumes and candidat
 - Each `[users.<u>.home]` entry becomes an `fstab` line `/etc/aios/home/<u>/<path> /home/<u>/<path> none bind,ro,nofail,x-systemd.requires-mounts-for=/home 0 0`. `nofail`: a user who deletes or replaces a target can't drop the next boot into emergency mode.
 - systemd creates missing mount points itself: a directory for a directory source, an empty file for a file source (`apply` never touches `/home`; only `bootstrap` creates `@home/<u>`, 0700, owned by the user). Either may leave root-owned parents. `tmpfiles.d` then fixes the owner and mode of the home and of every parent directory of a target (`d /home/<u>/<dir> 0755 <u> <u> -`; `0700` for the home and under `~/.ssh`). It never names a target: after the first boot each is a read-only bind, and a `d` or `f` line on it would fail with EROFS.
 - **Default set** (the §4.1 example), each closing one vector:
-  - Shell startup: `.zshenv`, `.zprofile`, `.zshrc`, `.zlogin` (zsh), and `.profile`, `.bash_profile`, `.bashrc` (sh and bash). The defaults are minimal; `.bash_profile` sources `.profile` and `.bashrc`.
+  - Shell startup and logout: `.zshenv`, `.zprofile`, `.zshrc`, `.zlogin`, `.zlogout` (zsh), and `.profile`, `.bash_profile`, `.bashrc`, `.bash_logout` (sh and bash). The defaults are minimal; `.bash_profile` sources `.profile` and `.bashrc`.
   - SSH: `.ssh/authorized_keys`, `.ssh/authorized_keys2` (both empty) and `.ssh/rc` (comment only; sshd runs it at every login).
   - XDG autostart: `.config/autostart/`.
   - systemd user units: `.config/systemd/user/`, `.config/systemd/user.control/` and `.local/share/systemd/user/`, the per-user unit directories in `~` on the user manager's search path.
@@ -320,7 +322,7 @@ All system interaction goes through `CommandRunner` and `SystemProbe`, so no uni
 **Packaging:**
 - PKGBUILDs live in `packaging/aios-cli/` and `packaging/aios-base/`.
 - `make repo` builds them with `makepkg` (no root) and creates `build/repo/aios-local.db.tar.gz` via `repo-add`.
-- The ISO uses this repo. The installer copies it to `/persist/aios/repo`, and the installed `pacman.conf` points `[aios-local]` at `file:///persist/aios/repo`. In the candidate chroot that's a bind of the same path. `[aios-local]` is the last repo in `pacman.conf`, so a package dropped into it can never shadow a signed one.
+- The ISO uses this repo. The installer copies it to `/persist/aios/repo`, and the installed `pacman.conf` points `[aios-local]` at `file:///persist/aios/repo`. In the candidate chroot that's a bind of the same path. `[aios-local]` is the last repo in `pacman.conf`, so a package dropped into it can never shadow a signed one. `aios-cli` and `aios-base` come only from this unsigned repo, so a runtime root compromise could persist by planting packages in `/persist/aios/repo` until follow-up #2 (repo signing) lands.
 - The repo is unsigned (`SigLevel = Optional TrustAll`) for v0.1, because it's built locally on the same machine. Signing the repo is follow-up #2.
 
 ## 5. Hardening

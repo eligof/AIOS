@@ -81,6 +81,20 @@ pub enum Command {
     },
 }
 
+impl Command {
+    /// Mounts the top level read-write or changes boot state, so it runs in a private mount
+    /// namespace (`Context::private_mounts`).
+    pub fn needs_private_mounts(&self) -> bool {
+        matches!(
+            self,
+            Command::Apply { .. }
+                | Command::Bootstrap { .. }
+                | Command::Gc { .. }
+                | Command::Rollback { .. }
+        )
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum GenCommand {
     /// List generations: id, created, manifest commit, boot state, kernels

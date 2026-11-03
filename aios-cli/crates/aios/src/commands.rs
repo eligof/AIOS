@@ -10,6 +10,9 @@ use std::time::SystemTime;
 pub fn run(command: Command) -> Result<(), Failure> {
     let cx = Context::new()?;
     cx.require_root()?;
+    if command.needs_private_mounts() {
+        cx.private_mounts()?;
+    }
     match command {
         Command::Plan => plan(&cx),
         Command::Apply { yes, upgrade } => apply_cmd(&cx, yes, upgrade),

@@ -26,7 +26,8 @@ aios-gen = { path = "../aios-gen" }
 aios-manifest = { path = "../aios-manifest" }
 clap.workspace = true
 rpassword.workspace = true
-rustix.workspace = true
+# unshare and mount propagation for the private mount namespace (context.rs).
+rustix = { workspace = true, features = ["mount", "thread"] }
 
 [dev-dependencies]
 aios-plan = { path = "../aios-plan" }

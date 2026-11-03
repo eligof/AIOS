@@ -6,6 +6,8 @@ use aios_exec::{
 };
 use aios_gen::{gen_from_cmdline, GenId};
 use aios_manifest::{load, Manifest, ValidationEnv};
+use rustix::mount::{mount_change, MountPropagationFlags};
+use rustix::thread::UnshareFlags;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -95,6 +97,32 @@ impl Context {
         } else {
             Err(Failure::op("aios: must run as root (try: run0 aios <cmd>)"))
         }
+    }
+
+    /// Run the rest of this process in a private mount namespace in which `/` is,
+    /// recursively, a slave of the host's mounts. The mounts aios and its children make
+    /// (the top level, the candidate tree and its binds) are then never seen outside this
+    /// process and go away with it, even when it is killed, while mounts made outside (the
+    /// `/efi` automount) still propagate in. For the commands that mount read-write or
+    /// change boot state (apply, bootstrap, gc, rollback). Call it before any thread starts:
+    /// `unshare` moves only the calling thread, and children inherit its namespace. A no-op
+    /// under `AIOS_FAKE_RUNNER`, which mounts nothing; it needs root, so only the e2e test
+    /// covers it (spec §9).
+    pub fn private_mounts(&self) -> Result<(), Failure> {
+        if self.fake {
+            return Ok(());
+        }
+        let failed = |what: &str, e: rustix::io::Errno| {
+            Failure::op(format!(
+                "aios: cannot make a private mount namespace ({what}): {e}"
+            ))
+        };
+        rustix::thread::unshare(UnshareFlags::NEWNS).map_err(|e| failed("unshare", e))?;
+        mount_change(
+            "/",
+            MountPropagationFlags::SLAVE | MountPropagationFlags::REC,
+        )
+        .map_err(|e| failed("making / a recursive slave", e))
     }
 
     pub fn lock(&self, exclusive: bool) -> Result<Lock, Failure> {

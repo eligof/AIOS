@@ -171,4 +171,22 @@ mod tests {
             assert_eq!(UkiName::parse(name), None, "{name} should not parse");
         }
     }
+
+    #[test]
+    fn zero_left_without_done_is_bad() {
+        let u = UkiName::parse("aios-gen-0042-cachyos+0.efi").unwrap();
+        assert!(u.is_bad());
+    }
+
+    #[test]
+    fn zero_done_counter_is_normalized() {
+        let u = UkiName::parse("aios-gen-0042-cachyos+3-0.efi").unwrap();
+        assert_eq!(u.counter, Some(Counter { left: 3, done: 0 }));
+        assert_eq!(u.file_name(), "aios-gen-0042-cachyos+3.efi");
+    }
+
+    #[test]
+    fn parse_is_case_sensitive() {
+        assert_eq!(UkiName::parse("AIOS-GEN-0042-CACHYOS.EFI"), None);
+    }
 }

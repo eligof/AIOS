@@ -3,6 +3,8 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Generation number. Displayed zero-padded to 4 digits so lexical order equals numeric order.
+///
+/// Prefer `GenId::new`; the tuple field is public for tests and literals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct GenId(pub u32);
 
@@ -10,6 +12,19 @@ pub struct GenId(pub u32);
 pub const MAX_GEN: u32 = 9999;
 
 impl GenId {
+    /// `Some` only for `1..=MAX_GEN`.
+    pub const fn new(n: u32) -> Option<GenId> {
+        if n >= 1 && n <= MAX_GEN {
+            Some(GenId(n))
+        } else {
+            None
+        }
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+
     pub fn usr_subvol(self) -> String {
         format!("@usr-gen-{self}")
     }
@@ -80,16 +95,32 @@ pub fn list_complete<S: AsRef<str>>(subvols: &[S]) -> Vec<GenId> {
 
 /// Next generation id (max + 1), or `None` once `MAX_GEN` is used.
 pub fn next_id(existing: &[GenId]) -> Option<GenId> {
-    let next = existing.iter().map(|g| g.0).max().unwrap_or(0) + 1;
-    (next <= MAX_GEN).then_some(GenId(next))
+    let max = existing.iter().map(|g| g.0).max().unwrap_or(0);
+    if max > MAX_GEN {
+        return None;
+    }
+    GenId::new(max.checked_add(1)?)
 }
 
-/// The generation named by an `aios.gen=NNNN` token on a kernel cmdline.
+/// The generation named by `aios.gen=NNNN` tokens on a kernel cmdline.
+///
+/// The kernel and systemd honour the last occurrence, and manifest `extra_cmdline` is appended
+/// after ours, so duplicates are suspect. Returns `None` if there is no token, if any token
+/// fails to parse, or if the parsed values disagree; `Some` only when every token names the
+/// same generation.
 pub fn gen_from_cmdline(cmdline: &str) -> Option<GenId> {
-    cmdline
+    let mut found: Option<GenId> = None;
+    for value in cmdline
         .split_whitespace()
-        .find_map(|token| token.strip_prefix("aios.gen="))
-        .and_then(|value| value.parse().ok())
+        .filter_map(|token| token.strip_prefix("aios.gen="))
+    {
+        let id: GenId = value.parse().ok()?;
+        match found {
+            Some(prev) if prev != id => return None,
+            _ => found = Some(id),
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -152,6 +183,32 @@ mod tests {
         assert_eq!(next_id(&[]), Some(GenId(1)));
         assert_eq!(next_id(&[GenId(1), GenId(5), GenId(3)]), Some(GenId(6)));
         assert_eq!(next_id(&[GenId(MAX_GEN)]), None);
+    }
+
+    #[test]
+    fn next_id_never_overflows() {
+        assert_eq!(next_id(&[GenId(u32::MAX)]), None);
+        assert_eq!(next_id(&[GenId(1), GenId(MAX_GEN + 1)]), None);
+    }
+
+    #[test]
+    fn new_validates_range() {
+        assert_eq!(GenId::new(0), None);
+        assert_eq!(GenId::new(10000), None);
+        assert_eq!(GenId::new(1), Some(GenId(1)));
+        assert_eq!(GenId::new(9999), Some(GenId(9999)));
+        assert_eq!(GenId(42).get(), 42);
+    }
+
+    #[test]
+    fn duplicate_cmdline_tokens() {
+        assert_eq!(gen_from_cmdline("aios.gen=0001 aios.gen=0002"), None);
+        assert_eq!(
+            gen_from_cmdline("aios.gen=0003 quiet aios.gen=0003"),
+            Some(GenId(3))
+        );
+        assert_eq!(gen_from_cmdline("aios.gen=0003 aios.gen=bad"), None);
+        assert_eq!(gen_from_cmdline("aios.gen=bad aios.gen=0003"), None);
     }
 
     #[test]

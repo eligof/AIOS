@@ -1,7 +1,8 @@
 use crate::GenId;
 
 /// Generations to delete, ascending. Keeps the newest `keep`, every id in `protected`,
-/// and gen-1 (the install baseline).
+/// and gen-1 (the install baseline). Protected ids older than the cutoff survive in addition
+/// to the newest `keep`.
 pub fn gc_select(gens: &[GenId], keep: usize, protected: &[GenId]) -> Vec<GenId> {
     let mut sorted = gens.to_vec();
     sorted.sort_unstable();
@@ -57,5 +58,17 @@ mod tests {
     fn keep_zero_still_respects_protection() {
         let gens = ids(&[1, 2, 3]);
         assert_eq!(gc_select(&gens, 0, &ids(&[3])), ids(&[2]));
+    }
+
+    #[test]
+    fn keep_zero_unprotected_still_keeps_gen_one() {
+        assert_eq!(gc_select(&ids(&[1, 2, 3]), 0, &[]), ids(&[2, 3]));
+        assert!(gc_select(&ids(&[1]), 0, &[]).is_empty());
+    }
+
+    #[test]
+    fn unknown_protected_id_is_ignored() {
+        let gens = ids(&[1, 2, 3, 4]);
+        assert_eq!(gc_select(&gens, 1, &ids(&[99])), ids(&[2, 3]));
     }
 }

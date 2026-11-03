@@ -19,8 +19,9 @@ pub struct GenerationMeta {
 }
 
 impl GenerationMeta {
-    pub fn gen_id(&self) -> GenId {
-        GenId(self.id)
+    /// `None` when `id` is outside `1..=MAX_GEN`.
+    pub fn gen_id(&self) -> Option<GenId> {
+        GenId::new(self.id)
     }
 
     pub fn to_toml(&self) -> String {
@@ -67,6 +68,22 @@ mod tests {
 
     #[test]
     fn gen_id_accessor() {
-        assert_eq!(sample().gen_id(), crate::GenId(7));
+        assert_eq!(sample().gen_id(), Some(crate::GenId(7)));
+    }
+
+    #[test]
+    fn gen_id_zero_is_none() {
+        let mut meta = sample();
+        meta.id = 0;
+        assert_eq!(meta.gen_id(), None);
+    }
+
+    #[test]
+    fn missing_field_is_error() {
+        let text = sample()
+            .to_toml()
+            .replace("manifest_commit = \"3f9c2a1\"\n", "");
+        assert!(!text.contains("manifest_commit"));
+        assert!(GenerationMeta::from_toml(&text).is_err());
     }
 }

@@ -28,7 +28,6 @@ setup() {
     mkdir -p "$FAKE_SYS/mnt/run/archiso"
     echo /dev/sr0 >"$FAKE_SYS/mnt/run/archiso/bootmnt"
     keyring "$FPR"
-    echo 0b2a3c4d-1111-4222-8333-944455556666 >"$FAKE_SYS/luks-uuid"
     setup_mode true
     echo 'allow id 1d6b:0002 serial "0000:00:04.0" name "xHCI Host Controller" with-interface 09:00:00' \
         >"$FAKE_SYS/usbguard-policy"
@@ -61,14 +60,17 @@ EOF
     # Queries answer from $FAKE_SYS. Every other tool is `record`: dry-run must never call it.
     # (So the tests below write files with redirections, not with cp.)
     mkdir -p "$T/bin"
-    for n in lsblk findmnt mountpoint gpg mkpasswd cryptsetup sbctl usbguard curl modprobe; do
+    for n in lsblk findmnt mountpoint gpg mkpasswd sbctl usbguard curl modprobe; do
         ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$T/bin/$n"
     done
-    for n in wipefs sgdisk blockdev udevadm mkfs.fat systemd-cryptenroll mkfs.btrfs btrfs mount \
-        umount git aios bootctl install cp mv chown chmod; do
+    for n in wipefs sgdisk blockdev udevadm mkfs.fat cryptsetup systemd-cryptenroll mkfs.btrfs btrfs \
+        mount umount git aios bootctl install cp mv chown chmod; do
         ln -s "$BATS_TEST_DIRNAME/fakes/record" "$T/bin/$n"
     done
     PATH="$T/bin:$PATH"
+    # The golden quotes paths the way the installer prints them.
+    # shellcheck source=/dev/null
+    source "$ROOT/installer/lib/common.sh"
 }
 
 # blk NAME TYPE SIZE RO MOUNTPOINTS: a fake block device /dev/NAME with nothing on it, its
@@ -107,18 +109,20 @@ install_dry() {
     LOG=$stderr
 }
 
-# The commands of an unattended install on a v3 CPU in Setup Mode, in order.
+# golden [DISK PART1 PART2]: the commands of an unattended install (/dev/vda by default) on
+# a v3 CPU in Setup Mode, in order. golden_auto: the same for --auto, which reboots at the end.
 golden() {
+    local disk=${1:-/dev/vda} p1=${2:-/dev/vda1} p2=${3:-/dev/vda2}
     cat <<EOF
-wipefs -a /dev/vda
-sgdisk --zap-all /dev/vda
-sgdisk -n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309 /dev/vda
-blockdev --rereadpt /dev/vda
+wipefs -a $disk
+sgdisk --zap-all $disk
+sgdisk -n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309 $disk
+blockdev --rereadpt $disk
 udevadm settle
-mkfs.fat -F32 -n EFI /dev/vda1
-cryptsetup luksFormat --type luks2 --pbkdf argon2id --batch-mode --key-file - /dev/vda2 <secret
-cryptsetup open --key-file - /dev/vda2 aios <secret
-systemd-cryptenroll --unlock-key-file=/dev/stdin --recovery-key /dev/vda2 <secret
+mkfs.fat -F32 -n EFI $p1
+cryptsetup luksFormat --type luks2 --pbkdf argon2id --batch-mode --key-file - $p2 <secret
+cryptsetup open --key-file - $p2 aios <secret
+systemd-cryptenroll --unlock-key-file=/dev/stdin --recovery-key $p2 <secret
 mkfs.btrfs -L aios /dev/mapper/aios
 mkdir -p /mnt/aios-top
 mount -t btrfs -o subvolid=5,compress=zstd /dev/mapper/aios /mnt/aios-top
@@ -149,7 +153,7 @@ btrfs subvolume create /mnt/aios-top/@persist
 btrfs subvolume create /mnt/aios-top/@home
 btrfs subvolume create /mnt/aios-top/@log
 install -d -m 0755 /mnt/aios-top/@persist/aios
-cp -a $DEFAULTS /mnt/aios-top/@persist/aios/config
+cp -a $(quote_cmd "$DEFAULTS") /mnt/aios-top/@persist/aios/config
 chown -R 0:0 /mnt/aios-top/@persist/aios/config
 chmod -R u=rwX,go=rX /mnt/aios-top/@persist/aios/config
 mv /mnt/aios-top/@persist/aios/config/home/@USERNAME@ /mnt/aios-top/@persist/aios/config/home/tester
@@ -159,27 +163,31 @@ git -C /mnt/aios-top/@persist/aios/config add -A
 git -C /mnt/aios-top/@persist/aios/config -c user.name=aios -c user.email=aios@localhost commit -q -m 'aios: initial manifest'
 install -d -m 0700 /mnt/aios-top/@persist/aios/secrets /mnt/aios-top/@persist/aios/secrets/passwd
 write /mnt/aios-top/@persist/aios/secrets/passwd/tester 0600
-cp -a $LIVE_REPO /mnt/aios-top/@persist/aios/repo
-mkdir -p /mnt/aios-esp
-mount -o umask=0077 /dev/vda1 /mnt/aios-esp
+cp -a $(quote_cmd "$LIVE_REPO") /mnt/aios-top/@persist/aios/repo
+mkdir -p /efi
+mount -o umask=0077 $p1 /efi
 install -d -m 0700 /mnt/aios-top/@persist/var/lib/sbctl
 mkdir -p /var/lib/sbctl
 mount --bind /mnt/aios-top/@persist/var/lib/sbctl /var/lib/sbctl
 sbctl create-keys
-aios bootstrap --target /mnt/aios-top --esp /mnt/aios-esp --manifest /mnt/aios-top/@persist/aios/config/manifest.toml --luks-uuid 0b2a3c4d-1111-4222-8333-944455556666
-bootctl install --esp-path=/mnt/aios-esp
-write /mnt/aios-esp/loader/loader.conf
-sbctl sign -s /mnt/aios-esp/EFI/systemd/systemd-bootx64.efi
-sbctl sign -s /mnt/aios-esp/EFI/BOOT/BOOTX64.EFI
+aios bootstrap --target /mnt/aios-top --esp /efi --manifest /mnt/aios-top/@persist/aios/config/manifest.toml --luks-uuid 00000000-0000-0000-0000-000000000000
+bootctl install --esp-path=/efi
+write /efi/loader/loader.conf
+sbctl sign -s /efi/EFI/systemd/systemd-bootx64.efi
+sbctl sign -s /efi/EFI/BOOT/BOOTX64.EFI
 sbctl enroll-keys --microsoft
 install -d -m 0700 /mnt/aios-top/@persist/var/lib/usbguard
 write /mnt/aios-top/@persist/var/lib/usbguard/rules.conf 0600
 umount -R /var/lib/sbctl
-umount -R /mnt/aios-esp
+umount -R /efi
 umount -R /mnt/aios-top
 cryptsetup close aios
-systemctl reboot
 EOF
+}
+
+golden_auto() {
+    golden
+    echo systemctl reboot
 }
 
 @test "an unattended install runs the 13 steps' commands in order" {
@@ -187,6 +195,60 @@ EOF
 
     [ "$status" -eq 0 ]
     diff <(golden) - <<<"$DRY"
+    [[ "$LOG" != *"Press Enter"* ]]
+    [[ "$LOG" == *"remove the install medium, then reboot into AIOS: systemctl reboot"* ]]
+}
+
+@test "an NVMe disk gets partitions p1 and p2" {
+    blk nvme0n1 disk $((512 * 1024 * 1024 * 1024)) 0 ""
+    sed -i 's|^DISK=.*|DISK=/dev/nvme0n1|' "$T/install.conf"
+
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 0 ]
+    diff <(golden /dev/nvme0n1 /dev/nvme0n1p1 /dev/nvme0n1p2) - <<<"$DRY"
+}
+
+@test "paths with spaces are quoted in the commands" {
+    export AIOS_DEFAULTS="$T/default manifest" AIOS_LIVE_REPO="$T/live repo"
+    command -p cp -r "$ROOT/manifest" "$AIOS_DEFAULTS"
+    command -p cp -r "$T/repo" "$AIOS_LIVE_REPO"
+    DEFAULTS=$AIOS_DEFAULTS LIVE_REPO=$AIOS_LIVE_REPO
+
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 0 ]
+    grep -qxF "cp -a '$T/default manifest' /mnt/aios-top/@persist/aios/config" <<<"$DRY"
+    diff <(golden) - <<<"$DRY"
+}
+
+@test "the ESP is mounted at /efi, so sbctl saves the paths the installed system uses" {
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 0 ]
+    grep -qx 'mount -o umask=0077 /dev/vda1 /efi' <<<"$DRY"
+    grep -qx 'sbctl sign -s /efi/EFI/systemd/systemd-bootx64.efi' <<<"$DRY"
+    grep -q '^aios bootstrap .* --esp /efi ' <<<"$DRY"
+    grep -qx 'bootctl install --esp-path=/efi' <<<"$DRY"
+    [ "$(grep -c aios-esp <<<"$DRY")" -eq 0 ]
+}
+
+@test "on a terminal the installer waits for Enter after the recovery key; only --auto reboots" {
+    command -v script >/dev/null || skip "script (util-linux) is not installed"
+
+    run script -qec "$(printf '%q ' "$SCRIPT" --config "$T/install.conf")" /dev/null <<<""
+    out=$(tr -d '\r' <<<"$output")
+    [ "$status" -eq 0 ]
+    [[ "$out" == *"recovery key (shown only now"*"DRYRUN systemd-cryptenroll"*"Press Enter after writing down the recovery key: "*"DRYRUN mkfs.btrfs"* ]]
+    [[ "$out" != *"DRYRUN systemctl reboot"* ]]
+
+    mkdir -p "$AIOS_FWCFG_DIR/by_name/opt/aios/install.conf"
+    cat "$T/install.conf" >"$AIOS_FWCFG_DIR/by_name/opt/aios/install.conf/raw"
+    run script -qec "$(printf '%q ' "$SCRIPT" --auto)" /dev/null <<<""
+    out=$(tr -d '\r' <<<"$output")
+    [ "$status" -eq 0 ]
+    [[ "$out" != *"Press Enter"* ]]
+    [[ "$out" == *"rebooting into AIOS"*"DRYRUN systemctl reboot"* ]]
 }
 
 @test "dry-run mode only runs read-only queries" {
@@ -195,7 +257,7 @@ EOF
     [ "$status" -eq 0 ]
     diff - "$CALLS" <<'EOF'
 mountpoint -q -- /mnt/aios-top
-mountpoint -q -- /mnt/aios-esp
+mountpoint -q -- /efi
 mountpoint -q -- /var/lib/sbctl
 lsblk -ndro TYPE /dev/vda
 findmnt -nro SOURCE /run/archiso/bootmnt
@@ -212,7 +274,6 @@ gpg --homedir /etc/pacman.d/gnupg --batch --no-permission-warning --with-colons 
 mkpasswd -m yescrypt -s
 usbguard generate-policy
 lsblk -o NAME,SIZE,FSTYPE,LABEL,MODEL /dev/vda
-cryptsetup luksUUID /dev/vda2
 sbctl status --json
 findmnt -rno TARGET -S /dev/mapper/aios
 EOF
@@ -264,7 +325,7 @@ EOF
     [ "$status" -eq 1 ]
     [[ "$LOG" == *"step 9 (bootstrap) failed (exit 1)"* ]]
     [ "$(sed -n '/^aios bootstrap /,$p' <<<"$DRY" | tail -n +2)" = "$(printf '%s\n' \
-        'umount -R /var/lib/sbctl' 'umount -R /mnt/aios-esp' 'umount -R /mnt/aios-top' 'cryptsetup close aios')" ]
+        'umount -R /var/lib/sbctl' 'umount -R /efi' 'umount -R /mnt/aios-top' 'cryptsetup close aios')" ]
 }
 
 @test "the cleanup also unmounts what else is mounted from the mapping, deepest first" {
@@ -475,7 +536,8 @@ EOF
     install_dry --auto
     [ "$status" -eq 0 ]
     [[ "$LOG" == *"unattended install from $AIOS_FWCFG_DIR/by_name/opt/aios/install.conf/raw"* ]]
-    diff <(golden) - <<<"$DRY"
+    [[ "$LOG" == *"rebooting into AIOS"* ]]
+    diff <(golden_auto) - <<<"$DRY"
 }
 
 @test "without arguments the fw_cfg config is used when present" {
@@ -494,7 +556,7 @@ EOF
     run --separate-stderr "$SCRIPT" <<<"${answers}/dev/vda"
     [ "$status" -eq 0 ]
     [[ "$stderr" == *"/dev/vda: model QEMU HARDDISK, serial aios-e2e-disk, 20 GiB"*"Everything on /dev/vda will be erased. Type /dev/vda to continue: "* ]]
-    diff <(golden | sed '$d') <(grep '^DRYRUN ' <<<"$output" | sed 's/^DRYRUN //')
+    diff <(golden) <(grep '^DRYRUN ' <<<"$output" | sed 's/^DRYRUN //')
 
     run --separate-stderr "$SCRIPT" <<<"${answers}yes"
     [ "$status" -eq 1 ]

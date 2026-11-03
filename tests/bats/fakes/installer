@@ -14,7 +14,6 @@
 #   mkpasswd   ...                 reads the password from stdin, appends it to
 #                                  $FAKE_SYS/mkpasswd.stdin, prints a fixed yescrypt hash
 #                                  (or exits with $FAKE_SYS/mkpasswd.rc if that exists)
-#   cryptsetup luksUUID DEV        prints $FAKE_SYS/luks-uuid
 #   sbctl      status --json       prints $FAKE_SYS/sbctl-status.json
 #   usbguard   generate-policy     prints $FAKE_SYS/usbguard-policy
 #   curl       ... URL             exit 22 (an HTTP error) if URL is a line of
@@ -62,10 +61,6 @@ case "$name" in
         cat >>"$FAKE_SYS/mkpasswd.stdin"
         [ ! -f "$FAKE_SYS/mkpasswd.rc" ] || exit "$(cat "$FAKE_SYS/mkpasswd.rc")"
         echo "\$y\$j9T\$fakesalt\$fakehashfakehashfakehashfakehashfake0"
-        ;;
-    cryptsetup)
-        [ "$1" = luksUUID ] || { echo "fake cryptsetup: unsupported: $*" >&2; exit 2; }
-        cat "$FAKE_SYS/luks-uuid"
         ;;
     sbctl)
         [ "$*" = "status --json" ] || { echo "fake sbctl: unsupported: $*" >&2; exit 2; }

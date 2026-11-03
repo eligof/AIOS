@@ -4,12 +4,14 @@
 #   aios-install                interactive, unless the VM has a fw_cfg install config
 #   aios-install --config FILE  unattended, from a KEY=value file (lib/config.sh)
 #   aios-install --auto         the live ISO's aios-install-auto.service: unattended from the
-#                               fw_cfg config if the VM has one, otherwise exit 0
+#                               fw_cfg config if the VM has one (then reboots), otherwise exit 0
 #   aios-install --dry-run ...  print the commands that would change the system, run none
 #
 # Steps (spec §6.2): 1 preflight, 2 confirm, 3 partition, 4 encrypt, 5 btrfs, 6 manifest,
 # 7 esp, 8 secureboot-keys, 9 bootstrap, 10 bootloader, 11 enroll, 12 usbguard, 13 finish.
-# A failing step unmounts everything and closes LUKS (lib/cleanup.sh).
+# A failing step unmounts everything and closes LUKS (lib/cleanup.sh). On a terminal (not
+# with --auto) the installer waits for Enter once the recovery key is shown; only --auto
+# reboots at the end.
 #
 # Environment overrides (tests only): AIOS_INSTALL_LIB (default /usr/local/lib/aios-install),
 # AIOS_EFI_DIR (/sys/firmware/efi), AIOS_DEFAULTS (/usr/share/aios/defaults/manifest),
@@ -55,7 +57,9 @@ LIB=${AIOS_INSTALL_LIB:-/usr/local/lib/aios-install}
 DEFAULTS=${AIOS_DEFAULTS:-/usr/share/aios/defaults/manifest}
 LIVE_REPO=${AIOS_LIVE_REPO:-/opt/aios-repo}
 TOP=/mnt/aios-top
-ESP=/mnt/aios-esp
+# The ESP is mounted where the installed system mounts it, so the paths `sbctl sign -s` saves
+# in the sbctl database (kept in @persist) are also right on the installed system.
+ESP=/efi
 TOOLS=(wipefs sgdisk blockdev udevadm mkfs.fat cryptsetup systemd-cryptenroll mkfs.btrfs btrfs
     mount umount mountpoint lsblk findmnt git mkpasswd gpg sbctl aios bootctl usbguard curl install
     cp mv chown chmod)
@@ -225,7 +229,16 @@ main() {
     run_stdin "${CFG[LUKS_PASSPHRASE]}" systemd-cryptenroll --unlock-key-file=/dev/stdin \
         --recovery-key "$ROOT_PART"
     unset 'CFG[LUKS_PASSPHRASE]'
-    LUKS_UUID=$(cryptsetup luksUUID "$ROOT_PART")
+    if ((!auto)) && [[ -t 0 ]]; then
+        printf 'Press Enter after writing down the recovery key: ' >&2
+        IFS= read -r _ || true
+    fi
+    if dry_run; then
+        # Nothing was formatted, so there is no UUID to read.
+        LUKS_UUID=00000000-0000-0000-0000-000000000000
+    else
+        LUKS_UUID=$(cryptsetup luksUUID "$ROOT_PART")
+    fi
     [[ $LUKS_UUID =~ ^[0-9a-f-]{36}$ ]] || die "unexpected LUKS UUID ${LUKS_UUID@Q}"
 
     step 5 btrfs
@@ -304,9 +317,11 @@ main() {
     cleanup
     summary
     [[ -z $config_file ]] || log "delete $config_file now: it holds the passwords in clear text"
-    if ((unattended)); then
+    if ((auto)); then
         log "rebooting into AIOS"
         run_cmd systemctl reboot
+    else
+        log "remove the install medium, then reboot into AIOS: systemctl reboot"
     fi
 }
 

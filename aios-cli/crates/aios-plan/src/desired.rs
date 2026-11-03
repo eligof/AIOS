@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Lists every `/etc` path aios wrote into a generation, itself included.
 pub const MANAGED_FILES: &str = "/etc/aios/managed-files";
@@ -20,6 +20,10 @@ pub struct Inputs<'a> {
     pub manifest: &'a Manifest,
     /// Root of the manifest repo (holds `files/` and `home/`).
     pub repo_root: &'a Path,
+    /// Machine facts for the renderers. `ctx.gen` is the generation the files are rendered
+    /// for, and `/etc/fstab` and `/etc/kernel/cmdline` embed it: pass the booted generation
+    /// for `aios plan` and N+1 for `aios apply`. Planning with any other value shows both
+    /// files as Modify even when nothing changed.
     pub ctx: &'a RenderCtx,
     /// User name -> password hash, trailing newline trimmed.
     pub hashes: &'a BTreeMap<String, String>,
@@ -31,8 +35,22 @@ pub struct Inputs<'a> {
 pub enum PlanError {
     Users(UserDbError),
     Probe(ProbeError),
-    Io { path: String, message: String },
-    BadMode { path: String, mode: String },
+    Io {
+        path: String,
+        message: String,
+    },
+    BadMode {
+        path: String,
+        mode: String,
+    },
+    /// A home source directory contains a symlink (at `path`).
+    SymlinkInSource {
+        path: String,
+    },
+    /// A `[files]` or home source resolves to somewhere outside the manifest repo.
+    OutsideRepo {
+        path: String,
+    },
 }
 
 impl fmt::Display for PlanError {
@@ -44,6 +62,15 @@ impl fmt::Display for PlanError {
             PlanError::BadMode { path, mode } => {
                 write!(f, "file {path:?}: invalid mode {mode:?}")
             }
+            PlanError::SymlinkInSource { path } => {
+                write!(
+                    f,
+                    "{path}: symlinks are not allowed in a home source directory"
+                )
+            }
+            PlanError::OutsideRepo { path } => {
+                write!(f, "{path}: resolves outside the manifest repo")
+            }
         }
     }
 }
@@ -53,7 +80,10 @@ impl std::error::Error for PlanError {
         match self {
             PlanError::Users(e) => Some(e),
             PlanError::Probe(e) => Some(e),
-            PlanError::Io { .. } | PlanError::BadMode { .. } => None,
+            PlanError::Io { .. }
+            | PlanError::BadMode { .. }
+            | PlanError::SymlinkInSource { .. }
+            | PlanError::OutsideRepo { .. } => None,
         }
     }
 }
@@ -74,7 +104,13 @@ impl From<ProbeError> for PlanError {
 ///
 /// Later sources win on a path clash: `[files]`, then generated files, then account files,
 /// then home bind sources, then `managed-files`. The account files merge the declared users
-/// into the probe's current `passwd`/`group`/`shadow`/`gshadow` (absent = empty).
+/// into the probe's current `passwd`/`group`/`shadow`/`gshadow` (absent = empty, though a
+/// passwd without root fails).
+///
+/// Every `[files]` and home source must resolve inside the repo ([`PlanError::OutsideRepo`]),
+/// and a home source directory may not contain symlinks ([`PlanError::SymlinkInSource`]) or
+/// file names that aren't UTF-8 ([`PlanError::Io`]). Validation checks the first already;
+/// this is the second line of defence.
 pub fn desired_etc(
     inputs: &Inputs,
     probe: &dyn SystemProbe,
@@ -87,7 +123,7 @@ pub fn desired_etc(
         let value = match (&entry.source, &entry.symlink) {
             (_, Some(target)) => EtcEntry::Symlink(target.clone()),
             (Some(source), None) => EtcEntry::File {
-                content: read(&inputs.repo_root.join(source))?,
+                content: read(&in_repo(inputs.repo_root, source)?)?,
                 mode: parse_mode(path, entry.mode_or_default())?,
             },
             (None, None) => {
@@ -138,7 +174,7 @@ pub fn desired_etc(
     }
 
     for bind in home_binds(m) {
-        let source = inputs.repo_root.join(&bind.repo_source);
+        let source = in_repo(inputs.repo_root, &bind.repo_source)?;
         if bind.is_dir {
             for (rel, entry) in walk(&source)? {
                 out.insert(format!("{}/{rel}", bind.bind_source), entry);
@@ -172,6 +208,20 @@ fn io_error(path: &Path, e: impl fmt::Display) -> PlanError {
     }
 }
 
+/// `repo_root/rel` with every symlink resolved, which must lie inside the resolved `repo_root`.
+/// Reading through the resolved path narrows, but does not close, the window for a symlink swap.
+fn in_repo(repo_root: &Path, rel: &str) -> Result<PathBuf, PlanError> {
+    let root = fs::canonicalize(repo_root).map_err(|e| io_error(repo_root, e))?;
+    let path = repo_root.join(rel);
+    let resolved = fs::canonicalize(&path).map_err(|e| io_error(&path, e))?;
+    if !resolved.starts_with(&root) {
+        return Err(PlanError::OutsideRepo {
+            path: path.display().to_string(),
+        });
+    }
+    Ok(resolved)
+}
+
 fn read(path: &Path) -> Result<Vec<u8>, PlanError> {
     fs::read(path).map_err(|e| io_error(path, e))
 }
@@ -183,6 +233,7 @@ fn repo_file(path: &Path) -> Result<EtcEntry, PlanError> {
 }
 
 /// Every regular file below `dir` as (`/`-separated relative path, entry), sorted by path.
+/// A symlink or a non-UTF-8 name anywhere below `dir` is an error.
 fn walk(dir: &Path) -> Result<Vec<(String, EtcEntry)>, PlanError> {
     let mut out = Vec::new();
     walk_into(dir, "", &mut out)?;
@@ -195,15 +246,22 @@ fn walk_into(dir: &Path, prefix: &str, out: &mut Vec<(String, EtcEntry)>) -> Res
         .map_err(|e| io_error(dir, e))?;
     entries.sort_by_key(|e| e.file_name());
     for entry in entries {
-        let name = entry.file_name().to_string_lossy().into_owned();
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| io_error(&path, "file name is not valid UTF-8"))?;
         let rel = if prefix.is_empty() {
             name
         } else {
             format!("{prefix}/{name}")
         };
-        let path = entry.path();
         let kind = entry.file_type().map_err(|e| io_error(&path, e))?;
-        if kind.is_dir() {
+        if kind.is_symlink() {
+            return Err(PlanError::SymlinkInSource {
+                path: path.display().to_string(),
+            });
+        } else if kind.is_dir() {
             walk_into(&path, &rel, out)?;
         } else if kind.is_file() {
             out.push((rel, repo_file(&path)?));

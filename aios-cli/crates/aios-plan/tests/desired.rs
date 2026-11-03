@@ -2,7 +2,12 @@ mod common;
 
 use aios_plan::{desired_etc, EtcEntry, PlanError, MANAGED_FILES};
 use aios_render::{cmdline, fstab, managed_list, UserDbError};
-use common::{fixture, fixture_with, text_file, FakeProbe, ELI_HASH, MANIFEST};
+use common::{fixture, fixture_with, text_file, write, FakeProbe, ELI_HASH, MANIFEST};
+use std::ffi::OsStr;
+use std::fs;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::symlink;
+use tempfile::TempDir;
 
 #[test]
 fn desired_has_every_managed_path() {
@@ -198,4 +203,148 @@ fn account_parse_errors_propagate() {
             line: 1
         })
     );
+}
+
+fn expect_symlink_error(err: PlanError, suffix: &str) {
+    match &err {
+        PlanError::SymlinkInSource { path } => {
+            assert!(path.ends_with(suffix), "got {path}");
+            assert_eq!(
+                err.to_string(),
+                format!("{path}: symlinks are not allowed in a home source directory")
+            );
+        }
+        other => panic!("expected PlanError::SymlinkInSource, got {other:?}"),
+    }
+}
+
+#[test]
+fn symlink_to_a_file_in_a_home_source_directory_is_an_error() {
+    let fx = fixture();
+    symlink("hello", fx.repo.path().join("home/eli/bin/alias")).unwrap();
+    let err = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap_err();
+    expect_symlink_error(err, "home/eli/bin/alias");
+}
+
+#[test]
+fn symlink_deep_in_a_home_source_directory_is_an_error() {
+    let fx = fixture();
+    symlink(
+        "/etc/shadow",
+        fx.repo.path().join("home/eli/bin/lib/shadow"),
+    )
+    .unwrap();
+    let err = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap_err();
+    expect_symlink_error(err, "home/eli/bin/lib/shadow");
+}
+
+#[test]
+fn symlinked_subdirectory_in_a_home_source_directory_is_an_error() {
+    let fx = fixture();
+    symlink("lib", fx.repo.path().join("home/eli/bin/more")).unwrap();
+    let err = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap_err();
+    expect_symlink_error(err, "home/eli/bin/more");
+}
+
+/// Replace `rel` in the fixture repo with a symlink to a fresh file or directory outside it.
+fn point_outside(fx: &common::Fixture, rel: &str, dir: bool) -> TempDir {
+    let outside = TempDir::new().unwrap();
+    let target = outside.path().join("target");
+    if dir {
+        write(outside.path(), "target/secret", "secret\n", 0o644);
+    } else {
+        write(outside.path(), "target", "secret\n", 0o644);
+    }
+    let link = fx.repo.path().join(rel);
+    if dir {
+        fs::remove_dir_all(&link).unwrap();
+    } else {
+        fs::remove_file(&link).unwrap();
+    }
+    symlink(&target, &link).unwrap();
+    outside
+}
+
+fn expect_outside_repo(err: PlanError, suffix: &str) {
+    match &err {
+        PlanError::OutsideRepo { path } => {
+            assert!(path.ends_with(suffix), "got {path}");
+            assert_eq!(
+                err.to_string(),
+                format!("{path}: resolves outside the manifest repo")
+            );
+        }
+        other => panic!("expected PlanError::OutsideRepo, got {other:?}"),
+    }
+}
+
+#[test]
+fn files_source_resolving_outside_the_repo_is_an_error() {
+    let fx = fixture();
+    let _outside = point_outside(&fx, "files/nftables.conf", false);
+    let err = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap_err();
+    expect_outside_repo(err, "files/nftables.conf");
+}
+
+#[test]
+fn home_file_source_resolving_outside_the_repo_is_an_error() {
+    let fx = fixture();
+    let _outside = point_outside(&fx, "home/eli/zshrc", false);
+    let err = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap_err();
+    expect_outside_repo(err, "home/eli/zshrc");
+}
+
+#[test]
+fn home_directory_source_resolving_outside_the_repo_is_an_error() {
+    let fx = fixture();
+    let _outside = point_outside(&fx, "home/eli/bin", true);
+    let err = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap_err();
+    expect_outside_repo(err, "home/eli/bin");
+}
+
+#[test]
+fn absolute_or_parent_sources_resolve_outside_the_repo() {
+    let outside = TempDir::new().unwrap();
+    write(outside.path(), "x.conf", "secret\n", 0o644);
+    let abs = outside.path().join("x.conf").display().to_string();
+    let fx = fixture_with(&MANIFEST.replace("files/nftables.conf", &abs));
+    let err = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap_err();
+    expect_outside_repo(err, "x.conf");
+
+    let fx = fixture();
+    let rel = format!(
+        "../{}/x.conf",
+        outside.path().file_name().unwrap().to_str().unwrap()
+    );
+    let fx = fixture_with_repo_rel(fx, &rel);
+    let err = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap_err();
+    expect_outside_repo(err, "x.conf");
+}
+
+/// The fixture with its `[files]` source replaced by `rel`, keeping the same repo tempdir.
+fn fixture_with_repo_rel(mut fx: common::Fixture, rel: &str) -> common::Fixture {
+    fx.manifest = aios_manifest::parse(&MANIFEST.replace("files/nftables.conf", rel)).unwrap();
+    fx
+}
+
+#[test]
+fn symlink_inside_the_repo_is_followed_for_file_sources() {
+    let fx = fixture_with(&MANIFEST.replace("files/nftables.conf", "files/alias"));
+    symlink("nftables.conf", fx.repo.path().join("files/alias")).unwrap();
+    let d = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap();
+    assert_eq!(d["/etc/nftables.conf"], text_file("flush ruleset\n", 0o600));
+}
+
+#[test]
+fn non_utf8_file_name_in_a_home_source_directory_is_an_io_error() {
+    let fx = fixture();
+    let name = OsStr::from_bytes(b"bad\xffname");
+    fs::write(fx.repo.path().join("home/eli/bin").join(name), "x").unwrap();
+    match desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap_err() {
+        PlanError::Io { path, message } => {
+            assert!(path.contains("home/eli/bin/bad"), "got {path}");
+            assert!(message.contains("UTF-8"), "got {message}");
+        }
+        other => panic!("expected PlanError::Io, got {other:?}"),
+    }
 }

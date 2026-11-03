@@ -1,7 +1,8 @@
 mod common;
 
 use aios_plan::{
-    build_plan, ChangeKind, EtcChange, Plan, PlanError, ProbeError, UnitChange, UnitState,
+    build_plan, ChangeKind, EtcChange, EtcEntry, Plan, PlanError, ProbeError, UnitChange,
+    UnitState, MANAGED_FILES,
 };
 use common::{fixture, fixture_with, text_file, FakeProbe, MANIFEST};
 use std::collections::BTreeMap;
@@ -275,4 +276,21 @@ fn probe_errors_propagate() {
         build_plan(&fx.inputs(), &probe).unwrap_err(),
         PlanError::Probe(ProbeError("pacman exited 1".to_string()))
     );
+}
+
+#[test]
+fn non_utf8_managed_files_is_an_io_error() {
+    let fx = fixture();
+    let mut probe = FakeProbe::synced(&fx);
+    probe.etc.insert(
+        MANAGED_FILES.to_string(),
+        EtcEntry::File {
+            content: b"/etc/fstab\n/etc/bad\xff\n".to_vec(),
+            mode: 0o644,
+        },
+    );
+    match build_plan(&fx.inputs(), &probe).unwrap_err() {
+        PlanError::Io { path, .. } => assert_eq!(path, MANAGED_FILES),
+        other => panic!("expected PlanError::Io, got {other:?}"),
+    }
 }

@@ -89,7 +89,11 @@ pub fn build_plan(inputs: &Inputs, probe: &dyn SystemProbe) -> Result<Plan, Plan
         }
     }
     if let Some(EtcEntry::File { content, .. }) = probe.etc_entry(MANAGED_FILES)? {
-        for path in parse_managed_list(&String::from_utf8_lossy(&content)) {
+        let text = String::from_utf8(content).map_err(|e| PlanError::Io {
+            path: MANAGED_FILES.to_string(),
+            message: e.to_string(),
+        })?;
+        for path in parse_managed_list(&text) {
             if !desired.contains_key(&path) {
                 etc_changes.push(EtcChange {
                     path,

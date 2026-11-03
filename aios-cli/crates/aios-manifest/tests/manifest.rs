@@ -12,7 +12,9 @@ fn parses_valid_manifest() {
     assert_eq!(m.kernel.lockdown, Lockdown::Integrity);
     assert_eq!(m.files["/etc/nftables.conf"].mode_or_default(), "0600");
     assert_eq!(
-        m.files["/etc/pacman.d/hooks/90-mkinitcpio-install.hook"].symlink.as_deref(),
+        m.files["/etc/pacman.d/hooks/90-mkinitcpio-install.hook"]
+            .symlink
+            .as_deref(),
         Some("/dev/null")
     );
     assert_eq!(m.users["eli"].uid, 1000);
@@ -57,7 +59,15 @@ fn file_entry_defaults() {
 fn package_set_is_core_plus_kernels_plus_install_sorted_dedup() {
     let m = parse(VALID).unwrap();
     let set = m.package_set();
-    for p in ["base", "aios-cli", "aios-base", "linux-cachyos", "linux-cachyos-lts", "zsh", "git"] {
+    for p in [
+        "base",
+        "aios-cli",
+        "aios-base",
+        "linux-cachyos",
+        "linux-cachyos-lts",
+        "zsh",
+        "git",
+    ] {
         assert!(set.contains(&p.to_string()), "missing {p}");
     }
     let mut sorted = set.clone();
@@ -71,15 +81,29 @@ fn package_set_is_core_plus_kernels_plus_install_sorted_dedup() {
 fn unknown_key_is_parse_error_with_location() {
     let raw = VALID.replace("keymap = \"us\"", "keymap = \"us\"\nkeymapp = \"de\"");
     let err = parse(&raw).unwrap_err();
-    assert_eq!(err.line, 6, "error should point at the unknown key line, got {err}");
-    assert!(err.message.contains("unknown field"), "got: {}", err.message);
-    assert!(err.to_string().starts_with("manifest.toml:6:"), "got: {err}");
+    assert_eq!(
+        err.line, 6,
+        "error should point at the unknown key line, got {err}"
+    );
+    assert!(
+        err.message.contains("unknown field"),
+        "got: {}",
+        err.message
+    );
+    assert!(
+        err.to_string().starts_with("manifest.toml:6:"),
+        "got: {err}"
+    );
 }
 
 #[test]
 fn missing_required_field_is_error() {
     let err = parse("[system]\nhostname = \"h\"\n").unwrap_err();
-    assert!(err.message.contains("missing field"), "got: {}", err.message);
+    assert!(
+        err.message.contains("missing field"),
+        "got: {}",
+        err.message
+    );
 }
 
 #[test]

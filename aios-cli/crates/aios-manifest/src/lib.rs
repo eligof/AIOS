@@ -2,11 +2,14 @@
 
 mod locate;
 mod model;
+mod validate;
 
 pub use locate::{locate, offset_to_line_col};
 pub use model::*;
+pub use validate::{validate, ValidationEnv};
 
 use std::fmt;
+use std::path::Path;
 
 /// A manifest problem with a 1-based location in `manifest.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,7 +21,11 @@ pub struct ManifestError {
 
 impl fmt::Display for ManifestError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "manifest.toml:{}:{}: {}", self.line, self.col, self.message)
+        write!(
+            f,
+            "manifest.toml:{}:{}: {}",
+            self.line, self.col, self.message
+        )
     }
 }
 
@@ -37,4 +44,22 @@ pub fn parse(raw: &str) -> Result<Manifest, ManifestError> {
             message: e.message().to_string(),
         }
     })
+}
+
+/// Read, parse and validate a manifest file. Returns every problem found.
+pub fn load(path: &Path, env: &ValidationEnv) -> Result<Manifest, Vec<ManifestError>> {
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        vec![ManifestError {
+            line: 1,
+            col: 1,
+            message: format!("cannot read {}: {e}", path.display()),
+        }]
+    })?;
+    let manifest = parse(&raw).map_err(|e| vec![e])?;
+    let errors = validate(&manifest, &raw, env);
+    if errors.is_empty() {
+        Ok(manifest)
+    } else {
+        Err(errors)
+    }
 }

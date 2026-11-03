@@ -19,7 +19,10 @@ pub use error::ExecError;
 pub use facts::{read_hashes, MachineFacts};
 pub use layout::Layout;
 pub use probe::{parse_unit_state, read_etc_entry, DirProbe};
-pub use runner::{run_ok, status_error, Cmd, CommandRunner, FakeRunner, Output, RealRunner};
+pub use runner::{
+    run_ok, status_error, Cmd, CommandRunner, Effect, FakeRunner, Output, RealRunner,
+    SUBVOLUME_ROOT_INO,
+};
 pub use steps::{Step, StepError};
 pub use sys::{
     days_since_epoch, luks_uuid_from_cmdline, parse_df_avail, parse_efivar_utf16, rfc3339_utc,

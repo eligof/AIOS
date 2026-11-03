@@ -1,0 +1,23 @@
+[package]
+name = "aios"
+description = "The AIOS command line: plan, apply, roll back and collect generations"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "aios"
+path = "src/main.rs"
+
+[dependencies]
+aios-exec = { path = "../aios-exec" }
+aios-gen = { path = "../aios-gen" }
+aios-manifest = { path = "../aios-manifest" }
+clap.workspace = true
+rpassword.workspace = true
+rustix.workspace = true
+
+[dev-dependencies]
+rustix.workspace = true
+tempfile.workspace = true

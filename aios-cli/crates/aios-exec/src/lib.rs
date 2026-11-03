@@ -7,6 +7,7 @@ mod error;
 pub mod etcfs;
 mod facts;
 mod layout;
+pub mod ops;
 mod probe;
 mod runner;
 mod steps;

@@ -256,7 +256,7 @@ Each step aborts on failure (or panic). Abort unmounts and deletes the candidate
    - `ukify build --linux=/usr/lib/modules/<ver>/vmlinuz --initrd=/boot/intel-ucode.img (if present) --initrd=/var/tmp/aios/initramfs-<flavor>.img --cmdline=@/etc/kernel/cmdline --os-release=@/usr/lib/os-release --output=/var/tmp/aios/aios-gen-<N+1>-<flavor>.efi`
    - The cmdline file carries `aios.gen=<N+1>` and `subvol=@usr-gen-<N+1>`.
    - The microcode image lands in the candidate's ephemeral `/boot`, which is fine because it lives in `@root-cand`.
-9. Sign each UKI on the host with `sbctl sign <cand>/var/tmp/aios/<uki>` (keys in persisted `/var/lib/sbctl`), then `sbctl verify` it.
+9. Sign each UKI on the host with `sbctl sign <cand>/var/tmp/aios/<uki>` (keys in persisted `/var/lib/sbctl`). A signing failure aborts the apply before anything reaches the ESP. There is no separate verify step: upstream `sbctl verify FILE` exits 0 for an unsigned file too, so it would prove nothing (§11 item 9). If an unsigned UKI still reached the ESP, it is caught at boot: with Secure Boot enabled the firmware refuses to start it, and boot counting (§3) moves on to the next entry once its tries run out.
 10. ESP space: if free space < 1.2 × total UKI size, run gc. If it's still short, abort.
 11. Finalize, in this order:
     - Remove any `aios-gen-<N+1>-*.efi` already on the ESP, whatever its counter (left by a gen whose subvolumes are gone), then copy the UKIs to `/efi/EFI/Linux/aios-gen-<N+1>-<flavor>+3.efi.tmp` (fsynced; systemd-boot ignores `.tmp`).
@@ -505,7 +505,7 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
 | `aios bootstrap` on a target that already holds generations | Refused in step `mount-top`, before anything is run on or deleted from the target |
 | Power loss mid-apply | Stale `@*-cand` subvolumes are removed by `aios-root.service` at next boot and by the next apply |
 | ESP full | Auto-gc respecting protected gens. If still short, abort before finalizing |
-| UKI signing or verification fails | Abort before finalizing. No unsigned UKI is copied to the ESP |
+| UKI signing fails | Abort before finalizing. No UKI is copied to the ESP. There is no verify step (§4.3 step 9): an unsigned UKI that reached the ESP anyway doesn't start under Secure Boot, and boot counting falls back to the next entry |
 | Gen fails health check | Not blessed. After 3 tries systemd-boot boots the next entry. `aios status` lists it as bad |
 | Generation subvolume missing at boot | `aios-root.service` fails with a clear message and the boot stops. The initrd's root account is locked, so no emergency shell opens. Recovery: choose another boot entry (the menu still lists other gens) or boot the ISO |
 | `@blank` missing, or a live/candidate name that isn't a subvolume, at boot | `aios-root.service` fails before deleting anything, with the same recovery |
@@ -576,3 +576,4 @@ AIOS/
    - reports any failure to the journal and to `aios status`;
    - re-checks at every user login, closing the rename bypass (§4.4).
 8. Read manifest sources from the git objects at `manifest_commit` instead of the working tree. This closes the check-then-read race, and guarantees that `apply` builds exactly what `plan` showed.
+9. Check each signature after `sbctl sign` (§4.3 step 9): run `sbctl verify --json` and require `is_signed` for the UKI, since plain `sbctl verify FILE` exits 0 for an unsigned file.

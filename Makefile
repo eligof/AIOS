@@ -16,13 +16,14 @@ INSTALLER_LIBS := installer/lib/common.sh installer/lib/config.sh installer/lib/
 	installer/lib/secrets.sh installer/lib/usbguard.sh installer/lib/boot.sh \
 	installer/lib/keyring.sh installer/lib/cleanup.sh
 # Scripts that source the installer libraries; shellcheck follows the sources (-x).
-INSTALLER_SCRIPTS := installer/gen-keys.sh
+INSTALLER_SCRIPTS := installer/aios-install installer/gen-keys.sh
 SH_SCRIPTS := initrd/aios-root.sh base/aios-health.sh
 BASH_SCRIPTS := initrd/install/aios tests/bats/fakes/btrfs tests/bats/fakes/record \
 	tests/bats/fakes/findmnt tests/bats/fakes/installer $(INSTALLER_LIBS)
 BATS_FILES := tests/bats/aios-root.bats tests/bats/install-hook.bats tests/bats/aios-health.bats \
 	tests/bats/installer-config.bats tests/bats/installer-disk.bats \
-	tests/bats/installer-target.bats tests/bats/installer-keys.bats
+	tests/bats/installer-target.bats tests/bats/installer-keys.bats \
+	tests/bats/installer-dryrun.bats
 UNITS := initrd/aios-root.service initrd/sysroot-etc.mount base/aios-health.service
 
 .PHONY: check rust-check shell-check bats-check unit-check tools repo keys

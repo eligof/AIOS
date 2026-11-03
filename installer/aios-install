@@ -1,0 +1,278 @@
+#!/usr/bin/env bash
+# aios-install: install AIOS onto a whole disk from the AIOS live ISO (spec §6.2). Root only.
+#
+#   aios-install                interactive, unless the VM has a fw_cfg install config
+#   aios-install --config FILE  unattended, from a KEY=value file (lib/config.sh)
+#   aios-install --auto         the live ISO's aios-install-auto.service: unattended from the
+#                               fw_cfg config if the VM has one, otherwise exit 0
+#   aios-install --dry-run ...  print the commands that would change the system, run none
+#
+# Steps (spec §6.2): 1 preflight, 2 confirm, 3 partition, 4 encrypt, 5 btrfs, 6 manifest,
+# 7 esp, 8 secureboot-keys, 9 bootstrap, 10 bootloader, 11 enroll, 12 usbguard, 13 finish.
+# A failing step unmounts everything and closes LUKS (lib/cleanup.sh).
+#
+# Environment overrides (tests only): AIOS_INSTALL_LIB (default /usr/local/lib/aios-install),
+# AIOS_EFI_DIR (/sys/firmware/efi), AIOS_DEFAULTS (/usr/share/aios/defaults/manifest),
+# AIOS_LIVE_REPO (/opt/aios-repo), and those of the libraries.
+set -euo pipefail
+
+LIB=${AIOS_INSTALL_LIB:-/usr/local/lib/aios-install}
+# shellcheck source=lib/common.sh
+. "$LIB/common.sh"
+# shellcheck source=lib/config.sh
+. "$LIB/config.sh"
+# shellcheck source=lib/disk.sh
+. "$LIB/disk.sh"
+# shellcheck source=lib/cpu.sh
+. "$LIB/cpu.sh"
+# shellcheck source=lib/manifest.sh
+. "$LIB/manifest.sh"
+# shellcheck source=lib/skeleton.sh
+. "$LIB/skeleton.sh"
+# shellcheck source=lib/secrets.sh
+. "$LIB/secrets.sh"
+# shellcheck source=lib/usbguard.sh
+. "$LIB/usbguard.sh"
+# shellcheck source=lib/boot.sh
+. "$LIB/boot.sh"
+# shellcheck source=lib/keyring.sh
+. "$LIB/keyring.sh"
+# shellcheck source=lib/cleanup.sh
+. "$LIB/cleanup.sh"
+# Generated at ISO build time by installer/gen-keys.sh (make keys).
+# shellcheck source=/dev/null
+. "$LIB/keys.sh"
+
+DEFAULTS=${AIOS_DEFAULTS:-/usr/share/aios/defaults/manifest}
+LIVE_REPO=${AIOS_LIVE_REPO:-/opt/aios-repo}
+TOP=/mnt/aios-top
+ESP=/mnt/aios-esp
+TOOLS=(sgdisk udevadm mkfs.fat cryptsetup systemd-cryptenroll mkfs.btrfs btrfs mount umount
+    lsblk findmnt git mkpasswd gpg sbctl aios bootctl usbguard curl install cp mv chown chmod)
+
+usage() {
+    sed -n '2,8s/^# \{0,1\}//p' "$0"
+}
+
+# ask NAME PROMPT: read one line into CFG[NAME]. Prompts go to stderr; answers come from stdin.
+ask() {
+    local answer
+    printf '%s: ' "$2" >&2
+    IFS= read -r answer || die "no answer for $1"
+    CFG[$1]=$answer
+}
+
+# ask_secret NAME PROMPT: read a secret twice, without echo on a terminal.
+ask_secret() {
+    local a b
+    printf '%s: ' "$2" >&2
+    IFS= read -rs a || die "no answer for $1"
+    printf '\n%s (again): ' "$2" >&2
+    IFS= read -rs b || die "no answer for $1"
+    printf '\n' >&2
+    [[ $a == "$b" ]] || die "the two $1 entries differ"
+    CFG[$1]=$a
+}
+
+prompt_config() {
+    log "disks:"
+    lsblk -dpno NAME,SIZE,TYPE,MODEL | awk '$3 == "disk"' >&2 || true
+    ask DISK "Disk to erase and install AIOS on (for example /dev/nvme0n1)"
+    ask HOSTNAME "Hostname"
+    ask USERNAME "User name"
+    ask_secret USER_PASSWORD "Password for ${CFG[USERNAME]}"
+    ask_secret LUKS_PASSPHRASE "Disk encryption passphrase (at least 8 characters)"
+    ask TIMEZONE "Time zone [UTC]"
+}
+
+require_tools() {
+    local t missing=()
+    for t in "${TOOLS[@]}"; do
+        command -v "$t" >/dev/null || missing+=("$t")
+    done
+    ((${#missing[@]} == 0)) || die "missing tools: ${missing[*]}"
+}
+
+summary() {
+    log "installation complete: $DISK holds AIOS generation 1 for ${CFG[USERNAME]}@${CFG[HOSTNAME]}"
+    log "the LUKS recovery key printed in step 4 is the only copy: keep it somewhere safe"
+    if ((ENROLLED)); then
+        log "Secure Boot keys are enrolled: the firmware now boots only images signed by AIOS (or Microsoft)"
+    else
+        log "Secure Boot keys are NOT enrolled: put the firmware in Setup Mode, boot AIOS, then run: run0 aios secureboot enroll"
+    fi
+    log "once Secure Boot is on, bind the disk to the TPM: run0 aios tpm enroll"
+}
+
+main() {
+    local config="" auto=0 unattended=0
+    while (($#)); do
+        case $1 in
+            --config)
+                [[ $# -ge 2 ]] || die "--config needs a file"
+                config=$2
+                shift 2
+                ;;
+            --auto) auto=1 && shift ;;
+            --dry-run) export AIOS_INSTALL_DRYRUN=1 && shift ;;
+            -h | --help) usage && exit 0 ;;
+            *) usage >&2 && exit 1 ;;
+        esac
+    done
+    trap on_exit EXIT
+    trap 'exit 130' INT TERM
+
+    if ((auto)); then
+        modprobe -q qemu_fw_cfg 2>/dev/null || true
+        config=$(fwcfg_config)
+        if [[ -z $config ]]; then
+            log "no fw_cfg install config ($AIOS_FWCFG_NAME); run aios-install by hand"
+            exit 0
+        fi
+    elif [[ -z $config ]]; then
+        config=$(fwcfg_config)
+    fi
+
+    step 1 preflight
+    if [[ -n $config ]]; then
+        unattended=1
+        log "unattended install from $config"
+        parse_config "$config" || die "invalid install config $config"
+    else
+        prompt_config
+    fi
+    validate_config "$unattended" || die "invalid install config"
+    [[ -d ${AIOS_EFI_DIR:-/sys/firmware/efi} ]] || die "not booted in UEFI mode"
+    [[ ! -e /dev/mapper/aios ]] || die "the LUKS mapping aios is already open (cryptsetup close aios)"
+    dry_run || ((EUID == 0)) || die "aios-install must run as root"
+    require_tools
+    DISK=$(readlink -f -- "${CFG[DISK]}")
+    validate_disk "$DISK" || die "unusable disk $DISK"
+    ESP_PART=$(part_path "$DISK" 1)
+    ROOT_PART=$(part_path "$DISK" 2)
+    curl -sI --max-time 20 --retry 3 --retry-connrefused https://geo.mirror.pkgbuild.com >/dev/null ||
+        die "no network: https://geo.mirror.pkgbuild.com is unreachable (Wi-Fi: iwctl)"
+    if cpu_supports_v3; then
+        V3=1
+        log "the CPU supports x86-64-v3: the CachyOS v3 repos stay enabled"
+    else
+        V3=0
+        log "the CPU lacks x86-64-v3: the CachyOS v3 repos are removed from pacman.conf"
+    fi
+    check_cachyos_keys "${AIOS_CACHYOS_KEYS:-}" || die "untrusted package keyring"
+    [[ -f $DEFAULTS/manifest.toml ]] || die "no default manifest in $DEFAULTS (aios-base)"
+    [[ -f $LIVE_REPO/aios-local.db.tar.gz ]] || die "no local package repo in $LIVE_REPO"
+
+    step 2 confirm
+    if ((unattended)); then
+        log "WIPE=yes: erasing $DISK"
+    else
+        local answer
+        printf 'Everything on %s will be erased. Type %s to continue: ' "$DISK" "$DISK" >&2
+        IFS= read -r answer || answer=""
+        [[ $answer == "$DISK" ]] || die "not confirmed; nothing was changed"
+    fi
+
+    step 3 partition
+    run_cmd sgdisk --zap-all "$DISK"
+    run_cmd sgdisk -n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309 "$DISK"
+    run_cmd udevadm settle
+    run_cmd mkfs.fat -F32 -n EFI "$ESP_PART"
+
+    step 4 encrypt
+    local luks=${CFG[LUKS_PASSPHRASE]}
+    run_stdin "$luks" cryptsetup luksFormat --type luks2 --pbkdf argon2id --batch-mode \
+        --key-file - "$ROOT_PART"
+    run_stdin "$luks" cryptsetup open --key-file - "$ROOT_PART" aios
+    luks_opened
+    log "recovery key (shown only now, stored nowhere: write it down):"
+    run_stdin "$luks" systemd-cryptenroll --unlock-key-file=/dev/stdin --recovery-key "$ROOT_PART"
+    LUKS_UUID=$(cryptsetup luksUUID "$ROOT_PART")
+    [[ $LUKS_UUID =~ ^[0-9a-f-]{36}$ ]] || die "unexpected LUKS UUID ${LUKS_UUID@Q}"
+
+    step 5 btrfs
+    run_cmd mkfs.btrfs -L aios /dev/mapper/aios
+    run_cmd mkdir -p "$TOP"
+    mount_tracked -t btrfs -o subvolid=5,compress=zstd /dev/mapper/aios "$TOP"
+    run_cmd btrfs subvolume create "$TOP/@blank"
+    blank_skeleton "$TOP/@blank"
+    run_cmd btrfs property set -ts "$TOP/@blank" ro true
+    local sv
+    for sv in @persist @home @log; do
+        run_cmd btrfs subvolume create "$TOP/$sv"
+    done
+
+    step 6 manifest
+    local config_dir=$TOP/@persist/aios/config secrets=$TOP/@persist/aios/secrets text
+    run_cmd install -d -m 0755 "$TOP/@persist/aios"
+    run_cmd cp -a "$DEFAULTS" "$config_dir"
+    run_cmd chown -R 0:0 "$config_dir"
+    run_cmd chmod -R u=rwX,go=rX "$config_dir"
+    rename_home_template "$config_dir" "${CFG[USERNAME]}"
+    text=$(render_manifest "${CFG[HOSTNAME]}" "${CFG[USERNAME]}" "${CFG[TIMEZONE]}" \
+        "${CFG[EXTRA_CMDLINE]}" <"$DEFAULTS/manifest.toml")
+    printf '%s\n' "$text" | run_write "$config_dir/manifest.toml" 0644
+    if ((!V3)); then
+        text=$(strip_v3 <"$DEFAULTS/files/pacman.conf")
+        printf '%s\n' "$text" | run_write "$config_dir/files/pacman.conf" 0644
+    fi
+    run_cmd git -C "$config_dir" init -q -b main
+    run_cmd git -C "$config_dir" add -A
+    run_cmd git -C "$config_dir" -c user.name=aios -c user.email=aios@localhost \
+        commit -q -m "aios: initial manifest"
+    run_cmd install -d -m 0700 "$secrets" "$secrets/passwd"
+    text=$(hash_password "${CFG[USER_PASSWORD]}")
+    printf '%s\n' "$text" | run_write "$secrets/passwd/${CFG[USERNAME]}" 0600
+    run_cmd cp -a "$LIVE_REPO" "$TOP/@persist/aios/repo"
+
+    step 7 esp
+    run_cmd mkdir -p "$ESP"
+    mount_tracked -o umask=0077 "$ESP_PART" "$ESP"
+
+    step 8 secureboot-keys
+    run_cmd install -d -m 0700 "$TOP/@persist/var/lib/sbctl"
+    run_cmd mkdir -p /var/lib/sbctl
+    mount_tracked --bind "$TOP/@persist/var/lib/sbctl" /var/lib/sbctl
+    run_cmd sbctl create-keys
+
+    step 9 bootstrap
+    run_cmd aios bootstrap --target "$TOP" --esp "$ESP" --manifest "$config_dir/manifest.toml" \
+        --luks-uuid "$LUKS_UUID"
+
+    step 10 bootloader
+    run_cmd bootctl install --esp-path="$ESP"
+    loader_conf | run_write "$ESP/loader/loader.conf"
+    run_cmd sbctl sign -s "$ESP/EFI/systemd/systemd-bootx64.efi"
+    run_cmd sbctl sign -s "$ESP/EFI/BOOT/BOOTX64.EFI"
+
+    step 11 enroll
+    ENROLLED=0
+    local sb_status
+    sb_status=$(sbctl status --json) || sb_status=""
+    if sbctl_setup_mode "$sb_status"; then
+        if run_cmd sbctl enroll-keys --microsoft; then
+            ENROLLED=1
+        else
+            log "warning: sbctl enroll-keys failed; enroll later with: run0 aios secureboot enroll"
+        fi
+    else
+        log "the firmware is not in Secure Boot Setup Mode; keys are not enrolled"
+    fi
+
+    step 12 usbguard
+    local policy
+    policy=$(usbguard generate-policy)
+    text=$(usbguard_rules "$policy")
+    run_cmd install -d -m 0700 "$TOP/@persist/var/lib/usbguard"
+    printf '%s\n' "$text" | run_write "$TOP/@persist/var/lib/usbguard/rules.conf" 0600
+
+    step 13 finish
+    cleanup
+    summary
+    if ((unattended)); then
+        log "rebooting into AIOS"
+        run_cmd systemctl reboot
+    fi
+}
+
+main "$@"

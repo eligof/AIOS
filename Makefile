@@ -13,16 +13,19 @@ BATS ?= $(shell command -v bats || echo build/tools/bats-core/bin/bats)
 # What the shell and unit checks cover. installer/lib/keys.sh is generated (make keys).
 INSTALLER_LIBS := installer/lib/common.sh installer/lib/config.sh installer/lib/disk.sh \
 	installer/lib/cpu.sh installer/lib/manifest.sh installer/lib/skeleton.sh \
-	installer/lib/secrets.sh installer/lib/usbguard.sh installer/lib/boot.sh
+	installer/lib/secrets.sh installer/lib/usbguard.sh installer/lib/boot.sh \
+	installer/lib/keyring.sh installer/lib/cleanup.sh
+# Scripts that source the installer libraries; shellcheck follows the sources (-x).
+INSTALLER_SCRIPTS := installer/gen-keys.sh
 SH_SCRIPTS := initrd/aios-root.sh base/aios-health.sh
 BASH_SCRIPTS := initrd/install/aios tests/bats/fakes/btrfs tests/bats/fakes/record \
 	tests/bats/fakes/findmnt tests/bats/fakes/installer $(INSTALLER_LIBS)
 BATS_FILES := tests/bats/aios-root.bats tests/bats/install-hook.bats tests/bats/aios-health.bats \
 	tests/bats/installer-config.bats tests/bats/installer-disk.bats \
-	tests/bats/installer-target.bats
+	tests/bats/installer-target.bats tests/bats/installer-keys.bats
 UNITS := initrd/aios-root.service initrd/sysroot-etc.mount base/aios-health.service
 
-.PHONY: check rust-check shell-check bats-check unit-check tools repo
+.PHONY: check rust-check shell-check bats-check unit-check tools repo keys
 
 check: rust-check shell-check bats-check unit-check
 
@@ -41,6 +44,7 @@ rust-check:
 shell-check: tools
 	$(SHELLCHECK) -s sh $(SH_SCRIPTS)
 	$(SHELLCHECK) -s bash $(BASH_SCRIPTS) $(BATS_FILES)
+	$(SHELLCHECK) -s bash -x -P SCRIPTDIR $(INSTALLER_SCRIPTS)
 
 bats-check: tools
 	$(BATS) $(BATS_FILES)
@@ -84,3 +88,7 @@ repo:
 		makepkg -f -d --noconfirm
 	repo-add build/repo/aios-local.db.tar.gz build/repo/*.pkg.tar.zst
 	if command -v namcap >/dev/null; then namcap build/repo/*.pkg.tar.zst; fi
+
+# The CachyOS signing keys this host's pacman keyring trusts, pinned for the installer.
+keys:
+	installer/gen-keys.sh installer/lib/keys.sh

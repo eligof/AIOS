@@ -9,3 +9,4 @@ __pycache__/
 packaging/*/src/
 packaging/*/pkg/
 packaging/*/*.pkg.tar.*
+installer/lib/keys.sh

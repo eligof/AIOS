@@ -31,6 +31,11 @@ option() {
     sed -n "s/^$2[[:space:]]\{1,\}//p" "$1"
 }
 
+# unit_key FILE SECTION KEY: the values of KEY in [SECTION] of a systemd unit, one per line.
+unit_key() {
+    sed -n "/^\[$2\]/,/^\[/s/^$3=//p" "$1"
+}
+
 @test "profiledef.sh: AIOS names, UEFI systemd-boot only" {
     run bash -c 'declare -A file_permissions=(); . "$1"; printf "%s\n" "$iso_name" "$install_dir" "${bootmodes[*]}" "$pacman_conf" "$iso_label"; printf "%s\n" "${!file_permissions[@]}" | sort' _ "$ISO/profiledef.sh"
 
@@ -79,6 +84,16 @@ option() {
     [ "$(readlink "$AIR/etc/systemd/system/multi-user.target.wants/aios-install-auto.service")" = ../aios-install-auto.service ]
     [ "$(readlink "$AIR/etc/systemd/system/multi-user.target.wants/pacman-init.service")" = ../pacman-init.service ]
     [ "$(cat "$AIR/etc/hostname")" = aios-live ]
+}
+
+@test "aios-install-auto.service: VMs only, after the live keyring, every line on the console" {
+    unit=$AIR/etc/systemd/system/aios-install-auto.service
+
+    [ "$(unit_key "$unit" Unit ConditionVirtualization)" = vm ]
+    unit_key "$unit" Unit After | tr ' ' '\n' | grep -qx pacman-init.service
+    [ "$(unit_key "$unit" Service LogRateLimitIntervalSec)" = 0 ]
+    [ "$(unit_key "$unit" Service StandardOutput)" = journal+console ]
+    [ "$(unit_key "$unit" Service StandardError)" = journal+console ]
 }
 
 @test "every airootfs symlink is absolute or stays inside /etc/systemd/system" {

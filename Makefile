@@ -1,6 +1,7 @@
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 CARGO ?= cargo
 SUDO ?= sudo
+PYTHON ?= python3
 
 # Shell test tools: the system copies when installed, otherwise pinned copies that
 # `make tools` fetches into build/tools/ (no root needed).
@@ -10,6 +11,9 @@ BATS_VERSION := v1.11.1
 BATS_COMMIT := b640ec3cf2c7c9cfc9e6351479261186f76eeec8
 SHELLCHECK ?= $(shell command -v shellcheck || echo build/tools/shellcheck)
 BATS ?= $(shell command -v bats || echo build/tools/bats-core/bin/bats)
+# pytest: the system module when installed, otherwise a venv that `make tools` creates in
+# build/venv/ from the hash-pinned tests/e2e/requirements.txt.
+PYTEST ?= $(shell $(PYTHON) -c 'import pytest' 2>/dev/null && echo '$(PYTHON) -m pytest' || echo build/venv/bin/pytest)
 
 # What the shell and unit checks cover. installer/lib/keys.sh is generated (make keys).
 INSTALLER_LIBS := installer/lib/common.sh installer/lib/config.sh installer/lib/disk.sh \
@@ -34,10 +38,10 @@ ISO_BUILD := iso-build
 ISO_WORK := build/iso-work
 ISO_OUT := out
 
-.PHONY: check rust-check shell-check bats-check unit-check tools repo keys iso-build iso \
-	iso-check clean-iso
+.PHONY: check rust-check shell-check bats-check unit-check e2e-unit tools repo keys iso-build \
+	iso iso-check clean-iso
 
-check: rust-check shell-check bats-check unit-check
+check: rust-check shell-check bats-check unit-check e2e-unit
 
 # The CLI tests need the `test-hooks` feature (AIOS_* overrides, AIOS_FAKE_RUNNER), hence
 # --all-features. The shipped configuration (no features) is linted too, and its release
@@ -71,7 +75,11 @@ unit-check:
 	rc=$$?; \
 	if [ $$rc -ne 0 ] || [ -n "$$out" ]; then printf '%s\n' "$$out"; exit 1; fi
 
-tools: $(SHELLCHECK) $(BATS)
+# The e2e harness's own tests: no VM, no root (spec §9).
+e2e-unit: tools
+	$(PYTEST) -p no:cacheprovider -q tests/e2e/test_harness_unit.py
+
+tools: $(SHELLCHECK) $(BATS) $(filter build/venv/bin/pytest,$(PYTEST))
 
 build/tools/shellcheck:
 	mkdir -p build/tools
@@ -86,6 +94,11 @@ build/tools/bats-core/bin/bats:
 	mkdir -p build/tools
 	git clone --depth 1 --branch $(BATS_VERSION) https://github.com/bats-core/bats-core build/tools/bats-core
 	test "$$(git -C build/tools/bats-core rev-parse HEAD)" = $(BATS_COMMIT)
+
+build/venv/bin/pytest: tests/e2e/requirements.txt
+	$(PYTHON) -m venv build/venv
+	build/venv/bin/pip install -q --require-hashes --only-binary=:all: -r tests/e2e/requirements.txt
+	touch $@
 
 # Local pacman repo with aios-base and aios-cli (spec §4.6). No root: makepkg -d skips
 # the dependency check, so the build host needs cargo but not the runtime depends.

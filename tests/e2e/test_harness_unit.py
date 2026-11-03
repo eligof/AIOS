@@ -1,0 +1,393 @@
+"""Unit tests of the e2e harness (spec §9): no VM, no root. A thread plays the guest's serial
+console on a unix socket. Part of `make check` (make e2e-unit)."""
+
+from __future__ import annotations
+
+import os
+import re
+import socket
+import subprocess
+import threading
+import time
+from pathlib import Path
+from typing import Callable
+
+import pytest
+
+from .serial import (
+    Serial,
+    SerialClosed,
+    SerialTimeout,
+    Shell,
+    choose_boot_entry,
+    login_root_shell,
+    parse_result,
+    strip_ansi,
+    unlock_luks,
+    wrap_command,
+)
+from .vm import (
+    E2E_INSTALL,
+    FW_CFG_NAME,
+    REPO,
+    VmConfig,
+    find_iso,
+    missing_requirements,
+    qemu_argv,
+    render_install_conf,
+    swtpm_argv,
+)
+
+SENTINEL_LINE = re.compile(
+    r"printf '__AIOS_E2E_BEGIN_%s__\\n' (\d+); \{ (.*) ; \} 2>&1; "
+    r"printf '__AIOS_E2E_END_%s_%s__\\n' \1 \"\$\?\"$"
+)
+
+
+class FakeConsole:
+    """The guest side of the serial socket. Sends `banner` (a list of byte chunks, with
+    `gap` seconds between them), then answers each line the harness sends (terminated by
+    CR) with on_line(line), and records everything it received."""
+
+    def __init__(
+        self,
+        path: Path,
+        banner: list[bytes] = (),
+        on_line: Callable[[str], bytes] | None = None,
+        gap: float = 0.0,
+        close_after_banner: bool = False,
+    ):
+        self.path = path
+        self.banner = list(banner)
+        self.on_line = on_line or (lambda line: b"")
+        self.gap = gap
+        self.close_after_banner = close_after_banner
+        self.received = b""
+        self.lines: list[str] = []
+        self._server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self._server.bind(str(path))
+        self._server.listen(1)
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+        self._thread.start()
+
+    def _serve(self) -> None:
+        conn, _ = self._server.accept()
+        with conn:
+            for chunk in self.banner:
+                conn.sendall(chunk)
+                time.sleep(self.gap)
+            if self.close_after_banner:
+                return
+            buffer = b""
+            conn.settimeout(5)
+            while True:
+                try:
+                    data = conn.recv(4096)
+                except (TimeoutError, OSError):
+                    return
+                if not data:
+                    return
+                self.received += data
+                buffer += data
+                while b"\r" in buffer:
+                    line, buffer = buffer.split(b"\r", 1)
+                    text = line.decode()
+                    self.lines.append(text)
+                    reply = self.on_line(text)
+                    if reply:
+                        conn.sendall(reply)
+
+    def join(self) -> None:
+        self._thread.join(timeout=10)
+        self._server.close()
+
+
+def shell_replies(results: dict[str, tuple[int, str]]) -> Callable[[str], bytes]:
+    """on_line for a fake root shell: answers sentinel lines from `results` (command ->
+    (status, output)); other lines get no answer."""
+
+    def reply(line: str) -> bytes:
+        match = SENTINEL_LINE.match(line)
+        if not match:
+            return b""
+        n, cmd = match.group(1), match.group(2)
+        rc, out = results.get(cmd, (127, f"bash: {cmd}: command not found\n"))
+        return f"__AIOS_E2E_BEGIN_{n}__\r\n{out}__AIOS_E2E_END_{n}_{rc}__\r\n".encode()
+
+    return reply
+
+
+@pytest.fixture
+def sock_path(tmp_path: Path) -> Path:
+    return tmp_path / "serial.sock"
+
+
+def connect(path: Path, **kw) -> Serial:
+    return Serial.connect(path, timeout=5, **kw)
+
+
+def option(argv: list[str], flag: str) -> list[str]:
+    """Every value that follows `flag` in argv."""
+    return [argv[i + 1] for i, a in enumerate(argv) if a == flag]
+
+
+# --- vm.py -----------------------------------------------------------------------------
+
+
+def test_qemu_argv_has_kvm_secure_boot_tpm_disk_cdrom_fw_cfg_and_serial(tmp_path: Path) -> None:
+    cfg = VmConfig(workdir=tmp_path, iso=Path("/out/aios-2026.11.03-x86_64.iso"))
+
+    argv = qemu_argv(cfg)
+
+    assert argv[0] == "qemu-system-x86_64"
+    assert "-enable-kvm" in argv and "-nographic" in argv
+    assert option(argv, "-cpu") == ["host"]
+    assert option(argv, "-m") == ["4G"]
+    assert option(argv, "-machine") == ["q35,smm=on"]
+    assert "driver=cfi.pflash01,property=secure,value=on" in option(argv, "-global")
+    assert option(argv, "-drive")[:2] == [
+        "if=pflash,format=raw,unit=0,readonly=on,file=/usr/share/edk2/x64/OVMF_CODE.secboot.4m.fd",
+        f"if=pflash,format=raw,unit=1,file={tmp_path}/OVMF_VARS.4m.fd",
+    ]
+    assert f"socket,id=chrtpm,path={tmp_path}/tpm/swtpm.sock" in option(argv, "-chardev")
+    assert option(argv, "-tpmdev") == ["emulator,id=tpm0,chardev=chrtpm"]
+    devices = option(argv, "-device")
+    assert "tpm-tis,tpmdev=tpm0" in devices
+    assert "virtio-blk-pci,drive=disk0,bootindex=0" in devices
+    assert "ide-cd,drive=cd0,bootindex=1" in devices
+    assert f"if=none,id=disk0,format=qcow2,file={tmp_path}/disk.qcow2" in option(argv, "-drive")
+    assert option(argv, "-fw_cfg") == [f"name={FW_CFG_NAME},file={tmp_path}/install.conf"]
+    assert FW_CFG_NAME == "opt/aios/install.conf"
+    assert f"socket,id=serial0,path={tmp_path}/serial.sock,server=on,wait=on" in option(argv, "-chardev")
+    assert option(argv, "-serial") == ["chardev:serial0"]
+    assert option(argv, "-monitor") == ["none"]
+
+
+def test_qemu_argv_without_an_iso_has_no_cdrom_and_refuses_commas(tmp_path: Path) -> None:
+    argv = qemu_argv(VmConfig(workdir=tmp_path, iso=None))
+    assert not any("cd0" in a for a in argv)
+
+    with pytest.raises(ValueError, match="may not contain ','"):
+        qemu_argv(VmConfig(workdir=tmp_path / "a,b", iso=None))
+
+
+def test_swtpm_is_a_tpm2_socket_that_exits_with_qemu(tmp_path: Path) -> None:
+    argv = swtpm_argv(VmConfig(workdir=tmp_path, iso=None))
+
+    assert argv[:3] == ["swtpm", "socket", "--tpm2"]
+    assert option(argv, "--tpmstate") == [f"dir={tmp_path}/tpm"]
+    assert option(argv, "--ctrl") == [f"type=unixio,path={tmp_path}/tpm/swtpm.sock"]
+    assert "--terminate" in argv
+
+
+def test_the_install_config_is_rendered_in_order_and_checked() -> None:
+    text = render_install_conf(E2E_INSTALL)
+
+    assert text.splitlines()[0] == "DISK=/dev/vda"
+    assert "EXTRA_CMDLINE=console=ttyS0,115200\n" in text
+    assert "WIPE=yes\n" in text
+    with pytest.raises(ValueError, match="unknown install keys"):
+        render_install_conf({"ROOT_PASSWORD": "x"})
+    with pytest.raises(ValueError, match="line break"):
+        render_install_conf({"HOSTNAME": "a\nWIPE=yes"})
+
+
+def test_the_e2e_config_passes_the_installers_own_parser(tmp_path: Path) -> None:
+    conf = tmp_path / "install.conf"
+    conf.write_text(render_install_conf(E2E_INSTALL))
+    (tmp_path / "zoneinfo").mkdir()
+    (tmp_path / "zoneinfo" / "UTC").write_text("")
+    lib = REPO / "installer" / "lib"
+    script = 'for f in common config; do . "$1/$f.sh"; done; parse_config "$2" && validate_config 1'
+
+    proc = subprocess.run(
+        ["bash", "-c", script, "_", str(lib), str(conf)],
+        env={**os.environ, "AIOS_ZONEINFO": str(tmp_path / "zoneinfo"), "AIOS_PASSWD_FILE": "/dev/null"},
+        capture_output=True,
+        text=True,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+
+
+def test_missing_requirements_name_each_missing_piece(tmp_path: Path) -> None:
+    code, vars_ = tmp_path / "CODE.fd", tmp_path / "VARS.fd"
+    iso = tmp_path / "aios.iso"
+    kvm = tmp_path / "kvm"
+    for f in (code, vars_, iso, kvm):
+        f.write_text("")
+    cfg = VmConfig(workdir=tmp_path, iso=iso, ovmf_code=code, ovmf_vars=vars_, kvm=kvm)
+
+    assert missing_requirements(cfg, which=lambda tool: f"/usr/bin/{tool}") == []
+    missing = missing_requirements(
+        VmConfig(workdir=tmp_path, iso=None, ovmf_code=tmp_path / "none.fd", ovmf_vars=vars_, kvm=tmp_path / "nokvm"),
+        which=lambda tool: None if tool == "swtpm" else f"/usr/bin/{tool}",
+    )
+    assert missing == [
+        "swtpm is not installed (pacman -S swtpm)",
+        f"{tmp_path}/none.fd is missing (pacman -S edk2-ovmf)",
+        f"{tmp_path}/nokvm is not readable and writable",
+        "no out/aios-*.iso: build it first (make iso)",
+    ]
+
+
+def test_a_workdir_too_long_for_unix_sockets_is_reported(tmp_path: Path) -> None:
+    deep = tmp_path / ("d" * 100)
+    cfg = VmConfig(workdir=deep, iso=None)
+
+    assert missing_requirements(cfg, which=lambda tool: tool)[-1] == (
+        f"{deep} is too long for unix socket paths: set AIOS_E2E_DIR to a shorter one"
+    )
+
+
+def test_find_iso_takes_the_newest(tmp_path: Path) -> None:
+    assert find_iso(tmp_path) is None
+    old, new = tmp_path / "aios-2026.10.01-x86_64.iso", tmp_path / "aios-2026.11.03-x86_64.iso"
+    old.write_text("")
+    new.write_text("")
+    os.utime(old, (1, 1))
+    (tmp_path / "other.iso").write_text("")
+
+    assert find_iso(tmp_path) == new
+
+
+# --- serial.py -------------------------------------------------------------------------
+
+
+def test_strip_ansi_keeps_only_the_text() -> None:
+    raw = "\x1b]0;title\x07\x1b[1;36mtester@aios-e2e\x1b[0m \x1b(B\x1b7~\x1b8 %\r\n\x1b[?25lok\x1bc\tx"
+
+    assert strip_ansi(raw) == "tester@aios-e2e ~ %\nok\tx"
+
+
+def test_escapes_and_utf8_split_across_reads_are_reassembled(sock_path: Path) -> None:
+    console = FakeConsole(sock_path, [b"Please enter \x1b[1", b";31mpass\xf0\x9f", b"\x94\x90phrase\x1b", b"[0m for disk aios:"])
+    serial = connect(sock_path)
+
+    serial.expect(r"for disk aios:", 5)
+
+    assert serial.text == "Please enter pass\U0001f510phrase for disk aios:"
+    serial.close()
+    console.join()
+
+
+def test_expect_matches_across_chunks_and_moves_past_each_match(sock_path: Path) -> None:
+    console = FakeConsole(sock_path, [b"aios-e2e lo", b"gin: \n", b"aios-e2e login: \n"], gap=0.05)
+    serial = connect(sock_path)
+
+    first = serial.expect(r"login: ", 5)
+    second = serial.expect(r"login: ", 5)
+
+    assert first.start() < second.start()
+    with pytest.raises(SerialTimeout):
+        serial.expect(r"login: ", 0.3)
+    serial.close()
+    console.join()
+
+
+def test_a_timeout_is_prompt_and_shows_the_last_output(sock_path: Path) -> None:
+    console = FakeConsole(sock_path, [b"Booting AIOS\r\nsomething else\r\n"])
+    serial = connect(sock_path)
+
+    started = time.monotonic()
+    with pytest.raises(SerialTimeout) as err:
+        serial.expect(r"login: ", 0.5)
+
+    assert time.monotonic() - started < 3
+    assert "something else" in str(err.value)
+    serial.close()
+    console.join()
+
+
+def test_a_closed_console_raises_serial_closed(sock_path: Path) -> None:
+    console = FakeConsole(sock_path, [b"Power down.\r\n"], close_after_banner=True)
+    serial = connect(sock_path)
+
+    with pytest.raises(SerialClosed, match="Power down"):
+        serial.expect(r"login: ", 5)
+    console.join()
+
+
+def test_the_transcript_keeps_the_raw_bytes(sock_path: Path, tmp_path: Path) -> None:
+    raw = b"\x1b[2J\x1b[HAIOS\r\n"
+    console = FakeConsole(sock_path, [raw])
+    serial = connect(sock_path, transcript=tmp_path / "serial.log")
+
+    serial.expect(r"AIOS", 5)
+    serial.close()
+    console.join()
+
+    assert (tmp_path / "serial.log").read_bytes() == raw
+
+
+def test_wrap_and_parse_the_sentinel_protocol() -> None:
+    line = wrap_command("cat /etc/hostname", 7)
+    assert line == (
+        "printf '__AIOS_E2E_BEGIN_%s__\\n' 7; { cat /etc/hostname ; } 2>&1; "
+        "printf '__AIOS_E2E_END_%s_%s__\\n' 7 \"$?\""
+    )
+    echoed = line + "\n"
+    assert parse_result(echoed, 7) is None
+    assert parse_result(echoed + "__AIOS_E2E_BEGIN_7__\naios-e2e\n__AIOS_E2E_END_7_0__\n", 7) == (0, "aios-e2e")
+    assert parse_result("__AIOS_E2E_BEGIN_8__\n__AIOS_E2E_END_8_1__\n", 8) == (1, "")
+    assert parse_result("__AIOS_E2E_BEGIN_9__\nhalf", 9) is None
+    with pytest.raises(ValueError):
+        wrap_command("echo a\necho b", 1)
+
+
+def test_shell_runs_numbered_commands_and_returns_status_and_output(sock_path: Path) -> None:
+    console = FakeConsole(
+        sock_path,
+        on_line=shell_replies({
+            "cat /etc/hostname": (0, "aios-e2e\r\n"),
+            "touch /usr/x": (1, "touch: cannot touch '/usr/x': Read-only file system\r\n"),
+        }),
+    )
+    shell = Shell(connect(sock_path))
+
+    assert shell.check("cat /etc/hostname") == "aios-e2e"
+    result = shell.run("touch /usr/x")
+    assert (result.rc, result.output) == (1, "touch: cannot touch '/usr/x': Read-only file system")
+    with pytest.raises(AssertionError, match="exited 127"):
+        shell.check("tree")
+    assert [SENTINEL_LINE.match(l).group(1) for l in console.lines] == ["1", "2", "3"]
+    shell.serial.close()
+    console.join()
+
+
+def test_boot_menu_luks_and_login_are_answered_in_order(sock_path: Path) -> None:
+    setup = "stty -echo; PS1=; PS2=; export SYSTEMD_PAGER= SYSTEMD_COLORS=0 PAGER=cat"
+    # Each answer the harness types gets the next prompt as the reply.
+    script = iter([
+        b"\x1b[0m\xf0\x9f\x94\x90 Please enter passphrase or recovery key for disk aios: ",  # "2" + Enter
+        b"\r\naios-e2e login: ",  # after the passphrase
+        b"Password: ",  # after the user name
+        b"\x1b[36mtester@aios-e2e\x1b[39m ~ % ",  # after the password: zsh
+        b"",  # after exec bash
+        b"==== AUTHENTICATING FOR org.freedesktop.systemd1.manage-units ====\r\nPassword: ",
+        b"==== AUTHENTICATION COMPLETE ====\r\n",  # after the password for run0
+    ])
+    replies = shell_replies({setup: (0, "")})
+
+    def on_line(line: str) -> bytes:
+        return replies(line) if SENTINEL_LINE.match(line) else next(script)
+
+    console = FakeConsole(sock_path, [b"  AIOS install medium (x86_64, UEFI, serial console)\r\n"], on_line=on_line)
+    serial = connect(sock_path)
+
+    choose_boot_entry(serial, "AIOS install medium (x86_64, UEFI, serial console)", "2", 5)
+    unlock_luks(serial, "e2e-luks-passphrase", 5)
+    shell = login_root_shell(serial, "tester", "e2e-user-pass", "aios-e2e", 5)
+
+    assert console.lines[:7] == [
+        "2",
+        "e2e-luks-passphrase",
+        "tester",
+        "e2e-user-pass",
+        "exec bash --norc --noprofile --noediting",
+        "run0 bash --norc --noprofile --noediting",
+        "e2e-user-pass",
+    ]
+    assert shell.count == 1
+    serial.close()
+    console.join()

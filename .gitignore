@@ -11,3 +11,4 @@ packaging/*/pkg/
 packaging/*/*.pkg.tar.*
 installer/lib/keys.sh
 iso-build/
+.pytest_cache/

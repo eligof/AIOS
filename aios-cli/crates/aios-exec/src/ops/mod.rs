@@ -50,7 +50,8 @@ fn with_top<T>(
 
 /// The top level mounted at `path`. `unmount` reports a failure; if it never runs (an
 /// early return or a panic), dropping the guard unmounts anyway and logs a failure to
-/// stderr. A private (reader) mount point is removed once unmounted.
+/// stderr. A private (reader) mount point is removed once unmounted; if that fails, a
+/// warning goes to stderr and the command's outcome stands.
 struct TopMount<'a> {
     runner: &'a dyn CommandRunner,
     path: PathBuf,
@@ -91,14 +92,24 @@ impl<'a> TopMount<'a> {
             }
         }
         if std::mem::take(&mut self.private) {
-            match fs::remove_dir(&self.path) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(ExecError::io(&self.path, e))
-                }
-                _ => {}
+            // Unmounted (or never mounted), so all that can be left is an empty directory:
+            // the command's outcome stands.
+            if let Some(warning) = remove_mount_point(&self.path) {
+                eprintln!("aios: warning: {warning}");
             }
         }
         Ok(())
+    }
+}
+
+/// Remove a reader's unmounted mount point. A failure (`EBUSY`, say) is returned as a
+/// warning; a directory already gone is fine.
+fn remove_mount_point(path: &Path) -> Option<String> {
+    match fs::remove_dir(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Some(format!("cannot remove {}: {e}", path.display()))
+        }
+        _ => None,
     }
 }
 
@@ -112,9 +123,58 @@ impl Drop for TopMount<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::with_top;
+    use super::{remove_mount_point, with_top};
     use crate::{ExecError, FakeRunner, Layout};
+    use std::fs;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::path::Path;
+
+    /// What `umount DIR` leaves when something else holds DIR: here a file in it, so
+    /// removing DIR fails (ENOTEMPTY standing in for EBUSY).
+    fn leave_a_file(argv: &[&str]) {
+        fs::write(Path::new(argv[1]).join("busy"), "").unwrap();
+    }
+
+    #[test]
+    fn a_mount_point_left_behind_after_a_successful_reader_is_only_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::under(dir.path());
+        let mut runner = FakeRunner::new();
+        runner.on_success(&["umount"], leave_a_file);
+        let value = with_top(&runner, &layout, true, |_| Ok(42)).unwrap();
+        assert_eq!(value, 42);
+        assert!(layout.ro_top().join("busy").exists());
+    }
+
+    #[test]
+    fn a_mount_point_left_behind_after_a_failed_reader_keeps_the_readers_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::under(dir.path());
+        let mut runner = FakeRunner::new();
+        runner.on_success(&["umount"], leave_a_file);
+        let err = with_top(&runner, &layout, true, |_| -> Result<(), ExecError> {
+            Err(ExecError::new("reader failed"))
+        })
+        .unwrap_err();
+        assert_eq!(err.to_string(), "reader failed");
+    }
+
+    #[test]
+    fn removing_a_mount_point_reports_why_it_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let busy = dir.path().join("ro.1");
+        fs::create_dir(&busy).unwrap();
+        fs::write(busy.join("x"), "").unwrap();
+        let warning = remove_mount_point(&busy).unwrap();
+        assert!(
+            warning.starts_with(&format!("cannot remove {}: ", busy.display())),
+            "{warning}"
+        );
+        assert_eq!(remove_mount_point(&dir.path().join("gone")), None);
+        fs::remove_file(busy.join("x")).unwrap();
+        assert_eq!(remove_mount_point(&busy), None);
+        assert!(!busy.exists());
+    }
 
     #[test]
     fn a_panicking_reader_still_unmounts_and_removes_its_mount_point() {

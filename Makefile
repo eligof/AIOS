@@ -46,8 +46,8 @@ ISO_RM_WORK = $(if $(SUDO),$(SUDO),unshare --map-auto --map-root-user) rm -rf --
 	echo 'Unmount them with "$(strip $(SUDO) umount -R) MOUNTPOINT" (findmnt lists them), then run make again.'; \
 	exit 1; } >&2
 
-.PHONY: check rust-check shell-check bats-check unit-check e2e-unit tools repo keys iso-build \
-	iso iso-check clean-iso e2e FORCE
+.PHONY: check rust-check release-check shell-check bats-check unit-check e2e-unit tools repo \
+	keys iso-build iso iso-check clean-iso e2e FORCE
 
 check: rust-check shell-check bats-check unit-check e2e-unit
 
@@ -60,8 +60,18 @@ rust-check:
 	cd aios-cli && $(CARGO) clippy --workspace -- -D warnings
 	cd aios-cli && $(CARGO) test --workspace --all-features
 	cd aios-cli && $(CARGO) build --release --locked -p aios
-	test -s aios-cli/target/release/aios
-	! grep -qE 'AIOS_(FAKE_RUNNER|TEST_PASSWORD)' aios-cli/target/release/aios
+	$(check-release-bin)
+
+# The shipped binary reads no AIOS_* variable at all, so any AIOS_ string in it means an
+# override leaked into the release build. `make release-check` checks a binary already built.
+RELEASE_BIN ?= aios-cli/target/release/aios
+define check-release-bin
+	test -s $(RELEASE_BIN)
+	! grep -q AIOS_ $(RELEASE_BIN)
+endef
+
+release-check:
+	$(check-release-bin)
 
 shell-check: tools
 	$(SHELLCHECK) -s sh $(SH_SCRIPTS)

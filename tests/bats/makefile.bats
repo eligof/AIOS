@@ -137,3 +137,20 @@ EOF
     [ "$status" -eq 0 ]
     [ "$(wc -l <"$LOG")" -eq 4 ]
 }
+
+# The shipped binary reads no AIOS_* variable, so any AIOS_ string in it means a test hook
+# (or an override) leaked into the release build, not only the two the check used to name.
+@test "make release-check refuses a binary with any AIOS_ string, or an empty one" {
+    printf 'ELF\0usage: aios <command>\0' >"$W/clean"
+    run mk release-check RELEASE_BIN=clean
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    for leak in AIOS_ZONEINFO AIOS_HARDENING_CMDLINE_FILE AIOS_TOP AIOS_FAKE_RUNNER \
+        AIOS_TEST_PASSWORD; do
+        printf 'ELF\0%s\0' "$leak" >"$W/leaky"
+        run mk release-check RELEASE_BIN=leaky
+        [ "$status" -ne 0 ] || { echo "$leak passed"; return 1; }
+    done
+    : >"$W/empty"
+    run mk release-check RELEASE_BIN=empty
+    [ "$status" -ne 0 ]
+}

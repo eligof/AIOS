@@ -22,10 +22,15 @@ pub const SETUP_MODE_HELP: &str = "the firmware is not in Secure Boot Setup Mode
 cannot be enrolled. Reboot into the firmware setup, clear (reset) the Secure Boot keys to \
 enter Setup Mode, boot AIOS again and re-run `aios secureboot enroll`";
 
-/// `aios secureboot enroll`: in Setup Mode, enroll our keys plus Microsoft's (GPU option
-/// ROMs need them). Otherwise an error explaining how to enter Setup Mode.
+/// `aios secureboot enroll`: if Secure Boot is already on, nothing to do. In Setup Mode,
+/// enroll our keys plus Microsoft's (GPU option ROMs need them). Otherwise an error
+/// explaining how to enter Setup Mode.
 pub fn secureboot_enroll(runner: &dyn CommandRunner) -> Result<String, ExecError> {
-    if !sbctl_status(runner)?.setup_mode {
+    let status = sbctl_status(runner)?;
+    if status.secure_boot {
+        return Ok("Secure Boot is already enabled".to_string());
+    }
+    if !status.setup_mode {
         return Err(ExecError::new(SETUP_MODE_HELP));
     }
     run_ok(
@@ -39,13 +44,23 @@ reboot, then run `aios tpm enroll`."
     )
 }
 
-/// `aios tpm enroll`: with Secure Boot on, bind the LUKS volume to TPM2 PCR 7 plus a PIN.
-/// The passphrase and recovery key slots stay.
+/// `aios tpm enroll`: with Secure Boot enforcing (on and out of Setup Mode, so PCR 7
+/// measures our keys), bind the LUKS volume to TPM2 PCR 7 plus a PIN. Interactive:
+/// `systemd-cryptenroll` asks for an existing passphrase and the new PIN. A previous TPM2
+/// slot is replaced (`--wipe-slot=tpm2`, applied after the new one is enrolled); the
+/// passphrase and recovery key slots stay.
 pub fn tpm_enroll(runner: &dyn CommandRunner, layout: &Layout) -> Result<String, ExecError> {
-    if !sbctl_status(runner)?.secure_boot {
+    let status = sbctl_status(runner)?;
+    if !status.secure_boot {
         return Err(ExecError::new(
             "Secure Boot is not enabled: run `aios secureboot enroll`, enable Secure Boot \
 in the firmware, reboot and retry",
+        ));
+    }
+    if status.setup_mode {
+        return Err(ExecError::new(
+            "the firmware is still in Secure Boot Setup Mode: run `aios secureboot enroll`, \
+reboot and retry",
         ));
     }
     let cmdline = fs::read_to_string(&layout.proc_cmdline)
@@ -53,12 +68,15 @@ in the firmware, reboot and retry",
     let uuid = luks_uuid_from_cmdline(&cmdline)
         .ok_or_else(|| ExecError::new("no rd.luks.name=<uuid>=aios on the kernel cmdline"))?;
     let device = format!("/dev/disk/by-uuid/{uuid}");
-    let cmd = Cmd::new("systemd-cryptenroll").args([
-        "--tpm2-device=auto",
-        "--tpm2-with-pin=yes",
-        "--tpm2-pcrs=7",
-        &device,
-    ]);
+    let cmd = Cmd::new("systemd-cryptenroll")
+        .args([
+            "--tpm2-device=auto",
+            "--tpm2-with-pin=yes",
+            "--tpm2-pcrs=7",
+            "--wipe-slot=tpm2",
+            &device,
+        ])
+        .interactive();
     run_ok(runner, &cmd)?;
     Ok(format!(
         "TPM2 + PIN enrolled for {device}; the passphrase and recovery key still work"

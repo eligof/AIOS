@@ -631,6 +631,7 @@ from .test_e2e import (  # noqa: E402
     bad_gens,
     expect_install,
     has_option,
+    leaked_aios_mounts,
     should_delete_vm,
 )
 
@@ -644,6 +645,15 @@ def test_a_mount_option_is_matched_as_a_whole_element_of_findmnts_options() -> N
     assert not has_option("rw,nosuid,nodev,relatime", "ro")
     # Two lines (stacked mounts) are not one bind.
     assert not has_option("ro,relatime\nrw,relatime", "ro")
+
+
+def test_leaked_aios_mounts_are_found_among_all_mount_targets() -> None:
+    # `findmnt -Rn /run/aios` prints nothing when /run/aios itself is no mount point, so the
+    # check lists every target and filters here.
+    assert leaked_aios_mounts("/\n/run\n/run/aios/top\n/efi\n") == ["/run/aios/top"]
+    assert leaked_aios_mounts("/run/aios\n/run/aios/ro.12\n") == ["/run/aios", "/run/aios/ro.12"]
+    assert leaked_aios_mounts("/\n/run\n/run/aios.lock\n/run/aiosx/top\n/efi\n") == []
+    assert leaked_aios_mounts("") == []
 
 
 def test_the_vm_disk_is_deleted_only_when_every_test_passed_and_without_keep_vm() -> None:

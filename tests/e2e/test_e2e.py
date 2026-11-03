@@ -128,6 +128,17 @@ def has_option(options: str, name: str) -> bool:
     return len(lines) == 1 and name in lines[0].split(",")
 
 
+def leaked_aios_mounts(findmnt_targets: str) -> list[str]:
+    """The mount targets of `findmnt -rno TARGET` at or under /run/aios. `findmnt -Rn
+    /run/aios` can't be used: it prints nothing when /run/aios itself is no mount point."""
+    return [t for t in findmnt_targets.splitlines() if re.fullmatch(r"/run/aios(/.*)?", t)]
+
+
+def assert_no_aios_mounts(shell: Shell, message: str) -> None:
+    leaked = leaked_aios_mounts(shell.check("findmnt -rno TARGET"))
+    assert not leaked, f"{message}: {leaked}"
+
+
 def should_delete_vm(keep_vm: bool, passed: int, total: int) -> bool:
     """Whether teardown deletes the VM disk and TPM state: only when every test of the module
     passed, and without --keep-vm. A failed, interrupted (Ctrl-C) or partial run keeps them
@@ -235,7 +246,7 @@ def test_05_apply_builds_gen2_with_a_new_package(machine: Machine) -> None:
     assert shell is not None
     shell.check(ADD_TREE)
     assert "reboot to activate gen-0002" in shell.check("aios apply --yes", APPLY_TIMEOUT)
-    assert shell.run("findmnt -Rn /run/aios").output == "", "apply leaked mounts under /run/aios"
+    assert_no_aios_mounts(shell, "apply leaked mounts under /run/aios")
 
     shell = machine.reboot()
 
@@ -281,6 +292,6 @@ def test_08_a_second_apply_without_rebooting_succeeds_and_leaks_no_mounts(machin
     """No stale state (mounts, candidate, lock) from the earlier applies blocks a new one."""
     shell = machine.shell
     assert shell is not None
-    assert shell.run("findmnt -Rn /run/aios").output == "", "mounts left in the host namespace"
+    assert_no_aios_mounts(shell, "mounts left in the host namespace")
     assert "reboot to activate gen-" in shell.check("aios apply --yes --upgrade", APPLY_TIMEOUT)
-    assert shell.run("findmnt -Rn /run/aios").output == "", "the second apply leaked mounts"
+    assert_no_aios_mounts(shell, "the second apply leaked mounts")

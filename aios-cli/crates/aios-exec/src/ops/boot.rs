@@ -17,6 +17,7 @@ pub struct BootState {
     /// `aios.gen=` of the running kernel.
     pub booted: Option<GenId>,
     /// The `bootctl set-default` override (`LoaderEntryDefault`), if it names an aios UKI.
+    /// A missing variable is no override; one that can't be read fails [`BootState::read`].
     pub default_override: Option<GenId>,
     /// Newest generation with a main-kernel UKI that isn't bad: what `loader.conf` picks.
     pub newest: Option<GenId>,
@@ -29,11 +30,14 @@ impl BootState {
         let booted = fs::read_to_string(&layout.proc_cmdline)
             .ok()
             .and_then(|cmdline| gen_from_cmdline(&cmdline));
-        let default_override = fs::read(layout.loader_entry_default())
-            .ok()
-            .and_then(|bytes| parse_efivar_utf16(&bytes))
-            .and_then(|entry| UkiName::parse(&entry))
-            .map(|uki| uki.gen);
+        let efivar = layout.loader_entry_default();
+        let default_override = match fs::read(&efivar) {
+            Ok(bytes) => parse_efivar_utf16(&bytes)
+                .and_then(|entry| UkiName::parse(&entry))
+                .map(|uki| uki.gen),
+            Err(e) if e.kind() == ErrorKind::NotFound => None,
+            Err(e) => return Err(ExecError::io(&efivar, e)),
+        };
         let ukis = read_ukis(&layout.uki_dir())?;
         let newest = ukis
             .iter()

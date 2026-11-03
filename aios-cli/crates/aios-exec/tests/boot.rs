@@ -1,6 +1,6 @@
 mod common;
 
-use aios_exec::ops::{gc, gc_mounted, rollback, BootState};
+use aios_exec::ops::{gc, gc_mounted, rollback, BootState, GcMode};
 use aios_gen::GenId;
 use common::{mkdir, write, Fixture};
 use std::fs;
@@ -195,7 +195,7 @@ fn gc_keeps_the_newest_protected_and_gen_one() {
 #[test]
 fn gc_with_keep_zero_still_keeps_booted_and_default() {
     let fx = many_gens();
-    let deleted = gc_mounted(&fx.runner, &fx.layout, 0).unwrap();
+    let deleted = gc_mounted(&fx.runner, &fx.layout, 0, GcMode::Running).unwrap();
     assert_eq!(
         deleted,
         [2, 3, 4, 5, 6, 9].map(GenId),
@@ -221,7 +221,7 @@ fn gc_deletes_incomplete_generations_and_ignores_their_ukis_for_the_default() {
         "uki",
         0o644,
     );
-    let deleted = gc_mounted(&fx.runner, l, 0).unwrap();
+    let deleted = gc_mounted(&fx.runner, l, 0, GcMode::Running).unwrap();
     assert_eq!(deleted, [2, 3, 4, 5, 6, 9, 10, 11, 12].map(GenId));
     for name in ["@usr-gen-0010", "@etc-gen-0011"] {
         assert!(!l.subvol(name).exists(), "{name}");
@@ -283,4 +283,69 @@ fn gc_with_nothing_to_delete() {
     assert!(gc(&fx.runner, &fx.layout, 5).unwrap().is_empty());
     assert_eq!(fx.calls().len(), 2);
     assert!(Path::new(&fx.layout.subvol("@usr-gen-0006")).exists());
+}
+
+const UNKNOWN_BOOTED: &str = "cannot determine the booted generation; refusing to garbage-collect";
+
+/// Without `aios.gen=` gc can't tell which generation is running, so it deletes nothing.
+#[test]
+fn gc_refuses_when_the_booted_generation_is_unknown() {
+    for cmdline in [Some("root=/dev/mapper/aios rw quiet\n"), None] {
+        let fx = many_gens();
+        let before = esp(&fx);
+        match cmdline {
+            Some(text) => write(&fx.layout.proc_cmdline, text, 0o644),
+            None => fs::remove_file(&fx.layout.proc_cmdline).unwrap(),
+        }
+        let err = gc(&fx.runner, &fx.layout, 0).unwrap_err();
+        assert_eq!(err.to_string(), UNKNOWN_BOOTED, "{cmdline:?}");
+        let err = gc_mounted(&fx.runner, &fx.layout, 0, GcMode::Running).unwrap_err();
+        assert_eq!(err.to_string(), UNKNOWN_BOOTED);
+        assert!(
+            !fx.calls()
+                .iter()
+                .any(|c| c.contains("delete") || c.starts_with("fsync")),
+            "{:?}",
+            fx.calls()
+        );
+        for n in 1..=9 {
+            assert!(fx.layout.subvol(&GenId(n).usr_subvol()).is_dir(), "gen-{n}");
+        }
+        assert_eq!(esp(&fx), before);
+    }
+}
+
+/// Bootstrap's ESP-space gc runs before anything on the target is booted.
+#[test]
+fn bootstrap_gc_needs_no_booted_generation() {
+    let fx = many_gens();
+    write(
+        &fx.layout.proc_cmdline,
+        "archisobasedir=arch quiet\n",
+        0o644,
+    );
+    let deleted = gc_mounted(&fx.runner, &fx.layout, 0, GcMode::Bootstrap).unwrap();
+    assert_eq!(
+        deleted,
+        [2, 3, 4, 5, 6, 7, 9].map(GenId),
+        "1 and 8 (newest good) stay"
+    );
+}
+
+/// Only a missing `LoaderEntryDefault` means "no override": one that can't be read is an
+/// error, so gc never deletes a default it failed to see.
+#[test]
+fn an_unreadable_boot_default_is_an_error() {
+    let fx = many_gens();
+    let before = esp(&fx);
+    mkdir(&fx.layout.loader_entry_default());
+    let err = BootState::read(&fx.layout).unwrap_err();
+    assert!(
+        err.to_string()
+            .starts_with(&format!("{}: ", fx.layout.loader_entry_default().display())),
+        "{err}"
+    );
+    assert!(gc(&fx.runner, &fx.layout, 0).is_err());
+    assert_eq!(esp(&fx), before);
+    assert!(!fx.calls().iter().any(|c| c.contains("delete")));
 }

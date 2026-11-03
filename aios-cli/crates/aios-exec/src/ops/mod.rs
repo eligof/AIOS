@@ -11,7 +11,7 @@ mod rollback;
 mod status;
 
 pub use boot::{read_ukis, BootState, EspUki};
-pub use gc::{gc, gc_mounted};
+pub use gc::{gc, gc_mounted, GcMode};
 pub use gens::{gen_list, gen_rows, render_gen_list, GenRow};
 pub use keys::{secureboot_enroll, tpm_enroll};
 pub use passwd::passwd;

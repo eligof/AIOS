@@ -376,6 +376,22 @@ fn a_full_esp_runs_gc_then_fails() {
     );
 }
 
+/// Nothing is booted from a bootstrap target, and its ESP-space gc runs anyway.
+#[test]
+fn a_full_esp_in_bootstrap_runs_gc_without_a_booted_generation() {
+    let mut fx = Fixture::fresh();
+    fx.runner.respond(&["df"], Output::ok("Avail\n10\n"));
+    let err = fx.run().unwrap_err();
+    assert_eq!(err.step, Step::EspSpace);
+    assert_eq!(
+        err.detail,
+        format!(
+            "{} has 10 bytes free, the new UKIs need 22",
+            fx.layout.esp.display()
+        )
+    );
+}
+
 #[test]
 fn a_clean_apply_has_no_warnings() {
     let fx = Fixture::booted();

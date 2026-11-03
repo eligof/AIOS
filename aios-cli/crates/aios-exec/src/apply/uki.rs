@@ -1,4 +1,4 @@
-use super::{mkdir, Run};
+use super::{mkdir, Mode, Run};
 use crate::{ops, parse_df_avail, run_ok, Cmd, ExecError};
 use aios_gen::{Flavor, UkiName};
 use std::collections::BTreeMap;
@@ -87,7 +87,11 @@ impl Run<'_> {
         let mut free = self.esp_free()?;
         if free < need {
             eprintln!("aios: the ESP has {free} bytes free and needs {need}: running gc");
-            ops::gc_mounted(self.ctx.runner, l, 5)?;
+            let mode = match self.ctx.mode {
+                Mode::Apply { .. } => ops::GcMode::Running,
+                Mode::Bootstrap => ops::GcMode::Bootstrap,
+            };
+            ops::gc_mounted(self.ctx.runner, l, 5, mode)?;
             free = self.esp_free()?;
         }
         if free < need {

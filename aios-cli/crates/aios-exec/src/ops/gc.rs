@@ -3,13 +3,25 @@ use crate::{btrfs, CommandRunner, ExecError, Layout};
 use aios_gen::{gc_select, list_complete, parse_subvol, Flavor, GenId};
 use std::fs;
 
+/// Where gc runs, which decides the generation it must spare as booted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GcMode {
+    /// On a running AIOS system (`aios gc`, apply's ESP-space gc): the generation
+    /// `aios.gen=` names is booted. Without one, gc refuses to delete anything.
+    Running,
+    /// `aios bootstrap`'s ESP-space gc, on a target nothing has booted from yet.
+    Bootstrap,
+}
+
 /// `aios gc`: mount the top level, delete old generations, unmount.
 pub fn gc(
     runner: &dyn CommandRunner,
     layout: &Layout,
     keep: usize,
 ) -> Result<Vec<GenId>, ExecError> {
-    with_top(runner, layout, false, |top| gc_mounted(runner, top, keep))
+    with_top(runner, layout, false, |top| {
+        gc_mounted(runner, top, keep, GcMode::Running)
+    })
 }
 
 /// Delete generations beyond the newest `keep`, never the booted one, the default (the
@@ -19,13 +31,22 @@ pub fn gc(
 /// the newest good one either. A generation's UKIs go first, and the ESP directory is
 /// fsynced before its subvolumes are deleted, so no UKI outlives them even after a power
 /// loss; a `btrfs filesystem sync` makes the deletes durable. Needs the top level mounted.
-/// Returns every generation something was deleted of, ascending.
+/// Returns every generation something was deleted of, ascending. In [`GcMode::Running`]
+/// it refuses when the booted generation is unknown, and in [`GcMode::Bootstrap`] there
+/// is none to spare.
 pub fn gc_mounted(
     runner: &dyn CommandRunner,
     layout: &Layout,
     keep: usize,
+    mode: GcMode,
 ) -> Result<Vec<GenId>, ExecError> {
     let state = BootState::read(layout)?;
+    let booted = match mode {
+        GcMode::Running => Some(state.booted.ok_or_else(|| {
+            ExecError::new("cannot determine the booted generation; refusing to garbage-collect")
+        })?),
+        GcMode::Bootstrap => None,
+    };
     let names = btrfs::list_names(&layout.top)?;
     let complete = list_complete(&names);
     let newest = state
@@ -35,7 +56,7 @@ pub fn gc_mounted(
         .map(|u| u.name.gen)
         .filter(|gen| complete.contains(gen))
         .max();
-    let protected: Vec<GenId> = [state.booted, state.default_override, newest]
+    let protected: Vec<GenId> = [booted, state.default_override, newest]
         .into_iter()
         .flatten()
         .collect();
@@ -44,7 +65,7 @@ pub fn gc_mounted(
         .iter()
         .filter_map(|name| parse_subvol(name).map(|(_, gen)| gen))
         .chain(state.ukis.iter().map(|u| u.name.gen))
-        .filter(|gen| !complete.contains(gen) && Some(*gen) != state.booted);
+        .filter(|gen| !complete.contains(gen) && Some(*gen) != booted);
     doomed.extend(incomplete);
     doomed.sort();
     doomed.dedup();

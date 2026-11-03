@@ -412,6 +412,21 @@ fn rollback_calls(m: &Machine, pid: u32) -> String {
 }
 
 #[test]
+fn gc_refuses_without_a_booted_generation() {
+    let m = Machine::new();
+    gen_7(&m, "aios-gen-0007-cachyos+3.efi");
+    m.write("cmdline", "root=/dev/mapper/aios rw quiet\n", 0o644);
+    let out = m.aios(&["gc", "--keep", "0"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "aios: cannot determine the booted generation; refusing to garbage-collect\n"
+    );
+    assert!(!m.calls().contains("delete"), "{}", m.calls());
+    assert!(m.path("top/@usr-gen-0007").is_dir());
+}
+
+#[test]
 fn rollback_sets_the_boot_default() {
     let m = Machine::new();
     gen_7(&m, "aios-gen-0007-cachyos+3.efi");

@@ -39,6 +39,10 @@ ADD_FAIL_HEALTH = (
 # that failed under set -e (installer/lib/common.sh, cleanup.sh). The whole line.
 INSTALL_FAILURE = r"aios-install: (?:error: |step \d+ \([^)\n]*\) failed)[^\n]*\n"
 
+# (f): gen-3's main UKI after three failed boots: no tries left (UkiName: +LEFT-DONE).
+GEN3_BAD_UKI = "aios-gen-0003-cachyos+0-3.efi"
+UKI_DIR = "/efi/EFI/Linux"
+
 INSTALL_TIMEOUT = 90 * 60
 SHUTDOWN_TIMEOUT = 5 * 60
 BOOT_TIMEOUT = 10 * 60
@@ -108,6 +112,13 @@ class Machine:
         """Run `cmd` as the test user. runuser keeps root's $HOME, so use absolute paths."""
         assert self.shell is not None
         return self.shell.check(f"runuser -u {USER} -- sh -c '{cmd}'")
+
+
+def bad_gens(status: str) -> list[int]:
+    """The generations on the `bad:` line of `aios status` ("bad:     gen-0003, gen-0005")."""
+    m = re.search(r"^bad:\s+(.*)$", status, re.M)
+    assert m, f"no bad: line in {status!r}"
+    return [int(n) for n in re.findall(r"gen-(\d+)", m.group(1))]
 
 
 def has_option(options: str, name: str) -> bool:
@@ -224,6 +235,7 @@ def test_05_apply_builds_gen2_with_a_new_package(machine: Machine) -> None:
     assert shell is not None
     shell.check(ADD_TREE)
     assert "reboot to activate gen-0002" in shell.check("aios apply --yes", APPLY_TIMEOUT)
+    assert shell.run("findmnt -Rn /run/aios").output == "", "apply leaked mounts under /run/aios"
 
     shell = machine.reboot()
 
@@ -258,5 +270,17 @@ def test_07_a_failing_generation_falls_back_after_three_boots(machine: Machine) 
 
     shell = machine.reboot()
 
+    # gen-2 is blessed (no boot counter), so aios-health does not run on it. The fallback is
+    # shown by gen-3's main UKI having no tries left, and by aios status listing it as bad.
     assert machine.gen() == 2
-    assert shell.check("systemctl is-active aios-health.service") == "active"
+    assert shell.run(f"test -e {UKI_DIR}/{GEN3_BAD_UKI}").rc == 0
+    assert 3 in bad_gens(shell.check("aios status"))
+
+
+def test_08_a_second_apply_without_rebooting_succeeds_and_leaks_no_mounts(machine: Machine) -> None:
+    """No stale state (mounts, candidate, lock) from the earlier applies blocks a new one."""
+    shell = machine.shell
+    assert shell is not None
+    assert shell.run("findmnt -Rn /run/aios").output == "", "mounts left in the host namespace"
+    assert "reboot to activate gen-" in shell.check("aios apply --yes --upgrade", APPLY_TIMEOUT)
+    assert shell.run("findmnt -Rn /run/aios").output == "", "the second apply leaked mounts"

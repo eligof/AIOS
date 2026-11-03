@@ -624,9 +624,11 @@ from .test_e2e import (  # noqa: E402
     ADD_FAIL_HEALTH,
     ADD_TREE,
     ISO_SERIAL_KEY,
+    GEN3_BAD_UKI,
     ISO_SERIAL_TITLE,
     MANIFEST,
     Machine,
+    bad_gens,
     expect_install,
     has_option,
     should_delete_vm,
@@ -737,3 +739,14 @@ def test_the_manifest_edits_apply_once_to_the_installed_manifest(tmp_path: Path)
         cmd = edit.replace(MANIFEST, str(manifest))
         subprocess.run(["sh", "-c", cmd], check=True)
         assert manifest.read_text().count(expected) == 1, cmd
+
+
+def test_bad_gens_reads_the_bad_line_of_aios_status() -> None:
+    status = "booted:  gen-0002\ndefault: gen-0002\nbad:     gen-0003, gen-0005\ndrift:   none\n"
+    assert bad_gens(status) == [3, 5]
+    assert bad_gens("booted:  gen-0002\nbad:     none\n") == []
+
+
+def test_the_fallback_check_names_gen3s_exhausted_uki() -> None:
+    # UkiName::file_name: aios-gen-NNNN-<flavor>+LEFT-DONE.efi; three tries, none left.
+    assert GEN3_BAD_UKI == "aios-gen-0003-cachyos+0-3.efi"

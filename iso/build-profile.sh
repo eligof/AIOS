@@ -26,8 +26,12 @@ fail() {
 [[ -f $repo/aios-local.db.tar.gz ]] || fail "no $repo/aios-local.db.tar.gz: run make repo first"
 repo=$(readlink -f "$repo")
 [[ $repo =~ ^/[A-Za-z0-9._/+-]+$ ]] || fail "the repo path $repo has characters pacman.conf cannot hold"
-grep -Eqx 'AIOS_CACHYOS_KEYS="[0-9A-F]{40}( [0-9A-F]{40})*"' "$keys" 2>/dev/null ||
+# The installer sources KEYS as root, so take it only as make keys writes it: lines that
+# start with # and exactly one assignment line.
+LC_ALL=C grep -Eqx 'AIOS_CACHYOS_KEYS="[0-9A-F]{40}( [0-9A-F]{40})*"' "$keys" 2>/dev/null ||
     fail "$keys pins no CachyOS key: run make keys"
+[[ $(LC_ALL=C grep -vc '^#' "$keys") == 1 ]] ||
+    fail "$keys holds more than comments and one AIOS_CACHYOS_KEYS line: run make keys"
 if [[ -e $out || -L $out ]]; then
     [[ -f $out/$marker ]] || fail "$out exists but was not made by build-profile.sh; not touching it"
     rm -rf -- "$out"

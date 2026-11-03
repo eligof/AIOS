@@ -360,3 +360,272 @@ fn symlink_inside_repo_is_allowed() {
     let m = parse(&raw).unwrap();
     assert!(validate(&m, &raw, &env).is_empty());
 }
+
+/// `VALID` with `directories` replaced by the TOML array body `dirs`.
+fn with_persist_dirs(dirs: &str) -> String {
+    VALID.replace(
+        "directories = [\"/var/lib/NetworkManager\", \"/var/cache/pacman/pkg\"]",
+        &format!("directories = [{dirs}]"),
+    )
+}
+
+/// `(TOML basic-string body, decoded value)` pairs, one per forbidden path character.
+const FORBIDDEN_PATH_CHARS: [(&str, &str); 9] = [
+    (r"a b", "a b"),
+    (r"a\tb", "a\tb"),
+    (r"a\nb", "a\nb"),
+    (r"a\u0001b", "a\u{1}b"),
+    (r"a\u007fb", "a\u{7f}b"),
+    (r"100%", "100%"),
+    (r"a\\b", "a\\b"),
+    (r#"a\"b"#, "a\"b"),
+    (r"a'b", "a'b"),
+];
+
+#[test]
+fn persist_directory_with_forbidden_character_rejected() {
+    for (toml, decoded) in FORBIDDEN_PATH_CHARS {
+        let raw = with_persist_dirs(&format!("\"/var/lib/{toml}\""));
+        let p = format!("/var/lib/{decoded}");
+        assert_error(
+            &raw,
+            &format!("persist path {p:?} contains a forbidden character"),
+        );
+    }
+}
+
+#[test]
+fn persist_file_with_forbidden_character_rejected() {
+    for (toml, decoded) in FORBIDDEN_PATH_CHARS {
+        let raw = VALID.replace("files = []", &format!("files = [\"/var/lib/{toml}\"]"));
+        let p = format!("/var/lib/{decoded}");
+        assert_error(
+            &raw,
+            &format!("persist path {p:?} contains a forbidden character"),
+        );
+    }
+}
+
+#[test]
+fn home_key_with_forbidden_character_rejected() {
+    for (toml, decoded) in FORBIDDEN_PATH_CHARS {
+        let raw = VALID.replace("\".zshrc\" =", &format!("\".zsh{toml}rc\" ="));
+        let target = format!(".zsh{decoded}rc");
+        assert_error(
+            &raw,
+            &format!("user \"eli\": home entry {target:?} contains a forbidden character"),
+        );
+    }
+}
+
+#[test]
+fn invalid_shell_rejected() {
+    let cases = [
+        ("usr/bin/zsh", "usr/bin/zsh"),
+        ("", ""),
+        ("/usr/bin/zsh:x", "/usr/bin/zsh:x"),
+        ("/usr/bin/z sh", "/usr/bin/z sh"),
+        (r"/usr/bin/z\tsh", "/usr/bin/z\tsh"),
+        (r"/usr/bin/zsh\n", "/usr/bin/zsh\n"),
+        (r"/usr/bin/z\u0000sh", "/usr/bin/z\u{0}sh"),
+    ];
+    for (toml, shell) in cases {
+        let raw = VALID.replace("shell = \"/usr/bin/zsh\"", &format!("shell = \"{toml}\""));
+        assert_error(&raw, &format!("user \"eli\": invalid shell {shell:?}"));
+    }
+}
+
+#[test]
+fn invalid_locale_rejected() {
+    let cases = [
+        ("", ""),
+        ("en US", "en US"),
+        (r"en_US.UTF-8\n", "en_US.UTF-8\n"),
+        ("en_US;reboot", "en_US;reboot"),
+        ("../../etc/shadow", "../../etc/shadow"),
+        ("en_US=x", "en_US=x"),
+        ("é", "é"),
+    ];
+    for (toml, v) in cases {
+        let raw = VALID.replace("locale = \"en_US.UTF-8\"", &format!("locale = \"{toml}\""));
+        assert_error(&raw, &format!("invalid locale {v:?}"));
+    }
+}
+
+#[test]
+fn invalid_keymap_rejected() {
+    let cases = [
+        ("", ""),
+        ("us x", "us x"),
+        (r"us\n", "us\n"),
+        ("us@euro", "us@euro"),
+        ("../../x", "../../x"),
+        ("us;reboot", "us;reboot"),
+    ];
+    for (toml, v) in cases {
+        let raw = VALID.replace("keymap = \"us\"", &format!("keymap = \"{toml}\""));
+        assert_error(&raw, &format!("invalid keymap {v:?}"));
+    }
+}
+
+#[test]
+fn common_locales_and_keymaps_accepted() {
+    for (locale, keymap) in [
+        ("C.UTF-8", "de-latin1"),
+        ("sr_RS.UTF-8@latin", "de_CH-latin1"),
+        ("en_US", "fr.map"),
+    ] {
+        let raw = VALID
+            .replace(
+                "locale = \"en_US.UTF-8\"",
+                &format!("locale = \"{locale}\""),
+            )
+            .replace("keymap = \"us\"", &format!("keymap = \"{keymap}\""));
+        assert_eq!(errors(&raw), Vec::<String>::new(), "{locale} / {keymap}");
+    }
+}
+
+fn with_extra_cmdline(body: &str) -> String {
+    VALID.replace("extra_cmdline = []", &format!("extra_cmdline = [{body}]"))
+}
+
+#[test]
+fn extra_cmdline_token_must_be_a_single_word() {
+    let cases = [
+        ("", ""),
+        ("a b", "a b"),
+        (r"a\tb", "a\tb"),
+        (r"quiet\nsplash", "quiet\nsplash"),
+        (r#"a=\"b c\""#, "a=\"b c\""),
+        (r#"x\""#, "x\""),
+        (r"a\u0001", "a\u{1}"),
+    ];
+    for (toml, t) in cases {
+        let raw = with_extra_cmdline(&format!("\"{toml}\""));
+        assert_error(
+            &raw,
+            &format!("extra_cmdline token {t:?} must be a single word"),
+        );
+    }
+}
+
+#[test]
+fn extra_cmdline_token_may_not_override_aios_parameters() {
+    for t in [
+        "root=/dev/sda2",
+        "rootflags=subvol=@",
+        "rw",
+        "ro",
+        "mount.usr=/dev/sda3",
+        "mount.usrflags=rw",
+        "rd.luks.name=0b6c2e7f-5d0a-4c2e-9a71-3f1d2c4b5a69=evil",
+        "aios.gen=0001",
+        "lockdown=none",
+        "lsm=",
+        "init=/bin/sh",
+        "ro=1",
+    ] {
+        let raw = with_extra_cmdline(&format!("\"{t}\""));
+        assert_error(
+            &raw,
+            &format!("extra_cmdline token {t:?} overrides a parameter AIOS sets"),
+        );
+    }
+}
+
+#[test]
+fn ordinary_extra_cmdline_tokens_accepted() {
+    let raw = with_extra_cmdline(
+        "\"console=ttyS0,115200\", \"aios.test.fail_health=1\", \"rootwait\", \"initrd_debug\", \"quiet\"",
+    );
+    assert_eq!(errors(&raw), Vec::<String>::new());
+}
+
+#[test]
+fn persist_path_conflicting_with_aios_managed_paths_rejected() {
+    let cases = [
+        ("/etc", "/etc"),
+        ("/etc/", "/etc"),
+        ("/etc/passwd", "/etc/passwd"),
+        ("/etc/shadow", "/etc/shadow"),
+        ("/etc/gshadow", "/etc/gshadow"),
+        ("/etc/group", "/etc/group"),
+        ("/etc/fstab", "/etc/fstab"),
+        ("/etc/hostname", "/etc/hostname"),
+        ("/etc/locale.conf", "/etc/locale.conf"),
+        ("/etc/locale.gen", "/etc/locale.gen"),
+        ("/etc/vconsole.conf", "/etc/vconsole.conf"),
+        ("/etc/localtime", "/etc/localtime"),
+        ("/etc/kernel", "/etc/kernel/cmdline"),
+        ("/etc/kernel/cmdline", "/etc/kernel/cmdline"),
+        ("/etc/tmpfiles.d", "/etc/tmpfiles.d/aios-persist.conf"),
+        (
+            "/etc/tmpfiles.d/aios-home.conf",
+            "/etc/tmpfiles.d/aios-home.conf",
+        ),
+        ("/etc/aios", "/etc/aios"),
+        ("/etc/aios/home/eli", "/etc/aios"),
+        ("/etc/nftables.conf", "/etc/nftables.conf"),
+        (
+            "/etc/pacman.d",
+            "/etc/pacman.d/hooks/90-mkinitcpio-install.hook",
+        ),
+        ("/efi", "/efi"),
+        ("/efi/EFI/Linux", "/efi"),
+        ("/proc/sys", "/proc"),
+        ("/sys", "/sys"),
+        ("/dev/shm", "/dev"),
+        ("/run/aios", "/run"),
+        ("/tmp", "/tmp"),
+        ("/var/log", "/var/log"),
+        ("/var/log/journal", "/var/log"),
+    ];
+    for (p, other) in cases {
+        let raw = with_persist_dirs(&format!("\"{p}\""));
+        assert_error(
+            &raw,
+            &format!("persist path {p:?} conflicts with {other:?}, which aios manages"),
+        );
+    }
+}
+
+#[test]
+fn persist_file_conflicting_with_a_generated_file_rejected() {
+    let raw = VALID.replace("files = []", "files = [\"/etc/hostname\"]");
+    assert_error(
+        &raw,
+        "persist path \"/etc/hostname\" conflicts with \"/etc/hostname\", which aios manages",
+    );
+}
+
+#[test]
+fn persist_paths_near_managed_ones_accepted() {
+    let raw = with_persist_dirs(
+        "\"/etc/NetworkManager/system-connections\", \"/var/lib/systemd\", \"/var/logs\", \"/etc/aios-extra\", \"/etc/kernel.d\"",
+    )
+    .replace("files = []", "files = [\"/etc/machine-id\", \"/etc/passwd-\"]");
+    assert_eq!(errors(&raw), Vec::<String>::new());
+}
+
+#[test]
+fn home_key_with_empty_or_dot_component_rejected() {
+    for key in ["./", ".", "a//b", "./.zshrc", "a/./b", ".config//"] {
+        let raw = VALID.replace("\".config/autostart/\" =", &format!("\"{key}\" ="));
+        assert_error(
+            &raw,
+            &format!("user \"eli\": home entry {key:?} must be relative inside the home directory"),
+        );
+    }
+}
+
+#[test]
+fn home_keys_equal_up_to_trailing_slash_rejected() {
+    let raw = VALID.replace(
+        "\".zshrc\" = \"home/eli/zshrc\"",
+        "\".config/autostart\" = \"home/eli/zshrc\"",
+    );
+    assert_error(
+        &raw,
+        "user \"eli\": duplicate home entry \".config/autostart/\"",
+    );
+}

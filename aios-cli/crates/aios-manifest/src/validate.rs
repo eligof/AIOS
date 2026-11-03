@@ -1,6 +1,43 @@
 use crate::{locate_key, locate_section, locate_value, Manifest, ManifestError, KNOWN_KERNELS};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+
+/// Files aios renders into every generation's `/etc` (spec §4.3 step 5). Persisting one would
+/// shadow the rendered copy.
+const GENERATED_ETC: &[&str] = &[
+    "/etc/passwd",
+    "/etc/group",
+    "/etc/shadow",
+    "/etc/gshadow",
+    "/etc/fstab",
+    "/etc/hostname",
+    "/etc/locale.conf",
+    "/etc/locale.gen",
+    "/etc/vconsole.conf",
+    "/etc/localtime",
+    "/etc/kernel/cmdline",
+    "/etc/tmpfiles.d/aios-persist.conf",
+    "/etc/tmpfiles.d/aios-home.conf",
+];
+
+/// Mount points and runtime trees a persist bind may not equal or sit under.
+const SYSTEM_TREES: &[&str] = &["/efi", "/proc", "/sys", "/dev", "/run", "/tmp", "/var/log"];
+
+/// Kernel parameters aios puts on the command line itself (`aios-render`'s `cmdline` and the
+/// hardening file). `kernel.extra_cmdline` may not set them again.
+const RESERVED_CMDLINE_KEYS: &[&str] = &[
+    "root",
+    "rootflags",
+    "rw",
+    "ro",
+    "mount.usr",
+    "mount.usrflags",
+    "rd.luks.name",
+    "aios.gen",
+    "lockdown",
+    "lsm",
+    "init",
+];
 
 /// Where validation looks for files the manifest refers to.
 #[derive(Debug, Clone)]
@@ -45,6 +82,20 @@ impl Validator<'_> {
                 format!("invalid hostname {host:?}"),
             );
         }
+        let locale = &m.system.locale;
+        if !ascii_word(locale, "_.@-") {
+            self.err(
+                locate_key(self.raw, "system", "locale"),
+                format!("invalid locale {locale:?}"),
+            );
+        }
+        let keymap = &m.system.keymap;
+        if !ascii_word(keymap, "_.-") {
+            self.err(
+                locate_key(self.raw, "system", "keymap"),
+                format!("invalid keymap {keymap:?}"),
+            );
+        }
         let tz = &m.system.timezone;
         if !is_safe_relative(tz) || !env.zoneinfo_dir.join(tz).is_file() {
             self.err(
@@ -74,6 +125,20 @@ impl Validator<'_> {
                 self.err(
                     locate_key(self.raw, "kernel", "fallback"),
                     "fallback kernel must differ from default".to_string(),
+                );
+            }
+        }
+        for t in &m.kernel.extra_cmdline {
+            let pos = locate_value(self.raw, "kernel", &format!("\"{t}\""));
+            if t.is_empty() || t.chars().any(|c| is_space_or_control(c) || c == '"') {
+                self.err(
+                    pos,
+                    format!("extra_cmdline token {t:?} must be a single word"),
+                );
+            } else if RESERVED_CMDLINE_KEYS.contains(&cmdline_key(t)) {
+                self.err(
+                    pos,
+                    format!("extra_cmdline token {t:?} overrides a parameter AIOS sets"),
                 );
             }
         }
@@ -127,6 +192,12 @@ impl Validator<'_> {
             .collect();
         for p in &all {
             let pos = locate_value(self.raw, "persist", &format!("\"{p}\""));
+            if has_forbidden_path_char(p) {
+                self.err(
+                    pos,
+                    format!("persist path {p:?} contains a forbidden character"),
+                );
+            }
             if !p.starts_with('/') || has_parent(p) {
                 self.err(
                     pos,
@@ -148,6 +219,12 @@ impl Validator<'_> {
                         format!("persist path {p:?} may not be under {forbidden}"),
                     );
                 }
+            }
+            if let Some(other) = managed_conflict(p, m) {
+                self.err(
+                    pos,
+                    format!("persist path {p:?} conflicts with {other:?}, which aios manages"),
+                );
             }
         }
         for (i, a) in all.iter().enumerate() {
@@ -182,6 +259,12 @@ impl Validator<'_> {
                     format!("user {name:?}: uid {} already used by {other:?}", user.uid),
                 );
             }
+            if !valid_shell(&user.shell) {
+                self.err(
+                    pos,
+                    format!("user {name:?}: invalid shell {:?}", user.shell),
+                );
+            }
             if !env.secrets_dir.join("passwd").join(name).is_file() {
                 self.err(
                     pos,
@@ -190,9 +273,18 @@ impl Validator<'_> {
                     ),
                 );
             }
+            let mut targets: BTreeSet<&str> = BTreeSet::new();
             for (target, src) in &user.home {
                 let hpos = locate_key(self.raw, &home_section, &format!("\"{target}\""));
-                if target.is_empty() || target.starts_with('/') || has_parent(target) {
+                if has_forbidden_path_char(target) {
+                    self.err(
+                        hpos,
+                        format!(
+                            "user {name:?}: home entry {target:?} contains a forbidden character"
+                        ),
+                    );
+                }
+                if !valid_home_key(target) {
                     self.err(
                         hpos,
                         format!(
@@ -200,6 +292,12 @@ impl Validator<'_> {
                         ),
                     );
                     continue;
+                }
+                if !targets.insert(target.strip_suffix('/').unwrap_or(target)) {
+                    self.err(
+                        hpos,
+                        format!("user {name:?}: duplicate home entry {target:?}"),
+                    );
                 }
                 let want_dir = target.ends_with('/');
                 let kind = if want_dir { "directory" } else { "file" };
@@ -239,6 +337,63 @@ fn escapes_repo(repo_root: &Path, src: &str) -> bool {
         (Ok(root), Ok(resolved)) => !resolved.starts_with(root),
         _ => true,
     }
+}
+
+/// The aios-managed path `p` (a persist path) equals, contains or lies under, if any.
+/// `/etc` itself only conflicts when equal, so `/etc/<subdir>` can still be persisted.
+fn managed_conflict(p: &str, m: &Manifest) -> Option<String> {
+    if Path::new(p) == Path::new("/etc") {
+        return Some("/etc".to_string());
+    }
+    let managed = GENERATED_ETC
+        .iter()
+        .copied()
+        .chain(["/etc/aios"])
+        .chain(m.files.keys().map(String::as_str));
+    for other in managed {
+        if is_under(p, other) || is_under(other, p) {
+            return Some(other.to_string());
+        }
+    }
+    SYSTEM_TREES
+        .iter()
+        .find(|tree| is_under(p, tree))
+        .map(|tree| tree.to_string())
+}
+
+/// Characters that would split or reinterpret a path in fstab, tmpfiles.d or a unit file:
+/// whitespace, control characters, `%` (specifiers), `\` (escapes) and quotes.
+fn has_forbidden_path_char(p: &str) -> bool {
+    p.chars()
+        .any(|c| is_space_or_control(c) || matches!(c, '%' | '\\' | '"' | '\''))
+}
+
+fn is_space_or_control(c: char) -> bool {
+    c.is_whitespace() || c.is_control()
+}
+
+/// Non-empty, and every char is ASCII alphanumeric or one of `extra`.
+fn ascii_word(s: &str, extra: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || extra.contains(c))
+}
+
+/// An absolute path usable as the last `/etc/passwd` field.
+fn valid_shell(shell: &str) -> bool {
+    shell.starts_with('/') && !shell.chars().any(|c| c == ':' || is_space_or_control(c))
+}
+
+/// Relative, with only real components: no empty, `.` or `..` parts. One trailing `/`
+/// (the directory marker) is allowed.
+fn valid_home_key(key: &str) -> bool {
+    let rel = key.strip_suffix('/').unwrap_or(key);
+    !key.starts_with('/') && rel.split('/').all(|c| !matches!(c, "" | "." | ".."))
+}
+
+/// The parameter name of a cmdline token: the text before the first `=`, or the whole token.
+fn cmdline_key(token: &str) -> &str {
+    token.split_once('=').map_or(token, |(key, _)| key)
 }
 
 fn has_parent(p: &str) -> bool {

@@ -173,12 +173,17 @@ shell  = "/usr/bin/zsh"
 - `[files]` paths outside `/etc`, or an entry with both or neither of `source`/`symlink`.
 - `mode` that isn't 3–4 octal digits.
 - Persist paths that aren't absolute, contain `..`, overlap each other, or sit under `/usr`, `/persist` or `/home`.
-- A home-managed path that's absolute or contains `..`.
+- Persist paths that equal `/etc`; equal, contain or sit under a file aios generates, `/etc/aios` or a `[files]` path; or equal or sit under `/efi`, `/proc`, `/sys`, `/dev`, `/run`, `/tmp` or `/var/log`.
+- Persist paths or home-managed paths containing whitespace, a control character, `%`, `\`, `"` or `'`.
+- A home-managed path that's absolute or has an empty, `.` or `..` component, or two of a user's paths that differ only by the trailing `/`.
 - A missing source file, or a directory/file kind mismatch.
 - A duplicate UID, or a UID outside 1000–59999.
 - A user with no `secrets/passwd/<user>`.
 - `kernel.default` not in the known kernel set (`linux-cachyos`, `linux-cachyos-lts`, `linux`, `linux-lts`).
 - `timezone` not present under `/usr/share/zoneinfo`.
+- A shell that isn't absolute or contains `:`, whitespace or a control character.
+- `locale` outside `[A-Za-z0-9_.@-]+`, or `keymap` outside `[A-Za-z0-9_.-]+`.
+- An `extra_cmdline` entry that isn't a single word (empty, whitespace, control character or `"`), or that sets a parameter AIOS sets itself (`root`, `rootflags`, `rw`, `ro`, `mount.usr`, `mount.usrflags`, `rd.luks.name`, `aios.gen`, `lockdown`, `lsm`, `init`).
 
 ### 4.2 Commands
 

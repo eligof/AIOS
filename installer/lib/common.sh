@@ -15,8 +15,10 @@ AIOS_STEP=0
 # shellcheck disable=SC2034
 AIOS_STEP_NAME=start
 
+# log MESSAGE: one line on stderr. A closed or unwritable stderr is not an error, so the
+# exit trap's cleanup (cleanup.sh) still runs.
 log() {
-    printf 'aios-install: %s\n' "$*" >&2
+    printf 'aios-install: %s\n' "$*" >&2 || true
 }
 
 die() {

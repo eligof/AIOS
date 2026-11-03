@@ -57,7 +57,7 @@ EOF
     # Queries answer from $FAKE_SYS. Every other tool is `record`: dry-run must never call it.
     # (So the tests below write files with redirections, not with cp.)
     mkdir -p "$T/bin"
-    for n in lsblk findmnt gpg mkpasswd cryptsetup sbctl usbguard curl modprobe; do
+    for n in lsblk findmnt mountpoint gpg mkpasswd cryptsetup sbctl usbguard curl modprobe; do
         ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$T/bin/$n"
     done
     for n in sgdisk udevadm mkfs.fat systemd-cryptenroll mkfs.btrfs btrfs mount umount git aios \
@@ -160,9 +160,9 @@ sbctl sign -s /mnt/aios-esp/EFI/BOOT/BOOTX64.EFI
 sbctl enroll-keys --microsoft
 install -d -m 0700 /mnt/aios-top/@persist/var/lib/usbguard
 write /mnt/aios-top/@persist/var/lib/usbguard/rules.conf 0600
-umount /var/lib/sbctl
-umount /mnt/aios-esp
-umount /mnt/aios-top
+umount -R /var/lib/sbctl
+umount -R /mnt/aios-esp
+umount -R /mnt/aios-top
 cryptsetup close aios
 systemctl reboot
 EOF
@@ -180,6 +180,9 @@ EOF
 
     [ "$status" -eq 0 ]
     diff - "$CALLS" <<'EOF'
+mountpoint -q -- /mnt/aios-top
+mountpoint -q -- /mnt/aios-esp
+mountpoint -q -- /var/lib/sbctl
 lsblk -ndro TYPE /dev/vda
 findmnt -nro SOURCE /run/archiso/bootmnt
 lsblk -ndro PKNAME /dev/sr0
@@ -192,6 +195,7 @@ cryptsetup luksUUID /dev/vda2
 mkpasswd -m yescrypt -s
 sbctl status --json
 usbguard generate-policy
+findmnt -rno TARGET -S /dev/mapper/aios
 EOF
 }
 
@@ -241,7 +245,21 @@ EOF
     [ "$status" -eq 1 ]
     [[ "$LOG" == *"step 9 (bootstrap) failed (exit 1)"* ]]
     [ "$(sed -n '/^aios bootstrap /,$p' <<<"$DRY" | tail -n +2)" = "$(printf '%s\n' \
-        'umount /var/lib/sbctl' 'umount /mnt/aios-esp' 'umount /mnt/aios-top' 'cryptsetup close aios')" ]
+        'umount -R /var/lib/sbctl' 'umount -R /mnt/aios-esp' 'umount -R /mnt/aios-top' 'cryptsetup close aios')" ]
+}
+
+@test "the cleanup also unmounts what else is mounted from the mapping, deepest first" {
+    export AIOS_INSTALL_DRYRUN_FAILS="$T/fails"
+    golden | grep '^aios bootstrap ' >"$AIOS_INSTALL_DRYRUN_FAILS"
+    mkdir -p "$FAKE_SYS/mnt/dev/mapper"
+    printf '%s\n' /mnt/aios-top /mnt/aios-top/@home /run/aios/top/@persist/x >"$FAKE_SYS/mnt/dev/mapper/aios"
+
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 1 ]
+    [ "$(sed -n '/^aios bootstrap /,$p' <<<"$DRY" | tail -n +5)" = "$(printf '%s\n' \
+        'umount -R /run/aios/top/@persist/x' 'umount -R /mnt/aios-top/@home' 'umount -R /mnt/aios-top' \
+        'cryptsetup close aios')" ]
 }
 
 @test "a failure after LUKS opens but before any mount only closes LUKS" {
@@ -263,6 +281,7 @@ EOF
 
     [ "$status" -eq 1 ]
     [[ "$LOG" == *"step 3 (partition) failed"* ]]
+    [[ "$LOG" == *"the disk is left in an undefined state"* ]]
     [ "$(tail -n 1 <<<"$DRY")" = "mkfs.fat -F32 -n EFI /dev/vda1" ]
 }
 
@@ -272,6 +291,8 @@ EOF
     [ "$status" -eq 1 ]
     [ -z "$DRY" ]
     [[ "$LOG" == *"erases DISK only with WIPE=yes"* ]]
+    [[ "$LOG" == *"nothing on the disk was changed"* ]]
+    [[ "$LOG" != *"undefined state"* ]]
 
     sed -i 's/^WIPE=no$/WIPE=yes/' "$T/install.conf"
     keyring 0123456789ABCDEF0123456789ABCDEF01234567
@@ -287,6 +308,16 @@ EOF
     [ -z "$DRY" ]
     [[ "$LOG" == *"no network"* ]]
     [[ "$LOG" == *"step 1 (preflight) failed"* ]]
+}
+
+@test "a mount point the installer needs that is already in use stops the preflight" {
+    echo /var/lib/sbctl >"$FAKE_SYS/mounted"
+
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 1 ]
+    [ -z "$DRY" ]
+    [[ "$LOG" == *"/var/lib/sbctl is already a mount point on the live system"* ]]
 }
 
 @test "--auto installs from the fw_cfg config, and exits 0 without one" {

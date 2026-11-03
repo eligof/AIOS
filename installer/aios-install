@@ -48,7 +48,8 @@ LIVE_REPO=${AIOS_LIVE_REPO:-/opt/aios-repo}
 TOP=/mnt/aios-top
 ESP=/mnt/aios-esp
 TOOLS=(sgdisk udevadm mkfs.fat cryptsetup systemd-cryptenroll mkfs.btrfs btrfs mount umount
-    lsblk findmnt git mkpasswd gpg sbctl aios bootctl usbguard curl install cp mv chown chmod)
+    mountpoint lsblk findmnt git mkpasswd gpg sbctl aios bootctl usbguard curl install cp mv chown
+    chmod)
 
 usage() {
     sed -n '2,8s/^# \{0,1\}//p' "$0"
@@ -91,6 +92,15 @@ require_tools() {
         command -v "$t" >/dev/null || missing+=("$t")
     done
     ((${#missing[@]} == 0)) || die "missing tools: ${missing[*]}"
+}
+
+# require_unmounted PATH...: nothing is mounted on the paths this run mounts yet, so the
+# cleanup (which checks mountpoint) can only ever unmount what this run mounted.
+require_unmounted() {
+    local p
+    for p in "$@"; do
+        ! mountpoint -q -- "$p" || die "$p is already a mount point on the live system (umount -R $p)"
+    done
 }
 
 summary() {
@@ -143,9 +153,10 @@ main() {
     fi
     validate_config "$unattended" || die "invalid install config"
     [[ -d ${AIOS_EFI_DIR:-/sys/firmware/efi} ]] || die "not booted in UEFI mode"
-    [[ ! -e /dev/mapper/aios ]] || die "the LUKS mapping aios is already open (cryptsetup close aios)"
+    ! luks_is_open || die "the LUKS mapping aios is already open (cryptsetup close aios)"
     dry_run || ((EUID == 0)) || die "aios-install must run as root"
     require_tools
+    require_unmounted "$TOP" "$ESP" /var/lib/sbctl
     DISK=$(readlink -f -- "${CFG[DISK]}")
     validate_disk "$DISK" || die "unusable disk $DISK"
     ESP_PART=$(part_path "$DISK" 1)
@@ -174,6 +185,7 @@ main() {
     fi
 
     step 3 partition
+    AIOS_DISK_CHANGED=1
     run_cmd sgdisk --zap-all "$DISK"
     run_cmd sgdisk -n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309 "$DISK"
     run_cmd udevadm settle
@@ -183,8 +195,7 @@ main() {
     local luks=${CFG[LUKS_PASSPHRASE]}
     run_stdin "$luks" cryptsetup luksFormat --type luks2 --pbkdf argon2id --batch-mode \
         --key-file - "$ROOT_PART"
-    run_stdin "$luks" cryptsetup open --key-file - "$ROOT_PART" aios
-    luks_opened
+    luks_open_tracked "$luks" "$ROOT_PART"
     log "recovery key (shown only now, stored nowhere: write it down):"
     run_stdin "$luks" systemd-cryptenroll --unlock-key-file=/dev/stdin --recovery-key "$ROOT_PART"
     LUKS_UUID=$(cryptsetup luksUUID "$ROOT_PART")

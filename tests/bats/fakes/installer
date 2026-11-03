@@ -3,7 +3,10 @@
 # Every call is appended to $CALLS as "<name> <args>". Answers come from $FAKE_SYS:
 #   lsblk      -o COLUMN ... DEV   prints $FAKE_SYS/blk/<DEV without /dev/>/<COLUMN>
 #                                  (exit 32 "not a block device" if that dir is missing)
-#   findmnt    ... MOUNTPOINT      prints $FAKE_SYS/mnt<MOUNTPOINT> (the SOURCE), else exit 1
+#   findmnt    ... ARG             prints $FAKE_SYS/mnt<ARG> (ARG is the last argument: a mount
+#                                  point for its SOURCE, or with -S a source for its TARGETs),
+#                                  else exit 1
+#   mountpoint -q -- PATH          exit 0 if PATH is a line of $FAKE_SYS/mounted, else 32
 #   gpg        ...                 prints $FAKE_SYS/gpg.out (a --with-colons listing)
 #   mkpasswd   ...                 reads the password from stdin, appends it to
 #                                  $FAKE_SYS/mkpasswd.stdin, prints a fixed yescrypt hash
@@ -36,6 +39,9 @@ case "$name" in
         file="$FAKE_SYS/mnt${!#}"
         [ -f "$file" ] || exit 1
         cat "$file"
+        ;;
+    mountpoint)
+        [ -f "$FAKE_SYS/mounted" ] && grep -qxF -- "${!#}" "$FAKE_SYS/mounted" || exit 32
         ;;
     gpg)
         [ -f "$FAKE_SYS/gpg.out" ] || exit 2

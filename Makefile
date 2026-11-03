@@ -10,11 +10,13 @@ BATS_COMMIT := b640ec3cf2c7c9cfc9e6351479261186f76eeec8
 SHELLCHECK ?= $(shell command -v shellcheck || echo build/tools/shellcheck)
 BATS ?= $(shell command -v bats || echo build/tools/bats-core/bin/bats)
 
-# What the shell and unit checks cover.
+# What the shell and unit checks cover. installer/lib/keys.sh is generated (make keys).
+INSTALLER_LIBS := installer/lib/common.sh installer/lib/config.sh
 SH_SCRIPTS := initrd/aios-root.sh base/aios-health.sh
 BASH_SCRIPTS := initrd/install/aios tests/bats/fakes/btrfs tests/bats/fakes/record \
-	tests/bats/fakes/findmnt
-BATS_FILES := tests/bats/aios-root.bats tests/bats/install-hook.bats tests/bats/aios-health.bats
+	tests/bats/fakes/findmnt $(INSTALLER_LIBS)
+BATS_FILES := tests/bats/aios-root.bats tests/bats/install-hook.bats tests/bats/aios-health.bats \
+	tests/bats/installer-config.bats
 UNITS := initrd/aios-root.service initrd/sysroot-etc.mount base/aios-health.service
 
 .PHONY: check rust-check shell-check bats-check unit-check tools repo

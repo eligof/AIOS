@@ -524,6 +524,14 @@ fn extra_cmdline_token_may_not_override_aios_parameters() {
         "lsm=",
         "init=/bin/sh",
         "ro=1",
+        "systemd.debug_shell",
+        "systemd.debug_shell=1",
+        "systemd.debug-shell=1",
+        "rd.systemd.debug_shell",
+        "rd.systemd.debug-shell=1",
+        "rdinit=/bin/sh",
+        "apparmor=0",
+        "security=none",
     ] {
         let raw = with_extra_cmdline(&format!("\"{t}\""));
         assert_error(
@@ -579,6 +587,18 @@ fn persist_path_conflicting_with_aios_managed_paths_rejected() {
         ("/tmp", "/tmp"),
         ("/var/log", "/var/log"),
         ("/var/log/journal", "/var/log"),
+        ("/bin", "/bin"),
+        ("/bin/x", "/bin"),
+        ("/sbin", "/sbin"),
+        ("/lib", "/lib"),
+        ("/lib/modules", "/lib"),
+        ("/lib64", "/lib64"),
+        ("/lib64/x", "/lib64"),
+        ("/var/lib/pacman", "/var/lib/pacman"),
+        ("/var/lib/pacman/local", "/var/lib/pacman"),
+        ("/etc/systemd", "/etc/systemd/system"),
+        ("/etc/systemd/system", "/etc/systemd/system"),
+        ("/etc/systemd/system/x.service", "/etc/systemd/system"),
     ];
     for (p, other) in cases {
         let raw = with_persist_dirs(&format!("\"{p}\""));
@@ -628,4 +648,61 @@ fn home_keys_equal_up_to_trailing_slash_rejected() {
         &raw,
         "user \"eli\": duplicate home entry \".config/autostart/\"",
     );
+}
+
+#[test]
+fn persist_prefix_of_system_tree_without_component_boundary_is_allowed() {
+    let raw = with_persist_dirs("\"/binx\", \"/var/lib/pacman-cache\", \"/lib64x\"");
+    assert_eq!(errors(&raw), Vec::<String>::new());
+}
+
+#[test]
+fn files_key_with_forbidden_character_rejected() {
+    for (toml, decoded) in FORBIDDEN_PATH_CHARS {
+        let raw = VALID.replace("\"/etc/nftables.conf\" =", &format!("\"/etc/{toml}\" ="));
+        let p = format!("/etc/{decoded}");
+        assert_error(&raw, &format!("file {p:?}: contains a forbidden character"));
+    }
+}
+
+#[test]
+fn files_key_newline_cannot_forge_a_managed_files_line() {
+    let raw = VALID.replace("\"/etc/nftables.conf\" =", "\"/etc/x\\n/etc/shadow\" =");
+    assert_error(
+        &raw,
+        "file \"/etc/x\\n/etc/shadow\": contains a forbidden character",
+    );
+}
+
+#[test]
+fn home_key_inside_another_home_key_rejected() {
+    let raw = VALID.replace(
+        "\".zshrc\" = \"home/eli/zshrc\"",
+        "\".zshrc\" = \"home/eli/zshrc\"\n\".config/\" = \"home/eli/autostart/\"",
+    );
+    assert_error(
+        &raw,
+        "user \"eli\": home entry \".config/autostart/\" is inside home entry \".config/\"",
+    );
+}
+
+#[test]
+fn home_key_inside_another_without_trailing_slash_rejected() {
+    let raw = VALID.replace(
+        "\".zshrc\" = \"home/eli/zshrc\"",
+        "\".zshrc\" = \"home/eli/zshrc\"\n\".config/autostart/x\" = \"home/eli/zshrc\"",
+    );
+    assert_error(
+        &raw,
+        "user \"eli\": home entry \".config/autostart/x\" is inside home entry \".config/autostart/\"",
+    );
+}
+
+#[test]
+fn sibling_home_keys_sharing_a_prefix_are_not_nested() {
+    let raw = VALID.replace(
+        "\".zshrc\" = \"home/eli/zshrc\"",
+        "\".zshrc\" = \"home/eli/zshrc\"\n\".config/autostart2/\" = \"home/eli/autostart/\"\n\".zshrc.d/\" = \"home/eli/autostart/\"",
+    );
+    assert_eq!(errors(&raw), Vec::<String>::new());
 }

@@ -22,8 +22,8 @@ const NO_AGING: &str = "::::::";
 /// - Supplementary memberships and gshadow admins of dropped and declared users are rebuilt.
 ///
 /// Fails closed on a declared uid outside [`MANAGED_IDS`] or used twice, a shell that isn't an
-/// absolute path without `:`, whitespace or control characters, an invalid hash, or a database
-/// without root.
+/// absolute path without `:`, whitespace or control characters, an invalid hash, a database
+/// without root, a root whose uid isn't 0, or another kept account with uid 0.
 ///
 /// `hashes` maps each declared user to the hash from `secrets/passwd/<user>`, trailing newline
 /// already trimmed. `today_days` (days since the epoch) becomes `lastchg` only when a hash
@@ -66,6 +66,13 @@ pub fn merge_users(
     }
     if !kept.contains("root") {
         return Err(UserDbError::MissingRoot);
+    }
+    for entry in &passwd {
+        match (entry.name == "root", entry.uid == 0) {
+            (true, false) => return Err(UserDbError::RootNotUidZero),
+            (false, true) => return Err(UserDbError::ExtraUidZero(entry.name.clone())),
+            _ => {}
+        }
     }
     for (name, user) in &m.users {
         passwd.push(PasswdEntry {

@@ -233,7 +233,7 @@ fn repo_file(path: &Path) -> Result<EtcEntry, PlanError> {
 }
 
 /// Every regular file below `dir` as (`/`-separated relative path, entry), sorted by path.
-/// A symlink or a non-UTF-8 name anywhere below `dir` is an error.
+/// A symlink, a non-UTF-8 name or a name with a control character anywhere below `dir` is an error.
 fn walk(dir: &Path) -> Result<Vec<(String, EtcEntry)>, PlanError> {
     let mut out = Vec::new();
     walk_into(dir, "", &mut out)?;
@@ -251,6 +251,9 @@ fn walk_into(dir: &Path, prefix: &str, out: &mut Vec<(String, EtcEntry)>) -> Res
             .file_name()
             .into_string()
             .map_err(|_| io_error(&path, "file name is not valid UTF-8"))?;
+        if name.chars().any(char::is_control) {
+            return Err(io_error(&path, "file name contains a control character"));
+        }
         let rel = if prefix.is_empty() {
             name
         } else {

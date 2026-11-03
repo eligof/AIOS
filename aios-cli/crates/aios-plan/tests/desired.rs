@@ -348,3 +348,27 @@ fn non_utf8_file_name_in_a_home_source_directory_is_an_io_error() {
         other => panic!("expected PlanError::Io, got {other:?}"),
     }
 }
+
+#[test]
+fn control_character_in_a_home_source_file_name_is_an_io_error() {
+    for name in ["bad\nname", "bad\rname", "bad\u{1}name", "bad\u{7f}name"] {
+        let fx = fixture();
+        let file = fx.repo.path().join("home/eli/bin").join(name);
+        fs::write(&file, "x").unwrap();
+        match desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap_err() {
+            PlanError::Io { path, message } => {
+                assert!(path.contains("home/eli/bin/bad"), "got {path}");
+                assert!(message.contains("control character"), "got {message}");
+            }
+            other => panic!("expected PlanError::Io for {name:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn spaces_in_a_home_source_file_name_are_allowed() {
+    let fx = fixture();
+    fs::write(fx.repo.path().join("home/eli/bin/a b"), "x").unwrap();
+    let d = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap();
+    assert!(d.contains_key("/etc/aios/home/eli/.local/bin/a b"));
+}

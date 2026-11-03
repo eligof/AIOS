@@ -93,7 +93,11 @@ pub fn build_plan(inputs: &Inputs, probe: &dyn SystemProbe) -> Result<Plan, Plan
             path: MANAGED_FILES.to_string(),
             message: e.to_string(),
         })?;
-        for path in parse_managed_list(&text) {
+        let listed = parse_managed_list(&text).map_err(|e| PlanError::Io {
+            path: MANAGED_FILES.to_string(),
+            message: e.to_string(),
+        })?;
+        for path in listed {
             if !desired.contains_key(&path) {
                 etc_changes.push(EtcChange {
                     path,

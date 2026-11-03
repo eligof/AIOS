@@ -78,6 +78,10 @@ pub enum UserDbError {
     DuplicateUid(u32),
     /// No `root` entry survives in `/etc/passwd`.
     MissingRoot,
+    /// The `root` entry that survives in `/etc/passwd` has a uid other than 0.
+    RootNotUidZero,
+    /// A surviving account other than `root` has uid 0.
+    ExtraUidZero(String),
 }
 
 impl fmt::Display for UserDbError {
@@ -112,6 +116,11 @@ impl fmt::Display for UserDbError {
                 write!(f, "uid {uid} is declared for more than one user")
             }
             UserDbError::MissingRoot => write!(f, "/etc/passwd has no root account"),
+            UserDbError::RootNotUidZero => write!(f, "/etc/passwd: root must have uid 0"),
+            UserDbError::ExtraUidZero(name) => write!(
+                f,
+                "/etc/passwd: account {name:?} has uid 0 but is not root"
+            ),
         }
     }
 }

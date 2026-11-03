@@ -21,7 +21,22 @@ const GENERATED_ETC: &[&str] = &[
 ];
 
 /// Mount points and runtime trees a persist bind may not equal or sit under.
-const SYSTEM_TREES: &[&str] = &["/efi", "/proc", "/sys", "/dev", "/run", "/tmp", "/var/log"];
+/// `/bin`, `/sbin`, `/lib`, `/lib64` and the pacman database are symlinks into (or live on) the
+/// read-only `/usr`, so binding over them would reach it.
+const SYSTEM_TREES: &[&str] = &[
+    "/efi",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/tmp",
+    "/var/log",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/var/lib/pacman",
+];
 
 /// Kernel parameters aios puts on the command line itself (`aios-render`'s `cmdline` and the
 /// hardening file). `kernel.extra_cmdline` may not set them again.
@@ -37,6 +52,11 @@ const RESERVED_CMDLINE_KEYS: &[&str] = &[
     "lockdown",
     "lsm",
     "init",
+    "rdinit",
+    "systemd.debug_shell",
+    "rd.systemd.debug_shell",
+    "apparmor",
+    "security",
 ];
 
 /// Where validation looks for files the manifest refers to.
@@ -135,7 +155,7 @@ impl Validator<'_> {
                     pos,
                     format!("extra_cmdline token {t:?} must be a single word"),
                 );
-            } else if RESERVED_CMDLINE_KEYS.contains(&cmdline_key(t)) {
+            } else if is_reserved_cmdline_key(cmdline_key(t)) {
                 self.err(
                     pos,
                     format!("extra_cmdline token {t:?} overrides a parameter AIOS sets"),
@@ -147,6 +167,12 @@ impl Validator<'_> {
     fn files(&mut self, m: &Manifest, env: &ValidationEnv) {
         for (path, entry) in &m.files {
             let pos = locate_key(self.raw, "files", &format!("\"{path}\""));
+            if has_forbidden_path_char(path) {
+                self.err(
+                    pos,
+                    format!("file {path:?}: contains a forbidden character"),
+                );
+            }
             if !path.starts_with("/etc/") || path.ends_with('/') || has_parent(path) {
                 self.err(
                     pos,
@@ -274,6 +300,7 @@ impl Validator<'_> {
                 );
             }
             let mut targets: BTreeSet<&str> = BTreeSet::new();
+            let mut keys: Vec<(&str, &str)> = Vec::new();
             for (target, src) in &user.home {
                 let hpos = locate_key(self.raw, &home_section, &format!("\"{target}\""));
                 if has_forbidden_path_char(target) {
@@ -293,7 +320,9 @@ impl Validator<'_> {
                     );
                     continue;
                 }
-                if !targets.insert(target.strip_suffix('/').unwrap_or(target)) {
+                let trimmed = target.strip_suffix('/').unwrap_or(target);
+                keys.push((trimmed, target));
+                if !targets.insert(trimmed) {
                     self.err(
                         hpos,
                         format!("user {name:?}: duplicate home entry {target:?}"),
@@ -323,6 +352,19 @@ impl Validator<'_> {
                     );
                 }
             }
+            for (inner, inner_key) in &keys {
+                for (outer, outer_key) in &keys {
+                    if inner != outer && is_under(inner, outer) {
+                        let hpos = locate_key(self.raw, &home_section, &format!("\"{inner_key}\""));
+                        self.err(
+                            hpos,
+                            format!(
+                                "user {name:?}: home entry {inner_key:?} is inside home entry {outer_key:?}"
+                            ),
+                        );
+                    }
+                }
+            }
         }
     }
 }
@@ -348,7 +390,7 @@ fn managed_conflict(p: &str, m: &Manifest) -> Option<String> {
     let managed = GENERATED_ETC
         .iter()
         .copied()
-        .chain(["/etc/aios"])
+        .chain(["/etc/aios", "/etc/systemd/system"])
         .chain(m.files.keys().map(String::as_str));
     for other in managed {
         if is_under(p, other) || is_under(other, p) {
@@ -389,6 +431,14 @@ fn valid_shell(shell: &str) -> bool {
 fn valid_home_key(key: &str) -> bool {
     let rel = key.strip_suffix('/').unwrap_or(key);
     !key.starts_with('/') && rel.split('/').all(|c| !matches!(c, "" | "." | ".."))
+}
+
+/// True if `key` is in [`RESERVED_CMDLINE_KEYS`]; the kernel treats `-` and `_` in names alike.
+fn is_reserved_cmdline_key(key: &str) -> bool {
+    let key = key.replace('-', "_");
+    RESERVED_CMDLINE_KEYS
+        .iter()
+        .any(|reserved| reserved.replace('-', "_") == key)
 }
 
 /// The parameter name of a cmdline token: the text before the first `=`, or the whole token.

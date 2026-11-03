@@ -372,3 +372,34 @@ fn declared_name_of_a_system_group_conflicts() {
     let err = merge_users(&m, &db(), &hs, TODAY).unwrap_err();
     assert_eq!(err, UserDbError::NameConflict("audio".to_string()));
 }
+
+#[test]
+fn kept_root_must_have_uid_zero() {
+    let db = UserDb::parse(
+        &PASSWD.replace("root:x:0:0:", "root:x:5:0:"),
+        GROUP,
+        SHADOW,
+        GSHADOW,
+    )
+    .unwrap();
+    let err = merge_users(&two_users(), &db, &default_hashes(), TODAY).unwrap_err();
+    assert_eq!(err, UserDbError::RootNotUidZero);
+    assert_eq!(err.to_string(), "/etc/passwd: root must have uid 0");
+}
+
+#[test]
+fn kept_non_root_account_with_uid_zero_is_an_error() {
+    let db = UserDb::parse(
+        &PASSWD.replace("bin:x:1:1:", "bin:x:0:1:"),
+        GROUP,
+        SHADOW,
+        GSHADOW,
+    )
+    .unwrap();
+    let err = merge_users(&two_users(), &db, &default_hashes(), TODAY).unwrap_err();
+    assert_eq!(err, UserDbError::ExtraUidZero("bin".to_string()));
+    assert_eq!(
+        err.to_string(),
+        "/etc/passwd: account \"bin\" has uid 0 but is not root"
+    );
+}

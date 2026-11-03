@@ -294,3 +294,23 @@ fn non_utf8_managed_files_is_an_io_error() {
         other => panic!("expected PlanError::Io, got {other:?}"),
     }
 }
+
+#[test]
+fn managed_files_with_a_path_outside_etc_is_an_io_error() {
+    let fx = fixture();
+    let mut probe = FakeProbe::synced(&fx);
+    probe.etc.insert(
+        MANAGED_FILES.to_string(),
+        EtcEntry::File {
+            content: b"/etc/fstab\n/usr/bin/sudo\n".to_vec(),
+            mode: 0o644,
+        },
+    );
+    match build_plan(&fx.inputs(), &probe).unwrap_err() {
+        PlanError::Io { path, message } => {
+            assert_eq!(path, MANAGED_FILES);
+            assert!(message.contains("/usr/bin/sudo"), "got {message}");
+        }
+        other => panic!("expected PlanError::Io, got {other:?}"),
+    }
+}

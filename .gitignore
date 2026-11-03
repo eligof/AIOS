@@ -1,0 +1,8 @@
+.superpowers/
+target/
+build/
+out/
+work/
+*.qcow2
+*.iso
+__pycache__/

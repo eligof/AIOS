@@ -71,6 +71,9 @@ class Serial:
         # one str would copy all of it on every read.
         self._joined = ""
         self._chunks: list[str] = []
+        # A close that came right after output: raised by the next read, after expect has
+        # searched that output.
+        self._closed_later: SerialClosed | None = None
         self.pos = 0
 
     @classmethod
@@ -126,16 +129,22 @@ class Serial:
 
     def _read(self, timeout: float) -> bool:
         """Wait up to `timeout` for output, then read until it pauses. True if any came."""
+        if self._closed_later is not None:
+            raise self._closed_later
         ready, _, _ = select.select([self._sock], [], [], max(0.0, timeout))
         if not ready:
             return False
+        self._recv()
         batch_end = time.monotonic() + _BATCH
-        while ready:
-            self._recv()
-            wait = min(_QUIET, batch_end - time.monotonic())
-            if wait <= 0:
-                break
+        while (wait := min(_QUIET, batch_end - time.monotonic())) > 0:
             ready, _, _ = select.select([self._sock], [], [], wait)
+            if not ready:
+                break
+            try:
+                self._recv()
+            except SerialClosed as closed:
+                self._closed_later = closed
+                break
         return True
 
     def expect(self, pattern: str | re.Pattern[str], timeout: float) -> re.Match[str]:
@@ -155,6 +164,16 @@ class Serial:
                     f"no {rx.pattern!r} within {timeout:.0f}s; last output:\n{self.tail()}"
                 )
             fresh = self._read(min(left, 0.5))
+
+    def read_until_closed(self, timeout: float) -> None:
+        """Read the console until QEMU closes it (the VM is off)."""
+        deadline = self._clock() + timeout
+        while (left := deadline - self._clock()) > 0:
+            try:
+                self._read(min(left, 0.5))
+            except SerialClosed:
+                return
+        raise SerialTimeout(f"the console was still open after {timeout:.0f}s; last output:\n{self.tail()}")
 
     def tail(self, chars: int = 3000) -> str:
         return self.text[-chars:]

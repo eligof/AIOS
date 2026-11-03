@@ -3,10 +3,12 @@ console on a unix socket. Part of `make check` (make e2e-unit)."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -30,6 +32,7 @@ from .vm import (
     E2E_INSTALL,
     FW_CFG_NAME,
     REPO,
+    Vm,
     VmConfig,
     find_iso,
     missing_requirements,
@@ -138,7 +141,7 @@ def option(argv: list[str], flag: str) -> list[str]:
 def test_qemu_argv_has_kvm_secure_boot_tpm_disk_cdrom_fw_cfg_and_serial(tmp_path: Path) -> None:
     cfg = VmConfig(workdir=tmp_path, iso=Path("/out/aios-2026.11.03-x86_64.iso"))
 
-    argv = qemu_argv(cfg)
+    argv = qemu_argv(cfg, install=True)
 
     assert argv[0] == "qemu-system-x86_64"
     assert "-enable-kvm" in argv and "-nographic" in argv
@@ -164,12 +167,116 @@ def test_qemu_argv_has_kvm_secure_boot_tpm_disk_cdrom_fw_cfg_and_serial(tmp_path
     assert option(argv, "-monitor") == ["none"]
 
 
-def test_qemu_argv_without_an_iso_has_no_cdrom_and_refuses_commas(tmp_path: Path) -> None:
-    argv = qemu_argv(VmConfig(workdir=tmp_path, iso=None))
-    assert not any("cd0" in a for a in argv)
-
+def test_qemu_argv_refuses_commas_and_an_install_boot_without_the_iso(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="may not contain ','"):
-        qemu_argv(VmConfig(workdir=tmp_path / "a,b", iso=None))
+        qemu_argv(VmConfig(workdir=tmp_path / "a,b", iso=None), install=False)
+    with pytest.raises(ValueError, match="needs the ISO"):
+        qemu_argv(VmConfig(workdir=tmp_path, iso=None), install=True)
+
+
+def test_the_boots_after_the_install_have_no_iso_or_install_config_and_the_same_state(tmp_path: Path) -> None:
+    # The ISO's aios-install-auto.service installs whenever the fw_cfg config is there, so a
+    # later boot with it would wipe the disk and install again.
+    cfg = VmConfig(workdir=tmp_path, iso=Path("/out/aios.iso"))
+
+    install, later = qemu_argv(cfg, install=True), qemu_argv(cfg, install=False)
+
+    assert "-no-reboot" in install  # the installer's reboot ends QEMU; the harness restarts it
+    assert "-no-reboot" not in later  # reboots of the installed system stay guest reboots
+    assert "-fw_cfg" not in later
+    assert not any("cdrom" in a or "cd0" in a for a in later)
+    for argv in (install, later):
+        assert option(argv, "-cpu") == ["host"]
+        assert f"if=pflash,format=raw,unit=1,file={tmp_path}/OVMF_VARS.4m.fd" in option(argv, "-drive")
+        assert f"if=none,id=disk0,format=qcow2,file={tmp_path}/disk.qcow2" in option(argv, "-drive")
+        assert f"socket,id=chrtpm,path={tmp_path}/tpm/swtpm.sock" in option(argv, "-chardev")
+        assert "virtio-blk-pci,drive=disk0,bootindex=0" in option(argv, "-device")
+    # The install boot only adds: -no-reboot, the CD-ROM (-drive + -device) and -fw_cfg.
+    assert len(install) - len(later) == 1 + 4 + 2
+
+
+# Stand-ins for swtpm and QEMU: they make their sockets the way the real ones do, record each
+# start, and the QEMU one prints the console of an install boot (which ends with the reboot,
+# as -no-reboot makes it) or of a boot from the disk.
+FAKE_SWTPM = """
+import socket, sys
+args = sys.argv[1:]
+path = args[args.index("--ctrl") + 1].split("path=", 1)[1]
+state = args[args.index("--tpmstate") + 1].split("dir=", 1)[1]
+with open(f"{state}/starts", "a") as f:
+    f.write("swtpm\\n")
+server = socket.socket(socket.AF_UNIX)
+server.bind(path)
+server.listen(1)
+conn, _ = server.accept()
+conn.recv(1)  # --terminate: exit once QEMU disconnects
+"""
+FAKE_QEMU = """
+import json, os, socket, sys
+argv = sys.argv
+chardevs = [argv[i + 1] for i, a in enumerate(argv) if a == "-chardev"]
+def path(name):
+    spec = next(c for c in chardevs if f"id={name}," in c)
+    return dict(kv.split("=", 1) for kv in spec.split(",")[1:])["path"]
+with open(os.path.join(os.path.dirname(path("serial0")), "qemu-starts.jsonl"), "a") as f:
+    f.write(json.dumps(argv) + "\\n")
+tpm = socket.socket(socket.AF_UNIX)
+tpm.connect(path("chrtpm"))
+server = socket.socket(socket.AF_UNIX)
+server.bind(path("serial0"))
+server.listen(1)
+conn, _ = server.accept()
+if "-no-reboot" in argv:
+    conn.sendall(b"aios-install: rebooting into AIOS\\r\\nreboot: Restarting system\\r\\n")
+else:
+    conn.sendall(b"Please enter passphrase for disk aios: ")
+    conn.recv(1)
+"""
+
+
+def test_the_vm_installs_from_the_iso_then_powers_on_from_the_disk_with_its_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+
+    def script(name: str, text: str) -> str:
+        path = bin_dir / name
+        path.write_text(text)
+        path.chmod(0o755)
+        return str(path)
+
+    script("qemu-img", '#!/bin/sh\n: > "$5"\n')  # qemu-img create -q -f qcow2 FILE SIZE
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    (tmp_path / "VARS.fd").write_bytes(b"empty variable store")
+    cfg = VmConfig(
+        workdir=tmp_path / "vm",
+        iso=tmp_path / "aios.iso",
+        ovmf_code=tmp_path / "CODE.fd",
+        ovmf_vars=tmp_path / "VARS.fd",
+        qemu=script("qemu", f"#!{sys.executable}\n{FAKE_QEMU}"),
+        swtpm=script("swtpm", f"#!{sys.executable}\n{FAKE_SWTPM}"),
+    )
+    vm = Vm(cfg)
+    vm.prepare(E2E_INSTALL)
+    cfg.vars.write_bytes(b"keys the installer enrolled")  # the firmware's writes
+    machine = Machine(vm)
+
+    with vm:
+        vm.start(install=True)
+        install_console = machine.serial
+        expect_install(machine.serial, r"aios-install: rebooting into AIOS", 5)
+        machine.restart_from_disk()
+        machine.serial.expect(r"Please enter passphrase", 5)
+        assert machine.serial is not install_console
+
+    assert vm.qemu.poll() is not None and vm.swtpm.poll() is not None
+    starts = [json.loads(line) for line in (cfg.workdir / "qemu-starts.jsonl").read_text().splitlines()]
+    assert starts == [qemu_argv(cfg, install=True), qemu_argv(cfg, install=False)]
+    assert cfg.vars.read_bytes() == b"keys the installer enrolled"
+    assert (cfg.tpm_dir / "starts").read_text() == "swtpm\nswtpm\n"
+    transcript = cfg.transcript.read_text()
+    assert transcript.index("rebooting into AIOS") < transcript.index("Please enter passphrase")
 
 
 def test_swtpm_is_a_tpm2_socket_that_exits_with_qemu(tmp_path: Path) -> None:
@@ -309,6 +416,17 @@ def test_a_closed_console_raises_serial_closed(sock_path: Path) -> None:
     console.join()
 
 
+def test_the_last_output_before_the_console_closes_can_still_be_matched(sock_path: Path) -> None:
+    console = FakeConsole(sock_path, [b"aios-install: rebooting into AIOS\r\n"], close_after_banner=True)
+    serial = connect(sock_path)
+    console.join()  # the output and the close are both waiting when the harness reads
+
+    serial.expect(r"rebooting into AIOS", 5)
+    with pytest.raises(SerialClosed, match="rebooting into AIOS"):
+        serial.expect(r"login: ", 5)
+    serial.close()
+
+
 def test_a_reset_connection_raises_serial_closed() -> None:
     guest, peer = socket.socketpair()
     serial = Serial(guest)
@@ -390,6 +508,27 @@ def test_many_small_reads_cost_linear_time_and_keep_the_text_in_order() -> None:
     assert serial.tail(5) == "xxxx\n"
     serial.close()
     peer.close()
+
+
+def test_read_until_closed_returns_once_qemu_closes_the_console(sock_path: Path) -> None:
+    console = FakeConsole(sock_path, [b"reboot: Restarting system\r\n"], close_after_banner=True)
+    serial = connect(sock_path)
+
+    serial.read_until_closed(5)
+
+    assert serial.text.endswith("Restarting system\n")
+    serial.close()
+    console.join()
+
+
+def test_read_until_closed_times_out_while_the_console_stays_open(sock_path: Path) -> None:
+    console = FakeConsole(sock_path, [b"still running\r\n"])
+    serial = connect(sock_path)
+
+    with pytest.raises(SerialTimeout, match="still running"):
+        serial.read_until_closed(0.5)
+    serial.close()
+    console.join()
 
 
 def test_the_transcript_keeps_the_raw_bytes(sock_path: Path, tmp_path: Path) -> None:
@@ -487,6 +626,7 @@ from .test_e2e import (  # noqa: E402
     ISO_SERIAL_KEY,
     ISO_SERIAL_TITLE,
     MANIFEST,
+    Machine,
     expect_install,
     should_delete_vm,
 )

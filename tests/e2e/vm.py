@@ -1,9 +1,14 @@
 """QEMU + swtpm for the AIOS end-to-end test (spec §9).
 
 The VM boots OVMF's Secure Boot firmware with a fresh copy of the variable store (Setup
-Mode), a swtpm TPM 2.0, a 20 GiB virtio disk (/dev/vda in the guest) and the ISO as a
-CD-ROM. The install config reaches the guest as the fw_cfg file opt/aios/install.conf, and
-the serial console is a unix socket the harness connects to. Nothing here needs root.
+Mode), a swtpm TPM 2.0 and a 20 GiB virtio disk (/dev/vda in the guest). The serial console
+is a unix socket the harness connects to. Nothing here needs root.
+
+The first power-on is the install: it adds the ISO as a CD-ROM, the install config as the
+fw_cfg file opt/aios/install.conf, and -no-reboot, so QEMU exits when the installer reboots.
+The harness then powers on again from the disk alone, with the same variable store, TPM
+state and CPU model; later reboots are ordinary guest reboots. Booting the ISO again would
+install again: its aios-install-auto.service runs whenever the fw_cfg config is there.
 """
 
 from __future__ import annotations
@@ -100,8 +105,11 @@ def _opt(path: Path) -> str:
     return text
 
 
-def qemu_argv(cfg: VmConfig) -> list[str]:
-    """The QEMU command line (spec §9)."""
+def qemu_argv(cfg: VmConfig, *, install: bool) -> list[str]:
+    """The QEMU command line (spec §9): for the install boot from the ISO, or for a boot of
+    the installed disk."""
+    if install and cfg.iso is None:
+        raise ValueError("the install boot needs the ISO")
     argv = [
         cfg.qemu,
         "-name", "aios-e2e",
@@ -121,17 +129,20 @@ def qemu_argv(cfg: VmConfig) -> list[str]:
         "-drive", f"if=none,id=disk0,format=qcow2,file={_opt(cfg.disk)}",
         "-device", "virtio-blk-pci,drive=disk0,bootindex=0",
     ]
-    if cfg.iso is not None:
+    if install:
+        assert cfg.iso is not None
         argv += [
             "-drive", f"if=none,id=cd0,media=cdrom,readonly=on,format=raw,file={_opt(cfg.iso)}",
             "-device", "ide-cd,drive=cd0,bootindex=1",
+            "-fw_cfg", f"name={FW_CFG_NAME},file={_opt(cfg.install_conf)}",
+            # The installer's reboot ends QEMU, so the next power-on is without the ISO.
+            "-no-reboot",
         ]
     argv += [
         # No option ROM: OVMF would refuse the unsigned iPXE ROM once keys are enrolled.
         "-netdev", "user,id=net0",
         "-device", "virtio-net-pci,netdev=net0,romfile=",
         "-device", "virtio-rng-pci",
-        "-fw_cfg", f"name={FW_CFG_NAME},file={_opt(cfg.install_conf)}",
         # wait=on: QEMU starts the guest only once the harness is connected.
         "-chardev", f"socket,id=serial0,path={_opt(cfg.serial_socket)},server=on,wait=on",
         "-serial", "chardev:serial0",
@@ -213,8 +224,9 @@ def _wait_for(path: Path, timeout: float, what: str) -> None:
 
 
 class Vm:
-    """A fresh VM: prepare() creates the disk, the variable store and the config, start()
-    runs swtpm and QEMU and connects to the serial console."""
+    """A fresh VM: prepare() creates the disk, the variable store, the TPM state directory and
+    the config, once. start() powers on: it runs swtpm and QEMU and connects to the serial
+    console; wait_until_off() waits for both to exit, ready for the next start()."""
 
     def __init__(self, cfg: VmConfig):
         self.cfg = cfg
@@ -235,15 +247,39 @@ class Vm:
         shutil.copyfile(cfg.ovmf_vars, cfg.vars)
         cfg.install_conf.write_text(render_install_conf(install))
 
-    def start(self) -> Serial:
+    def start(self, *, install: bool) -> Serial:
+        """Power on, for the install boot from the ISO or a boot of the disk. The serial
+        transcript continues across power-ons."""
         cfg = self.cfg
+        for proc in (self.qemu, self.swtpm):
+            if proc is not None and proc.poll() is None:
+                raise RuntimeError("the VM is still running")
+        # The previous power-on's sockets: _wait_for would take a stale one for the new one.
+        for sock in (cfg.tpm_socket, cfg.serial_socket):
+            sock.unlink(missing_ok=True)
         with open(cfg.workdir / "swtpm.out", "ab") as out:
             self.swtpm = subprocess.Popen(swtpm_argv(cfg), stdin=subprocess.DEVNULL, stdout=out, stderr=out)
         _wait_for(cfg.tpm_socket, 10, "swtpm")
         with open(cfg.workdir / "qemu.out", "ab") as out:
-            self.qemu = subprocess.Popen(qemu_argv(cfg), stdin=subprocess.DEVNULL, stdout=out, stderr=out)
+            self.qemu = subprocess.Popen(
+                qemu_argv(cfg, install=install), stdin=subprocess.DEVNULL, stdout=out, stderr=out
+            )
         self.serial = Serial.connect(cfg.serial_socket, transcript=cfg.transcript, timeout=30)
         return self.serial
+
+    def wait_until_off(self, timeout: float) -> None:
+        """Wait for QEMU to exit (-no-reboot turns the install boot's reboot into an exit),
+        reading the console meanwhile so the guest can finish shutting down; then for swtpm,
+        which exits with QEMU (--terminate)."""
+        assert self.serial is not None and self.qemu is not None and self.swtpm is not None
+        self.serial.read_until_closed(timeout)
+        self.serial.close()
+        self.qemu.wait(timeout=60)
+        try:
+            self.swtpm.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.swtpm.terminate()
+            self.swtpm.wait(timeout=30)
 
     def stop(self) -> None:
         if self.serial is not None:

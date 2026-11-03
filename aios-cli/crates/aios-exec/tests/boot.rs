@@ -156,6 +156,67 @@ fn gc_with_keep_zero_still_keeps_booted_and_default() {
 }
 
 #[test]
+fn gc_deletes_incomplete_generations_and_ignores_their_ukis_for_the_default() {
+    let fx = many_gens();
+    let l = &fx.layout;
+    mkdir(&l.subvol("@usr-gen-0010"));
+    mkdir(&l.subvol("@etc-gen-0011"));
+    write(&l.uki_dir().join("aios-gen-0011-lts+3.efi"), "uki", 0o644);
+    // Newer than gen-8 and not bad, but it has no subvolumes, so it can't boot: gen-8 is
+    // still what the next boot picks once it is gone, and must stay.
+    write(
+        &l.uki_dir().join("aios-gen-0012-cachyos+3.efi"),
+        "uki",
+        0o644,
+    );
+    let deleted = gc_mounted(&fx.runner, l, 0).unwrap();
+    assert_eq!(deleted, [2, 3, 4, 5, 6, 9, 10, 11, 12].map(GenId));
+    for name in ["@usr-gen-0010", "@etc-gen-0011"] {
+        assert!(!l.subvol(name).exists(), "{name}");
+    }
+    assert!(l.subvol("@usr-gen-0008").is_dir() && l.subvol("@etc-gen-0008").is_dir());
+    assert_eq!(
+        esp(&fx),
+        [
+            "aios-gen-0001-cachyos+3.efi",
+            "aios-gen-0007-cachyos.efi",
+            "aios-gen-0008-cachyos+3.efi",
+        ]
+    );
+    let calls = fx.calls();
+    let from = calls
+        .iter()
+        .rposition(|c| c.ends_with("@etc-gen-0009"))
+        .unwrap();
+    assert_eq!(
+        calls[from + 1..],
+        fx.expand(
+            "
+            btrfs subvolume show {top}/@usr-gen-0010
+            btrfs subvolume delete --recursive {top}/@usr-gen-0010
+            fsync {esp}/EFI/Linux
+            btrfs subvolume show {top}/@etc-gen-0011
+            btrfs subvolume delete --recursive {top}/@etc-gen-0011
+            fsync {esp}/EFI/Linux
+            btrfs filesystem sync {top}
+            "
+        )
+    );
+}
+
+#[test]
+fn gc_never_touches_the_booted_generation_even_when_incomplete() {
+    let fx = Fixture::booted();
+    fs::remove_dir(fx.layout.subvol("@etc-gen-0007")).unwrap();
+    assert!(gc(&fx.runner, &fx.layout, 0).unwrap().is_empty());
+    assert!(fx.layout.subvol("@usr-gen-0007").is_dir());
+    assert_eq!(
+        esp(&fx),
+        ["aios-gen-0006-cachyos.efi", "aios-gen-0007-cachyos.efi"]
+    );
+}
+
+#[test]
 fn gc_unmounts_even_when_a_delete_fails() {
     let mut fx = many_gens();
     fx.runner.fail_on(&["btrfs", "subvolume", "delete"]);

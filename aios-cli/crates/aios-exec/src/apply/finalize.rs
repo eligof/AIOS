@@ -1,5 +1,7 @@
 use super::{mkdir, Mode, Run, ETC_CAND, ROOT_CAND, USR_CAND};
+use crate::ops::read_ukis;
 use crate::{btrfs, run_ok, Cmd, ExecError};
+use aios_gen::GenId;
 use std::fs::{self, File};
 use std::io;
 use std::path::Path;
@@ -15,6 +17,7 @@ impl Run<'_> {
         let (runner, l) = (self.ctx.runner, self.ctx.layout);
         let uki_dir = l.uki_dir();
         mkdir(&uki_dir)?;
+        remove_ukis_of(&uki_dir, self.gen)?;
         for name in &self.ukis {
             let tmp = uki_dir.join(format!("{}.tmp", name.file_name()));
             self.esp_tmp.push(tmp.clone());
@@ -43,6 +46,17 @@ impl Run<'_> {
         }
         Ok(())
     }
+}
+
+/// Remove every UKI of `gen` in `dir`, whatever its flavor or boot counter. `gen` has no
+/// subvolumes yet (it is one past the newest), so these are left from a generation whose
+/// subvolumes are gone, and one could share the new UKI's entry id.
+fn remove_ukis_of(dir: &Path, gen: GenId) -> Result<(), ExecError> {
+    for uki in read_ukis(dir)?.iter().filter(|u| u.name.gen == gen) {
+        let path = dir.join(&uki.file);
+        fs::remove_file(&path).map_err(|e| ExecError::io(&path, e))?;
+    }
+    Ok(())
 }
 
 fn rename(from: &Path, to: &Path) -> Result<(), ExecError> {

@@ -1,6 +1,6 @@
 use super::{with_top, BootState};
 use crate::{btrfs, CommandRunner, ExecError, Layout};
-use aios_gen::{gc_select, list_complete, GenId};
+use aios_gen::{gc_select, list_complete, parse_subvol, Flavor, GenId};
 use std::fs;
 
 /// `aios gc`: mount the top level, delete old generations, unmount.
@@ -13,22 +13,41 @@ pub fn gc(
 }
 
 /// Delete generations beyond the newest `keep`, never the booted one, the default (the
-/// `bootctl` override and the newest good one) or gen-1. A generation's UKIs go first, and
-/// the ESP directory is fsynced before its subvolumes are deleted, so no UKI outlives them
-/// even after a power loss; a `btrfs filesystem sync` makes the deletes durable. Needs the
-/// top level mounted. Returns the deleted ids, ascending.
+/// `bootctl` override and the newest good one) or gen-1. Also delete every incomplete
+/// generation except the booted one: an `@usr-gen-N` without its `@etc-gen-N` or the other
+/// way round, and UKIs without both. None of them can boot, so a UKI of one never counts as
+/// the newest good one either. A generation's UKIs go first, and the ESP directory is
+/// fsynced before its subvolumes are deleted, so no UKI outlives them even after a power
+/// loss; a `btrfs filesystem sync` makes the deletes durable. Needs the top level mounted.
+/// Returns every generation something was deleted of, ascending.
 pub fn gc_mounted(
     runner: &dyn CommandRunner,
     layout: &Layout,
     keep: usize,
 ) -> Result<Vec<GenId>, ExecError> {
     let state = BootState::read(layout)?;
-    let gens = list_complete(&btrfs::list_names(&layout.top)?);
-    let protected: Vec<GenId> = [state.booted, state.default_override, state.newest]
+    let names = btrfs::list_names(&layout.top)?;
+    let complete = list_complete(&names);
+    let newest = state
+        .ukis
+        .iter()
+        .filter(|u| u.name.flavor == Flavor::Main && !u.name.is_bad())
+        .map(|u| u.name.gen)
+        .filter(|gen| complete.contains(gen))
+        .max();
+    let protected: Vec<GenId> = [state.booted, state.default_override, newest]
         .into_iter()
         .flatten()
         .collect();
-    let doomed = gc_select(&gens, keep, &protected);
+    let mut doomed = gc_select(&complete, keep, &protected);
+    let incomplete = names
+        .iter()
+        .filter_map(|name| parse_subvol(name).map(|(_, gen)| gen))
+        .chain(state.ukis.iter().map(|u| u.name.gen))
+        .filter(|gen| !complete.contains(gen) && Some(*gen) != state.booted);
+    doomed.extend(incomplete);
+    doomed.sort();
+    doomed.dedup();
     for gen in &doomed {
         let ukis: Vec<_> = state.ukis.iter().filter(|u| u.name.gen == *gen).collect();
         for uki in &ukis {

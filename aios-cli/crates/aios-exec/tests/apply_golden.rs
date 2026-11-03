@@ -239,6 +239,25 @@ fn without_a_fallback_kernel_one_uki_is_built() {
 }
 
 #[test]
+fn stale_ukis_of_the_new_generation_are_replaced() {
+    // Left by a gen-8 whose subvolumes are gone: one shares the new main UKI's entry id.
+    let fx = Fixture::booted();
+    for stale in ["aios-gen-0008-cachyos+1-2.efi", "aios-gen-0008-lts.efi"] {
+        write(&fx.layout.uki_dir().join(stale), "stale", 0o644);
+    }
+    fx.run().unwrap();
+    assert_eq!(
+        esp(&fx),
+        [
+            "aios-gen-0006-cachyos.efi",
+            "aios-gen-0007-cachyos.efi",
+            "aios-gen-0008-cachyos+3.efi",
+            "aios-gen-0008-lts+3.efi",
+        ]
+    );
+}
+
+#[test]
 fn stale_esp_copies_are_removed() {
     let fx = Fixture::booted();
     write(

@@ -3,16 +3,19 @@
 //! candidates again.
 
 mod etc;
+mod finalize;
 mod packages;
 mod prepare;
 mod services;
+mod uki;
 
 use crate::{btrfs, run_ok, Cmd, CommandRunner, ExecError, Layout, MachineFacts, Output};
 use crate::{Step, StepError};
-use aios_gen::GenId;
+use aios_gen::{GenId, UkiName};
 use aios_manifest::Manifest;
 use std::fs;
-use std::path::Path;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 const USR_CAND: &str = "@usr-cand";
@@ -47,6 +50,8 @@ pub struct ApplyCtx<'a> {
 pub struct ApplyOutcome {
     pub gen: GenId,
     pub manifest_commit: String,
+    /// The UKI file names now on the ESP.
+    pub ukis: Vec<String>,
 }
 
 /// Build the next generation. On error, the candidate tree is unmounted, every candidate
@@ -58,11 +63,14 @@ pub fn apply(ctx: &ApplyCtx) -> Result<ApplyOutcome, StepError> {
         manifest_commit: String::new(),
         top_mounted: false,
         cand_mounted: false,
+        ukis: Vec::new(),
+        esp_tmp: Vec::new(),
     };
     match run.steps() {
         Ok(()) => Ok(ApplyOutcome {
             gen: run.gen,
             manifest_commit: run.manifest_commit,
+            ukis: run.ukis.iter().map(UkiName::file_name).collect(),
         }),
         Err(e) => {
             run.cleanup();
@@ -81,6 +89,10 @@ struct Run<'a> {
     top_mounted: bool,
     /// Something is mounted at `layout.cand`.
     cand_mounted: bool,
+    /// UKIs built in the candidate.
+    ukis: Vec<UkiName>,
+    /// UKI copies on the ESP not yet renamed into place.
+    esp_tmp: Vec<PathBuf>,
 }
 
 impl Run<'_> {
@@ -95,7 +107,11 @@ impl Run<'_> {
             self.step(Step::Keyring, Run::keyring)?;
         }
         self.step(Step::RenderEtc, Run::render_etc)?;
-        self.step(Step::Services, Run::services)
+        self.step(Step::Services, Run::services)?;
+        self.step(Step::Uki, Run::uki)?;
+        self.step(Step::Sign, Run::sign)?;
+        self.step(Step::EspSpace, Run::esp_space)?;
+        self.step(Step::Finalize, Run::finalize)
     }
 
     fn step(
@@ -137,6 +153,14 @@ impl Run<'_> {
         }
         for name in CANDIDATES {
             report(name, btrfs::delete_recursive(runner, &l.subvol(name)));
+        }
+        for tmp in &self.esp_tmp {
+            match fs::remove_file(tmp) {
+                Err(e) if e.kind() != ErrorKind::NotFound => {
+                    report("ESP", Err(ExecError::io(tmp, e)));
+                }
+                _ => {}
+            }
         }
         if self.top_mounted {
             report("unmount top level", btrfs::umount(runner, &l.top));

@@ -1,0 +1,11 @@
+[package]
+name = "aios-render"
+description = "Pure renderers for the files AIOS writes into a generation's /etc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aios-manifest = { path = "../aios-manifest" }
+aios-gen = { path = "../aios-gen" }

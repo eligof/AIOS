@@ -20,6 +20,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aios-render"
+version = "0.1.0"
+dependencies = [
+ "aios-gen",
+ "aios-manifest",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

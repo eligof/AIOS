@@ -41,8 +41,8 @@ pub struct Drift {
 }
 
 /// A path in both trees and what differs, snapshot first: `size differs`, `content
-/// differs`, `target differs` (a symlink), `mode 0644 -> 0600`, `owner 0:0 -> 1000:1000`
-/// (uid:gid) or a changed type (`file -> symlink`).
+/// differs`, `target differs` (a symlink), `device differs` (a device node), `mode 0644 ->
+/// 0600`, `owner 0:0 -> 1000:1000` (uid:gid) or a changed type (`file -> symlink`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Modified {
     pub path: String,
@@ -115,13 +115,16 @@ struct Node {
     uid: u32,
     gid: u32,
     size: u64,
+    /// The device number of a device node.
+    rdev: u64,
 }
 
 /// Compare the live `/etc` with a generation's snapshot, the top directory included.
-/// `/etc/aios/generation.toml` is ignored. Type, owner and mode (not for a symlink) are
-/// compared from `lstat`; then a symlink's target, and a regular file's size and, if the
-/// sizes match, its bytes, read through a descriptor that is a regular file (see
-/// [`read_regular`]).
+/// `/etc/aios/generation.toml` is ignored. Type, owner, mode (not for a symlink) and a
+/// device node's number are compared from `lstat`; then a symlink's target, and a regular
+/// file's size and, if the sizes match, its bytes, read through a descriptor that is a
+/// regular file (see [`read_regular`]). What can't be compared gets a note in `skipped`,
+/// next to whatever else differs.
 pub fn drift(live: &Path, snapshot: &Path) -> Result<Drift, ExecError> {
     if !snapshot.is_dir() {
         return Err(ExecError(format!("{} is missing", snapshot.display())));
@@ -133,11 +136,15 @@ pub fn drift(live: &Path, snapshot: &Path) -> Result<Drift, ExecError> {
         let path = shown(rel, node.kind);
         match snap_nodes.get(rel) {
             None => d.added.push(path),
-            Some(old) => match compare(node, old) {
-                Ok(what) if what.is_empty() => {}
-                Ok(what) => d.modified.push(Modified { path, what }),
-                Err(reason) => d.skipped.push(format!("{path}: {reason}")),
-            },
+            Some(old) => {
+                let (what, note) = compare(node, old);
+                if let Some(reason) = note {
+                    d.skipped.push(format!("{path}: {reason}"));
+                }
+                if !what.is_empty() {
+                    d.modified.push(Modified { path, what });
+                }
+            }
         }
     }
     for (rel, node) in &snap_nodes {
@@ -189,21 +196,19 @@ fn scan(root: &Path, skipped: &mut Vec<String>) -> BTreeMap<PathBuf, Node> {
             uid: meta.uid(),
             gid: meta.gid(),
             size: meta.len(),
+            rdev: meta.rdev(),
         };
         nodes.insert(rel.to_path_buf(), node);
     }
     nodes
 }
 
-/// What differs between the live node and the snapshot's (empty: nothing). `Err` with
-/// the reason when it can't be told.
-fn compare(live: &Node, snap: &Node) -> Result<Vec<String>, String> {
+/// What differs between the live node and the snapshot's (empty: nothing), and why
+/// part of it couldn't be compared, if it couldn't.
+fn compare(live: &Node, snap: &Node) -> (Vec<String>, Option<String>) {
     if live.kind != snap.kind {
-        return Ok(vec![format!(
-            "{} -> {}",
-            snap.kind.name(),
-            live.kind.name()
-        )]);
+        let what = format!("{} -> {}", snap.kind.name(), live.kind.name());
+        return (vec![what], None);
     }
     let mut what = Vec::new();
     if live.kind != Kind::Symlink && live.mode != snap.mode {
@@ -215,29 +220,41 @@ fn compare(live: &Node, snap: &Node) -> Result<Vec<String>, String> {
             snap.uid, snap.gid, live.uid, live.gid
         ));
     }
-    match live.kind {
+    let note = match live.kind {
         Kind::Symlink => {
-            let target = |n: &Node| fs::read_link(&n.path).map_err(|e| e.to_string());
-            if target(live)? != target(snap)? {
-                what.push("target differs".to_string());
+            match (fs::read_link(&live.path), fs::read_link(&snap.path)) {
+                (Ok(a), Ok(b)) if a != b => what.push("target differs".to_string()),
+                (Ok(_), Ok(_)) => {}
+                (Err(e), _) | (_, Err(e)) => return (what, Some(e.to_string())),
             }
+            None
         }
-        Kind::File if live.size != snap.size => what.push("size differs".to_string()),
-        Kind::File if live.size > DRIFT_READ_MAX => {
-            return Err(format!(
-                "larger than {} MiB, contents not compared",
-                DRIFT_READ_MAX >> 20
-            ))
+        Kind::File if live.size != snap.size => {
+            what.push("size differs".to_string());
+            None
         }
-        Kind::File => {
-            let read = |n: &Node| read_regular(&n.path).map_err(|e| e.to_string());
-            if read(live)? != read(snap)? {
-                what.push("content differs".to_string());
+        Kind::File if live.size > DRIFT_READ_MAX => Some(format!(
+            "larger than {} MiB, contents not compared",
+            DRIFT_READ_MAX >> 20
+        )),
+        Kind::File => match (read_regular(&live.path), read_regular(&snap.path)) {
+            (Ok(a), Ok(b)) => {
+                if a != b {
+                    what.push("content differs".to_string());
+                }
+                None
             }
+            (Err(e), _) | (_, Err(e)) => Some(e.to_string()),
+        },
+        Kind::Special => {
+            if live.rdev != snap.rdev {
+                what.push("device differs".to_string());
+            }
+            None
         }
-        Kind::Dir | Kind::Special => {}
-    }
-    Ok(what)
+        Kind::Dir => None,
+    };
+    (what, note)
 }
 
 /// The bytes of the regular file at `path`, read through one descriptor: opened without
@@ -284,7 +301,10 @@ impl fmt::Display for Status {
         writeln!(f, "bad:     {bad}")?;
         match &self.drift {
             None => writeln!(f, "drift:   unknown (no aios.gen= on the kernel cmdline)")?,
-            Some(d) if d.is_empty() => writeln!(f, "drift:   none")?,
+            Some(d) if d.is_empty() && d.skipped.is_empty() => writeln!(f, "drift:   none")?,
+            Some(d) if d.is_empty() => {
+                writeln!(f, "drift:   none found in what could be compared")?
+            }
             Some(d) => {
                 writeln!(f, "drift (discarded at the next boot):")?;
                 for path in &d.added {
@@ -319,6 +339,7 @@ mod tests {
             uid,
             gid,
             size: 0,
+            rdev: 0,
         }
     }
 
@@ -326,21 +347,32 @@ mod tests {
     #[test]
     fn owner_and_group_changes_are_drift_for_every_kind() {
         for kind in [Kind::Dir, Kind::Special] {
-            let what = compare(&node(kind, 0o755, 1000, 0), &node(kind, 0o755, 0, 0)).unwrap();
+            let (what, note) = compare(&node(kind, 0o755, 1000, 0), &node(kind, 0o755, 0, 0));
             assert_eq!(what, ["owner 0:0 -> 1000:0"], "{kind:?}");
-            let what = compare(&node(kind, 0o700, 0, 10), &node(kind, 0o755, 0, 0)).unwrap();
+            assert_eq!(note, None);
+            let (what, _) = compare(&node(kind, 0o700, 0, 10), &node(kind, 0o755, 0, 0));
             assert_eq!(what, ["mode 0755 -> 0700", "owner 0:0 -> 0:10"], "{kind:?}");
         }
-        assert!(
-            compare(&node(Kind::Dir, 0o755, 0, 0), &node(Kind::Dir, 0o755, 0, 0))
-                .unwrap()
-                .is_empty()
-        );
+        let same = compare(&node(Kind::Dir, 0o755, 0, 0), &node(Kind::Dir, 0o755, 0, 0));
+        assert_eq!(same, (vec![], None));
+    }
+
+    /// Tests can't make device nodes either.
+    #[test]
+    fn a_device_node_with_another_number_is_drift() {
+        let mut live = node(Kind::Special, 0o600, 0, 0);
+        live.rdev = 0x0103;
+        let snap = node(Kind::Special, 0o600, 0, 0);
+        assert_eq!(compare(&live, &snap).0, ["device differs"]);
+        let mut dir = node(Kind::Dir, 0o755, 0, 0);
+        dir.rdev = 7;
+        assert!(compare(&dir, &node(Kind::Dir, 0o755, 0, 0)).0.is_empty());
     }
 
     /// The walk saw a regular file; by the time it is read it may be something else.
     #[test]
     fn reading_never_follows_a_symlink_or_waits_on_a_fifo() {
+        use rustix::fs::{mknodat, FileType, Mode, CWD};
         let dir = tempfile::tempdir().unwrap();
         let (file, link, fifo) = (
             dir.path().join("file"),
@@ -349,11 +381,7 @@ mod tests {
         );
         std::fs::write(&file, "data").unwrap();
         std::os::unix::fs::symlink(&file, &link).unwrap();
-        let made = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .unwrap();
-        assert!(made.success());
+        mknodat(CWD, &fifo, FileType::Fifo, Mode::from_raw_mode(0o644), 0).unwrap();
         assert_eq!(read_regular(&file).unwrap(), b"data");
         let err = read_regular(&link).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(40), "ELOOP: {err}");

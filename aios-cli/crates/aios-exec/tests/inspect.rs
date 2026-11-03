@@ -250,11 +250,8 @@ fn a_changed_type_is_drift() {
 }
 
 fn mkfifo(path: &std::path::Path) {
-    let status = std::process::Command::new("mkfifo")
-        .arg(path)
-        .status()
-        .unwrap();
-    assert!(status.success());
+    use rustix::fs::{mknodat, FileType, Mode, CWD};
+    mknodat(CWD, path, FileType::Fifo, Mode::from_raw_mode(0o644), 0).unwrap();
 }
 
 /// A FIFO is never opened, so drift can't hang waiting for a writer.
@@ -304,6 +301,53 @@ fn files_over_the_read_cap_are_compared_by_size_only() {
     assert!(d
         .modified
         .contains(&modified("/etc/bigger", &["size differs"])));
+}
+
+/// What can be told from `lstat` is reported even when the contents can't be compared.
+#[test]
+fn a_file_whose_contents_are_not_compared_still_shows_its_mode_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = drifted();
+    let (live, snap) = (&fx.layout.live_etc, fx.layout.subvol("@etc-gen-0007"));
+    for etc in [live, &snap] {
+        fs::File::create(etc.join("big"))
+            .unwrap()
+            .set_len(DRIFT_READ_MAX + 1)
+            .unwrap();
+    }
+    fs::set_permissions(live.join("big"), fs::Permissions::from_mode(0o600)).unwrap();
+    fs::set_permissions(snap.join("big"), fs::Permissions::from_mode(0o644)).unwrap();
+    let d = drift_of(&fx);
+    assert!(
+        d.modified
+            .contains(&modified("/etc/big", &["mode 0644 -> 0600"])),
+        "{d:?}"
+    );
+    assert_eq!(
+        d.skipped,
+        ["/etc/big: larger than 16 MiB, contents not compared"]
+    );
+}
+
+/// Entries that couldn't be compared mean "none" isn't known: the report says so.
+#[test]
+fn no_drift_with_entries_not_compared_is_not_reported_as_none() {
+    let st = Status {
+        booted: Some(GenId(7)),
+        default: Some(GenId(7)),
+        bad: vec![],
+        drift: Some(Drift {
+            skipped: vec!["/etc/big: larger than 16 MiB, contents not compared".to_string()],
+            ..Drift::default()
+        }),
+    };
+    assert!(
+        st.to_string().ends_with(
+            "drift:   none found in what could be compared\n\
+             note: skipped /etc/big: larger than 16 MiB, contents not compared\n"
+        ),
+        "{st}"
+    );
 }
 
 /// A path can't forge another line of the report.

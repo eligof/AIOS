@@ -29,7 +29,7 @@ BASH_SCRIPTS := initrd/install/aios tests/bats/fakes/btrfs tests/bats/fakes/reco
 BATS_FILES := tests/bats/aios-root.bats tests/bats/install-hook.bats tests/bats/aios-health.bats \
 	tests/bats/installer-config.bats tests/bats/installer-disk.bats \
 	tests/bats/installer-target.bats tests/bats/installer-keys.bats \
-	tests/bats/installer-dryrun.bats tests/bats/iso-profile.bats
+	tests/bats/installer-dryrun.bats tests/bats/iso-profile.bats tests/bats/makefile.bats
 UNITS := initrd/aios-root.service initrd/sysroot-etc.mount base/aios-health.service \
 	iso/airootfs/etc/systemd/system/aios-install-auto.service
 
@@ -37,6 +37,14 @@ UNITS := initrd/aios-root.service initrd/sysroot-etc.mount base/aios-health.serv
 ISO_BUILD := iso-build
 ISO_WORK := build/iso-work
 ISO_OUT := out
+# Clear the work directory: with sudo, or with SUDO= in a user namespace, as unprivileged
+# mkarchiso leaves files owned by the user's subordinate ids (/etc/subuid) that only a
+# namespace mapping them can delete. rm fails with EBUSY on mounts an interrupted build left.
+ISO_RM_WORK = $(if $(SUDO),$(SUDO),unshare --map-auto --map-root-user) rm -rf --one-file-system \
+	$(ISO_WORK) || { \
+	echo 'If rm said "Device or resource busy", an interrupted build left mounts under $(ISO_WORK).'; \
+	echo 'Unmount them with "$(strip $(SUDO) umount -R) MOUNTPOINT" (findmnt lists them), then run make again.'; \
+	exit 1; } >&2
 
 .PHONY: check rust-check shell-check bats-check unit-check e2e-unit tools repo keys iso-build \
 	iso iso-check clean-iso e2e
@@ -123,7 +131,7 @@ iso-build: keys
 # Needs root: run `make iso` yourself (not `sudo make iso`); it asks sudo for the two root
 # commands. archiso >= 89 can also build unprivileged: `make iso SUDO=`.
 iso: iso-build
-	$(SUDO) rm -rf --one-file-system $(ISO_WORK)
+	$(ISO_RM_WORK)
 	$(SUDO) mkarchiso -v -w $(ISO_WORK) -o $(ISO_OUT) $(ISO_BUILD)/
 
 # Static profile checks, no build and no root.
@@ -132,7 +140,7 @@ iso-check: tools
 
 clean-iso:
 	rm -rf $(ISO_BUILD)
-	if [ -e $(ISO_WORK) ]; then $(SUDO) rm -rf --one-file-system $(ISO_WORK); fi
+	if [ -e $(ISO_WORK) ]; then $(ISO_RM_WORK); fi
 
 # Install the newest out/aios-*.iso into a VM and run spec §1 (a)-(g). No root, about an
 # hour. E2E_ARGS=--keep-vm keeps the VM disk in build/e2e/ afterwards.

@@ -2,6 +2,7 @@
 # aios-root.sh: runs in the initrd via aios-root.service, before sysroot.mount (spec §3 step 6).
 # Recreates @root-live from @blank and @etc-live from @etc-gen-N for the generation named by
 # aios.gen=N, after deleting stale live subvolumes and leftover apply candidates.
+# Needs only sh, cat and mkdir (busybox from the base hook), mount and umount, and btrfs.
 #
 # Environment overrides (tests only):
 #   AIOS_CMDLINE_FILE  kernel cmdline        (default /proc/cmdline)
@@ -22,7 +23,17 @@ die() {
     exit 1
 }
 
-# Print the 4-digit generation from aios.gen= (repeats must agree), or fail.
+# is_gen VALUE: true if VALUE is a generation as aios.gen= carries it (4 digits, not 0000).
+is_gen() {
+    case "$1" in
+        0000) return 1 ;;
+        [0-9][0-9][0-9][0-9]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Print the 4-digit generation from aios.gen=, or fail. Like gen_from_cmdline in aios-gen,
+# every aios.gen= value must be a valid generation and all of them must agree.
 generation_from_cmdline() {
     [ -r "$CMDLINE_FILE" ] || die "cannot read $CMDLINE_FILE"
     cmdline=$(cat "$CMDLINE_FILE")
@@ -32,8 +43,8 @@ generation_from_cmdline() {
         case "$arg" in
             aios.gen=*)
                 value="${arg#aios.gen=}"
+                is_gen "$value" || die "no generation on cmdline"
                 if [ -n "$found" ] && [ "$found" != "$value" ]; then
-                    set +f
                     die "conflicting aios.gen= values on cmdline"
                 fi
                 found="$value"
@@ -41,42 +52,45 @@ generation_from_cmdline() {
         esac
     done
     set +f
-    case "$found" in
-        0000) die "no generation on cmdline" ;;
-        [0-9][0-9][0-9][0-9]) printf '%s\n' "$found" ;;
-        *) die "no generation on cmdline" ;;
-    esac
+    [ -n "$found" ] || die "no generation on cmdline"
+    printf '%s\n' "$found"
 }
 
-# delete_subvol NAME: delete $TOP/NAME (if present) and every subvolume nested inside it.
-# `btrfs subvolume list -o` prints paths relative to the top level in its last field.
-# Children are handled deepest first (`sort -r`), recursively, because btrfs refuses to
-# delete a subvolume that still contains another one (systemd creates
-# /var/lib/machines and /var/lib/portables as subvolumes inside @root-live).
-# The body is a subshell so the recursion's variables stay local.
+# delete_subvol NAME: delete the subvolume $TOP/NAME, if present, with every subvolume
+# nested inside it (systemd creates /var/lib/machines and /var/lib/portables as subvolumes
+# inside @root-live). btrfs walks the nesting itself; subvolume names are never parsed,
+# so a nested subvolume named "x @home" cannot make this delete @home. Anything at NAME
+# that is not a subvolume stops the boot rather than being guessed at.
+# The body is a subshell so its variables stay local.
 delete_subvol() (
     target="$TOP/$1"
-    [ -d "$target" ] || exit 0
-    btrfs subvolume list -o "$target" | awk '{ print $NF }' | sort -r |
-        while IFS= read -r nested; do
-            if [ -n "$nested" ]; then
-                delete_subvol "$nested"
-            fi
-        done
+    [ -e "$target" ] || exit 0
+    btrfs subvolume show "$target" >/dev/null 2>&1 || die "$1 exists but is not a subvolume"
     log "deleting $1"
-    btrfs subvolume delete "$target"
+    btrfs subvolume delete --recursive "$target" >/dev/null
 )
+
+# On every exit once mounted. A failed unmount is retried lazily, so the top level does
+# not stay reachable under /run, which survives switch-root.
+unmount_top() {
+    if ! umount "$TOP"; then
+        log "warning: could not unmount $TOP, retrying with umount -l"
+        umount -l "$TOP" || log "warning: umount -l $TOP failed too"
+    fi
+}
 
 gen=$(generation_from_cmdline)
 log "preparing generation $gen"
 
 mkdir -p "$TOP"
 mount -t btrfs -o subvolid=5 "$DEVICE" "$TOP"
-trap 'umount "$TOP" || log "warning: could not unmount $TOP"' EXIT
+trap unmount_top EXIT
 
 if [ ! -d "$TOP/@usr-gen-$gen" ] || [ ! -d "$TOP/@etc-gen-$gen" ]; then
     die "generation $gen missing — pick another boot entry"
 fi
+# Checked before anything is deleted: without @blank there is no root to rebuild.
+btrfs subvolume show "$TOP/@blank" >/dev/null 2>&1 || die "@blank missing — reinstall required"
 
 for stale in @root-live @etc-live @usr-cand @etc-cand @root-cand; do
     delete_subvol "$stale"

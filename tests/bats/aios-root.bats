@@ -15,6 +15,7 @@ setup() {
     export AIOS_CMDLINE_FILE="$BATS_TEST_TMPDIR/cmdline"
     export AIOS_DEVICE=/dev/mapper/fake-aios
     export CALLS="$BATS_TEST_TMPDIR/calls"
+    export FAILS="$BATS_TEST_TMPDIR/fails"
     : >"$CALLS"
 
     mkdir -p "$AIOS_TOP"
@@ -37,6 +38,11 @@ cmdline() {
     printf '%s\n' "$*" >"$AIOS_CMDLINE_FILE"
 }
 
+# fail_call LINE: the fake whose call matches LINE verbatim exits 1 instead of acting.
+fail_call() {
+    printf '%s\n' "$1" >>"$FAILS"
+}
+
 # called LINE: LINE appears verbatim in $CALLS.
 called() {
     grep -qxF -- "$1" "$CALLS" || { echo "not called: $1" >&2; cat "$CALLS" >&2; return 1; }
@@ -57,8 +63,13 @@ call_index() {
 
     [ "$status" -eq 0 ]
     called "mount -t btrfs -o subvolid=5 /dev/mapper/fake-aios $AIOS_TOP"
-    called "btrfs subvolume delete $AIOS_TOP/@root-live"
-    called "btrfs subvolume delete $AIOS_TOP/@etc-live"
+    called "btrfs subvolume show $AIOS_TOP/@blank"
+    called "btrfs subvolume show $AIOS_TOP/@root-live"
+    called "btrfs subvolume delete --recursive $AIOS_TOP/@root-live"
+    called "btrfs subvolume show $AIOS_TOP/@etc-live"
+    called "btrfs subvolume delete --recursive $AIOS_TOP/@etc-live"
+    [ "$(call_index "btrfs subvolume show $AIOS_TOP/@blank")" -lt \
+        "$(call_index "btrfs subvolume delete --recursive $AIOS_TOP/@root-live")" ]
     called "btrfs subvolume snapshot $AIOS_TOP/@blank $AIOS_TOP/@root-live"
     called "btrfs subvolume snapshot $AIOS_TOP/@etc-gen-0007 $AIOS_TOP/@etc-live"
     [ "$(tail -n 1 "$CALLS")" = "umount $AIOS_TOP" ]
@@ -89,15 +100,15 @@ call_index() {
     run "$SCRIPT"
 
     [ "$status" -eq 0 ]
-    called "btrfs subvolume delete $AIOS_TOP/@usr-cand"
-    called "btrfs subvolume delete $AIOS_TOP/@etc-cand"
-    called "btrfs subvolume delete $AIOS_TOP/@root-cand"
+    called "btrfs subvolume delete --recursive $AIOS_TOP/@usr-cand"
+    called "btrfs subvolume delete --recursive $AIOS_TOP/@etc-cand"
+    called "btrfs subvolume delete --recursive $AIOS_TOP/@root-cand"
     [ ! -e "$AIOS_TOP/@usr-cand" ]
     [ ! -e "$AIOS_TOP/@etc-cand" ]
     [ ! -e "$AIOS_TOP/@root-cand" ]
 }
 
-@test "nested subvolumes are deleted before their parent" {
+@test "nested subvolumes go with @root-live in one recursive delete" {
     subvol @root-live
     subvol @root-live/var/lib/machines
     subvol @root-live/var/lib/machines/inner
@@ -106,18 +117,113 @@ call_index() {
     run "$SCRIPT"
 
     [ "$status" -eq 0 ]
-    inner=$(call_index "btrfs subvolume delete $AIOS_TOP/@root-live/var/lib/machines/inner")
-    machines=$(call_index "btrfs subvolume delete $AIOS_TOP/@root-live/var/lib/machines")
-    portables=$(call_index "btrfs subvolume delete $AIOS_TOP/@root-live/var/lib/portables")
-    parent=$(call_index "btrfs subvolume delete $AIOS_TOP/@root-live")
-    [ -n "$inner" ]
-    [ -n "$machines" ]
-    [ -n "$portables" ]
-    [ -n "$parent" ]
-    [ "$inner" -lt "$machines" ]
-    [ "$machines" -lt "$parent" ]
-    [ "$portables" -lt "$parent" ]
+    [ "$(grep -c ' delete ' "$CALLS")" -eq 1 ]
+    called "btrfs subvolume delete --recursive $AIOS_TOP/@root-live"
+    [ "$(call_index "btrfs subvolume show $AIOS_TOP/@root-live")" -lt \
+        "$(call_index "btrfs subvolume delete --recursive $AIOS_TOP/@root-live")" ]
     [ ! -e "$AIOS_TOP/@root-live/var" ]
+    [ -f "$AIOS_TOP/@root-live/.subvol" ]
+}
+
+@test "a nested subvolume named like a top-level one cannot redirect the delete" {
+    subvol @home
+    touch "$AIOS_TOP/@home/user-file"
+    subvol @persist
+    touch "$AIOS_TOP/@persist/state"
+    subvol @root-live
+    subvol "@root-live/var/tmp/x @home"
+    subvol "@root-live/var/tmp/y @persist"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [ "$(grep -c ' delete ' "$CALLS")" -eq 1 ]
+    called "btrfs subvolume delete --recursive $AIOS_TOP/@root-live"
+    [ -f "$AIOS_TOP/@home/.subvol" ]
+    [ -f "$AIOS_TOP/@home/user-file" ]
+    [ -f "$AIOS_TOP/@persist/.subvol" ]
+    [ -f "$AIOS_TOP/@persist/state" ]
+    [ -f "$AIOS_TOP/@root-live/.subvol" ]
+    [ -d "$AIOS_TOP/@root-live/etc" ]
+    [ ! -e "$AIOS_TOP/@root-live/var" ]
+}
+
+@test "a plain directory at @root-live fails without deleting anything" {
+    mkdir -p "$AIOS_TOP/@root-live/var"
+    touch "$AIOS_TOP/@root-live/var/data"
+    subvol @etc-live
+    subvol @usr-cand
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"aios: @root-live exists but is not a subvolume"* ]]
+    [ "$(grep -c ' delete ' "$CALLS")" -eq 0 ]
+    [ "$(grep -c ' snapshot ' "$CALLS")" -eq 0 ]
+    [ -f "$AIOS_TOP/@root-live/var/data" ]
+    [ -f "$AIOS_TOP/@etc-live/.subvol" ]
+    [ -f "$AIOS_TOP/@usr-cand/.subvol" ]
+    [ "$(tail -n 1 "$CALLS")" = "umount $AIOS_TOP" ]
+}
+
+@test "missing @blank fails before deleting anything" {
+    rm -r "$AIOS_TOP/@blank"
+    subvol @root-live
+    subvol @etc-live
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"aios: @blank missing — reinstall required"* ]]
+    [ "$(grep -c ' delete ' "$CALLS")" -eq 0 ]
+    [ -f "$AIOS_TOP/@root-live/.subvol" ]
+    [ -f "$AIOS_TOP/@etc-live/.subvol" ]
+    [ "$(tail -n 1 "$CALLS")" = "umount $AIOS_TOP" ]
+}
+
+@test "a failed top-level mount touches no subvolume and unmounts nothing" {
+    subvol @root-live
+    fail_call "mount -t btrfs -o subvolid=5 /dev/mapper/fake-aios $AIOS_TOP"
+
+    run "$SCRIPT"
+
+    [ "$status" -ne 0 ]
+    [ "$(grep -c '^umount ' "$CALLS")" -eq 0 ]
+    [ "$(grep -c '^btrfs ' "$CALLS")" -eq 0 ]
+    [ -f "$AIOS_TOP/@root-live/.subvol" ]
+}
+
+@test "a failed snapshot fails the boot and unmounts exactly once" {
+    fail_call "btrfs subvolume snapshot $AIOS_TOP/@blank $AIOS_TOP/@root-live"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [ "$(grep -c ' snapshot ' "$CALLS")" -eq 1 ]
+    [ "$(grep -c '^umount ' "$CALLS")" -eq 1 ]
+    [ "$(tail -n 1 "$CALLS")" = "umount $AIOS_TOP" ]
+}
+
+@test "a failed unmount of the top level is retried lazily" {
+    fail_call "umount $AIOS_TOP"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"aios: warning: could not unmount $AIOS_TOP, retrying with umount -l"* ]]
+    [ "$(tail -n 2 "$CALLS")" = "umount $AIOS_TOP
+umount -l $AIOS_TOP" ]
+}
+
+@test "a failed unmount keeps the script's failure status" {
+    cmdline "aios.gen=0008"
+    fail_call "umount $AIOS_TOP"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"aios: generation 0008 missing — pick another boot entry"* ]]
+    [ "$(tail -n 1 "$CALLS")" = "umount -l $AIOS_TOP" ]
 }
 
 @test "missing generation fails with a clear message and still unmounts" {
@@ -179,4 +285,35 @@ call_index() {
     [ "$status" -eq 1 ]
     [[ "$output" == *"aios: conflicting aios.gen= values on cmdline"* ]]
     [ ! -s "$CALLS" ]
+}
+
+@test "an empty aios.gen= fails even next to a valid one" {
+    cmdline "aios.gen= aios.gen=0007"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"aios: no generation on cmdline"* ]]
+    [ ! -s "$CALLS" ]
+}
+
+@test "fake btrfs: a plain delete refuses nested subvolumes, --recursive takes them" {
+    subvol @root-live
+    subvol @root-live/var/lib/machines
+    mkdir "$AIOS_TOP/plain"
+
+    run btrfs subvolume delete "$AIOS_TOP/@root-live"
+    [ "$status" -eq 1 ]
+    [ -f "$AIOS_TOP/@root-live/var/lib/machines/.subvol" ]
+
+    run btrfs subvolume delete --recursive "$AIOS_TOP/plain"
+    [ "$status" -eq 1 ]
+    [ -d "$AIOS_TOP/plain" ]
+
+    run btrfs subvolume show "$AIOS_TOP/plain"
+    [ "$status" -eq 1 ]
+
+    run btrfs subvolume delete --recursive "$AIOS_TOP/@root-live"
+    [ "$status" -eq 0 ]
+    [ ! -e "$AIOS_TOP/@root-live" ]
 }

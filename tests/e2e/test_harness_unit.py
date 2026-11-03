@@ -73,9 +73,10 @@ class FakeConsole:
     def _serve(self) -> None:
         conn, _ = self._server.accept()
         with conn:
-            for chunk in self.banner:
+            for i, chunk in enumerate(self.banner):
+                if i:
+                    time.sleep(self.gap)
                 conn.sendall(chunk)
-                time.sleep(self.gap)
             if self.close_after_banner:
                 return
             buffer = b""
@@ -308,6 +309,89 @@ def test_a_closed_console_raises_serial_closed(sock_path: Path) -> None:
     console.join()
 
 
+def test_a_reset_connection_raises_serial_closed() -> None:
+    guest, peer = socket.socketpair()
+    serial = Serial(guest)
+    serial.send("typed but never read\r")
+    # Closing with unread input makes the kernel report ECONNRESET to the harness.
+    peer.close()
+
+    with pytest.raises(SerialClosed, match="closed"):
+        serial.expect(r"login: ", 5)
+    serial.close()
+
+
+def test_sending_to_a_closed_console_raises_serial_closed() -> None:
+    guest, peer = socket.socketpair()
+    serial = Serial(guest)
+    peer.close()
+
+    with pytest.raises(SerialClosed, match="closed"):
+        serial.send("root\r")
+    serial.close()
+
+
+def test_a_large_send_completes_while_the_console_is_busy_printing(sock_path: Path) -> None:
+    # The console prints 1 MB before it reads anything: the harness must read while it
+    # writes, or both sides wait for the other to drain its socket.
+    console = FakeConsole(sock_path, [b"y" * 1_000_000 + b"\r\nEND\r\n"])
+    serial = connect(sock_path)
+    payload = "x" * 1_000_000
+
+    serial.sendline(payload)
+    serial.expect(r"END", 5)
+    serial.close()
+    console.join()
+
+    assert console.received == payload.encode() + b"\r"
+    assert serial.text.startswith("y" * 1000)
+
+
+class CountingPattern:
+    """A pattern that counts how often expect searches with it."""
+
+    def __init__(self, pattern: str):
+        self._rx = re.compile(pattern)
+        self.pattern = pattern
+        self.searches = 0
+
+    def search(self, text: str, pos: int = 0) -> re.Match[str] | None:
+        self.searches += 1
+        return self._rx.search(text, pos)
+
+
+def test_expect_searches_again_only_when_new_output_arrived(sock_path: Path) -> None:
+    console = FakeConsole(sock_path, [b"Booting\r\n", b"aios-e2e login: "], gap=1.2)
+    serial = connect(sock_path)
+    pattern = CountingPattern(r"login: ")
+
+    serial.expect(pattern, 5)  # type: ignore[arg-type]
+
+    # Once before any output, at most once per chunk: not every 0.5 s of silence.
+    assert pattern.searches <= 3
+    serial.close()
+    console.join()
+
+
+def test_many_small_reads_cost_linear_time_and_keep_the_text_in_order() -> None:
+    # A 115200-baud console arrives in small reads; an hour of install output is MBs.
+    # Copying the whole text on each read (str +=) took 8 s here; a chunk list takes 0.1 s.
+    guest, peer = socket.socketpair()
+    serial = Serial(guest)
+    lines = [f"line {i:05} {'x' * 87}\r\n".encode() for i in range(30000)]
+
+    started = time.monotonic()
+    for line in lines:
+        serial._feed(line)
+    text = serial.text
+
+    assert time.monotonic() - started < 2
+    assert text == b"".join(lines).decode().replace("\r", "")
+    assert serial.tail(5) == "xxxx\n"
+    serial.close()
+    peer.close()
+
+
 def test_the_transcript_keeps_the_raw_bytes(sock_path: Path, tmp_path: Path) -> None:
     raw = b"\x1b[2J\x1b[HAIOS\r\n"
     console = FakeConsole(sock_path, [raw])
@@ -356,7 +440,8 @@ def test_shell_runs_numbered_commands_and_returns_status_and_output(sock_path: P
 
 
 def test_boot_menu_luks_and_login_are_answered_in_order(sock_path: Path) -> None:
-    setup = "stty -echo; PS1=; PS2=; export SYSTEMD_PAGER= SYSTEMD_COLORS=0 PAGER=cat"
+    # dmesg -n 1: kernel messages on the console would land inside command output.
+    setup = "stty -echo; dmesg -n 1; PS1=; PS2=; export SYSTEMD_PAGER= SYSTEMD_COLORS=0 PAGER=cat"
     # Each answer the harness types gets the next prompt as the reply.
     script = iter([
         b"\x1b[0m\xf0\x9f\x94\x90 Please enter passphrase or recovery key for disk aios: ",  # "2" + Enter

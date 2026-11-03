@@ -2,7 +2,9 @@
 
 `Serial` keeps two views of what the guest printed: the raw bytes in a transcript file,
 and `text`, decoded and stripped of terminal escape sequences and carriage returns, which
-`expect` searches. `Shell` runs one command at a time with a sentinel protocol:
+`expect` searches. It reads the console while it writes to it, so a guest that is busy
+printing can't block the harness. `Shell` runs one command at a time with a sentinel
+protocol:
 
     printf '__AIOS_E2E_BEGIN_%s__\\n' 7; { CMD ; } 2>&1; printf '__AIOS_E2E_END_%s_%s__\\n' 7 "$?"
 
@@ -27,6 +29,10 @@ _ESCAPE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]
 _PARTIAL = re.compile(r"\x1b(?:\][^\x07\x1b]*|\[[0-?]*[ -/]*|[()*+])?$")
 # Control characters except tab and newline (this drops CR and stray ESC).
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# Once output arrives, keep reading until it pauses for _QUIET seconds (for at most _BATCH):
+# QEMU's UART writes the console out a byte at a time, and expect searches once per batch.
+_QUIET = 0.02
+_BATCH = 0.25
 
 
 def strip_ansi(text: str) -> str:
@@ -57,7 +63,10 @@ class Serial:
         self._partial = ""
         self._clock = clock
         self._log = open(transcript, "ab") if transcript else None
-        self.text = ""
+        # `text` is _joined plus the chunks read since it was last asked for: appending to
+        # one str would copy all of it on every read.
+        self._joined = ""
+        self._chunks: list[str] = []
         self.pos = 0
 
     @classmethod
@@ -75,6 +84,14 @@ class Serial:
                     raise SerialTimeout(f"no serial console at {path} after {timeout:.0f}s") from None
                 time.sleep(0.1)
 
+    @property
+    def text(self) -> str:
+        """Everything the guest printed so far, decoded, without escapes or CRs."""
+        if self._chunks:
+            self._joined = "".join([self._joined, *self._chunks])
+            self._chunks.clear()
+        return self._joined
+
     def _feed(self, data: bytes) -> None:
         if self._log:
             self._log.write(data)
@@ -83,38 +100,82 @@ class Serial:
         partial = _PARTIAL.search(chunk)
         cut = partial.start() if partial else len(chunk)
         self._partial = chunk[cut:]
-        self.text += strip_ansi(chunk[:cut])
+        text = strip_ansi(chunk[:cut])
+        if text:
+            self._chunks.append(text)
 
-    def _read(self, timeout: float) -> None:
+    def _closed(self, err: OSError | None = None) -> SerialClosed:
+        why = f" ({err.strerror})" if err else ""
+        return SerialClosed(f"the serial console closed{why}; last output:\n{self.tail()}")
+
+    def _recv(self) -> None:
+        """Read what the socket holds; select said it is readable."""
+        try:
+            data = self._sock.recv(65536)
+        except BlockingIOError:
+            return
+        except (BrokenPipeError, ConnectionResetError) as err:
+            raise self._closed(err) from err
+        if not data:
+            raise self._closed()
+        self._feed(data)
+
+    def _read(self, timeout: float) -> bool:
+        """Wait up to `timeout` for output, then read until it pauses. True if any came."""
         ready, _, _ = select.select([self._sock], [], [], max(0.0, timeout))
         if not ready:
-            return
-        data = self._sock.recv(65536)
-        if not data:
-            raise SerialClosed(f"the serial console closed; last output:\n{self.tail()}")
-        self._feed(data)
+            return False
+        batch_end = time.monotonic() + _BATCH
+        while ready:
+            self._recv()
+            wait = min(_QUIET, batch_end - time.monotonic())
+            if wait <= 0:
+                break
+            ready, _, _ = select.select([self._sock], [], [], wait)
+        return True
 
     def expect(self, pattern: str | re.Pattern[str], timeout: float) -> re.Match[str]:
         """Wait for `pattern` in the text after the previous match, and move past it."""
         rx = re.compile(pattern) if isinstance(pattern, str) else pattern
         deadline = self._clock() + timeout
+        fresh = True
         while True:
-            match = rx.search(self.text, self.pos)
-            if match:
-                self.pos = match.end()
-                return match
+            if fresh:
+                match = rx.search(self.text, self.pos)
+                if match:
+                    self.pos = match.end()
+                    return match
             left = deadline - self._clock()
             if left <= 0:
                 raise SerialTimeout(
                     f"no {rx.pattern!r} within {timeout:.0f}s; last output:\n{self.tail()}"
                 )
-            self._read(min(left, 0.5))
+            fresh = self._read(min(left, 0.5))
 
     def tail(self, chars: int = 3000) -> str:
         return self.text[-chars:]
 
-    def send(self, text: str) -> None:
-        self._sock.sendall(text.encode())
+    def send(self, text: str, timeout: float = 60.0) -> None:
+        """Type `text`, reading the console while the socket is full: a guest that is busy
+        printing takes input only once its output is read."""
+        data = memoryview(text.encode())
+        deadline = self._clock() + timeout
+        while data:
+            left = deadline - self._clock()
+            if left <= 0:
+                raise SerialTimeout(
+                    f"the console took no input for {timeout:.0f}s; last output:\n{self.tail()}"
+                )
+            readable, writable, _ = select.select([self._sock], [self._sock], [], min(left, 0.5))
+            if writable:
+                try:
+                    data = data[self._sock.send(data):]
+                except BlockingIOError:
+                    pass
+                except (BrokenPipeError, ConnectionResetError) as err:
+                    raise self._closed(err) from err
+            if readable:
+                self._recv()
 
     def sendline(self, text: str) -> None:
         self.send(text + "\r")
@@ -210,5 +271,6 @@ def login_root_shell(serial: Serial, user: str, password: str, hostname: str, ti
     serial.sendline(password)
     serial.expect(r"AUTHENTICATION COMPLETE", 60)
     shell = Shell(serial)
-    shell.check("stty -echo; PS1=; PS2=; export SYSTEMD_PAGER= SYSTEMD_COLORS=0 PAGER=cat", 60)
+    # dmesg -n 1: kernel messages on the console would land inside command output.
+    shell.check("stty -echo; dmesg -n 1; PS1=; PS2=; export SYSTEMD_PAGER= SYSTEMD_COLORS=0 PAGER=cat", 60)
     return shell

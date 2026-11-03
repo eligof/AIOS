@@ -1,0 +1,25 @@
+#!/bin/bash
+# mkinitcpio install hook "aios" (spec §3 steps 4-8). Needs the systemd hook before it.
+# The units live on the host under /usr/lib/aios/initrd/, outside the host's unit path,
+# so only the initrd ever loads them.
+
+build() {
+    add_binary btrfs
+
+    add_file /usr/lib/aios/initrd/aios-root.sh /usr/lib/aios/initrd/aios-root.sh 755
+    add_file /usr/lib/aios/initrd/aios-root.service /usr/lib/systemd/system/aios-root.service
+    add_file /usr/lib/aios/initrd/sysroot-etc.mount /usr/lib/systemd/system/sysroot-etc.mount
+
+    add_symlink /usr/lib/systemd/system/sysroot.mount.requires/aios-root.service \
+        /usr/lib/systemd/system/aios-root.service
+    add_symlink /usr/lib/systemd/system/initrd-fs.target.wants/sysroot-etc.mount \
+        /usr/lib/systemd/system/sysroot-etc.mount
+}
+
+help() {
+    cat <<HELPEOF
+Prepares the AIOS generation named by aios.gen= on the kernel cmdline: recreates
+@root-live from @blank and @etc-live from @etc-gen-N, deletes stale apply
+candidates, and mounts @etc-live at /sysroot/etc. Requires the systemd hook.
+HELPEOF
+}

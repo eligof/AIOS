@@ -1,0 +1,19 @@
+# Initrd only (spec §3 step 6). aios-base installs this file in /usr/lib/aios/initrd/,
+# outside the host's unit path. The "aios" mkinitcpio hook copies it into the initrd and
+# links it into sysroot.mount.requires/. If it fails, sysroot.mount and then
+# initrd-root-fs.target fail, and that target's OnFailure=emergency.target opens the
+# emergency shell.
+
+[Unit]
+Description=AIOS: prepare @root-live and @etc-live for the booted generation
+DefaultDependencies=no
+ConditionPathExists=/etc/initrd-release
+Requires=dev-mapper-aios.device
+After=dev-mapper-aios.device cryptsetup.target
+Before=sysroot.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/aios/initrd/aios-root.sh
+StandardOutput=journal+console

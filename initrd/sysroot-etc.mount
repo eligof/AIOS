@@ -1,0 +1,18 @@
+# Initrd only (spec §3 step 8): this boot's /etc. aios-base installs this file in
+# /usr/lib/aios/initrd/. The "aios" mkinitcpio hook copies it into the initrd and links
+# it into initrd-fs.target.wants/. The device and /sysroot dependencies are implicit.
+# It is ordered before initrd-parse-etc.service so that service reads the generation's
+# /etc/fstab rather than the empty /etc from @blank.
+
+[Unit]
+Description=AIOS: mount @etc-live at /sysroot/etc
+DefaultDependencies=no
+Requires=aios-root.service
+After=sysroot.mount aios-root.service
+Before=initrd-fs.target initrd-parse-etc.service
+
+[Mount]
+What=/dev/mapper/aios
+Where=/sysroot/etc
+Type=btrfs
+Options=subvol=@etc-live,compress=zstd

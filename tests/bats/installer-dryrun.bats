@@ -617,3 +617,11 @@ EOF
     [[ "$stderr" == *"not confirmed; nothing was changed"* ]]
     [[ "$output" != *DRYRUN* ]]
 }
+
+@test "aios-install sets umask 022 before it sources anything, whatever root's umask was" {
+    printf 'echo "UMASK=$(umask)"\nexit 0\n' >"$T/lib/common.sh"
+    umask 077
+    run "$SCRIPT" --dry-run
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"UMASK=0022"* ]] || { echo "$output"; return 1; }
+}

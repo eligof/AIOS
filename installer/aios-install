@@ -17,6 +17,8 @@
 # AIOS_EFI_DIR (/sys/firmware/efi), AIOS_DEFAULTS (/usr/share/aios/defaults/manifest),
 # AIOS_LIVE_REPO (/opt/aios-repo), and those of the libraries.
 set -euo pipefail
+# Files the installer creates (target configs, keys) get the same modes whatever root's umask.
+umask 022
 
 # The passwords must never reach a trace: refuse `bash -x aios-install` and SHELLOPTS=xtrace.
 if [[ $- == *x* ]]; then

@@ -306,20 +306,61 @@ fn bootstrap_pacstraps_with_a_rewritten_conf_and_inits_the_keyring() {
         )
     );
     let conf = fs::read_to_string(fx.dir.path().join("aios-pacstrap.conf")).unwrap();
+    let cand = fx.layout.cand.display();
+    // The database goes straight into the candidate's /usr, and pacman reads the hooks
+    // (and the masks) of the candidate's /etc, not the installer's.
     assert!(
-        !conf.contains("DBPath") && !conf.contains("LogFile"),
+        conf.starts_with(&format!(
+            "[options]\nDBPath = {cand}/usr/lib/pacman/\nHookDir = {cand}/etc/pacman.d/hooks/\n"
+        )),
         "{conf}"
     );
-    let repo = format!(
-        "Server = file://{}/persist/aios/repo\n",
-        fx.layout.cand.display()
-    );
+    assert_eq!(conf.matches("DBPath").count(), 1, "{conf}");
+    assert!(!conf.contains("LogFile"), "{conf}");
+    let repo = format!("Server = file://{cand}/persist/aios/repo\n");
     assert!(conf.contains(&repo), "{conf}");
     assert!(conf.contains("CacheDir     = /var/cache/pacman/pkg/\n"));
     assert!(fx.layout.cand.join("usr/lib/pacman").is_dir());
     let meta = fs::read_to_string(fx.layout.cand.join("etc/aios/generation.toml")).unwrap();
     let meta = GenerationMeta::from_toml(&meta).unwrap();
     assert_eq!((meta.id, meta.parent), (1, 0));
+}
+
+/// The hooks pacstrap must not run: mkinitcpio's (aios builds the initramfs itself) and
+/// sbctl's (no keys in the candidate).
+const PACSTRAP_MASKS: [&str; 3] = [
+    "etc/pacman.d/hooks/90-mkinitcpio-install.hook",
+    "etc/pacman.d/hooks/60-mkinitcpio-remove.hook",
+    "etc/pacman.d/hooks/zz-sbctl.hook",
+];
+
+/// `pacstrap -C CONF ROOT PACKAGES...`: every mask is a symlink to /dev/null in ROOT.
+fn hooks_are_masked(argv: &[&str]) {
+    let root = Path::new(argv[3]);
+    for mask in PACSTRAP_MASKS {
+        assert_eq!(
+            fs::read_link(root.join(mask)).ok().as_deref(),
+            Some(Path::new("/dev/null")),
+            "{mask} while pacstrap runs"
+        );
+    }
+}
+
+#[test]
+fn bootstrap_masks_the_initramfs_and_sbctl_hooks_while_pacstrap_runs() {
+    let mut fx = Fixture::fresh();
+    fx.runner.on_success(&["pacstrap"], hooks_are_masked);
+    fx.run().unwrap();
+    let etc = fx.layout.cand.join("etc");
+    // The manifest declares only the install hook's mask; the others were for pacstrap.
+    assert_eq!(
+        fs::read_link(etc.join("pacman.d/hooks/90-mkinitcpio-install.hook")).unwrap(),
+        Path::new("/dev/null")
+    );
+    for gone in ["60-mkinitcpio-remove.hook", "zz-sbctl.hook"] {
+        let path = etc.join("pacman.d/hooks").join(gone);
+        assert!(fs::symlink_metadata(&path).is_err(), "{gone} is left");
+    }
 }
 
 #[test]

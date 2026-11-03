@@ -177,6 +177,21 @@ fn default_home_manages_autostart_vectors() {
     }
 }
 
+/// Spec §4.3 step 4: pacman in the candidate chroot never runs mkinitcpio's hooks (aios
+/// builds the initramfs into the UKIs itself) or sbctl's (no keys in the candidate).
+#[test]
+fn default_files_mask_the_initramfs_and_sbctl_hooks() {
+    let m = parse_ok(&substitute(&template(), ""));
+    for hook in [
+        "90-mkinitcpio-install.hook",
+        "60-mkinitcpio-remove.hook",
+        "zz-sbctl.hook",
+    ] {
+        let entry = &m.files[&format!("/etc/pacman.d/hooks/{hook}")];
+        assert_eq!(entry.symlink.as_deref(), Some("/dev/null"), "{hook}");
+    }
+}
+
 /// Spec §5.5: only root may talk to usbguard, so policy changes go through run0.
 #[test]
 fn usbguard_ipc_is_root_only() {

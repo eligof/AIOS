@@ -59,7 +59,7 @@ mount --make-rprivate {top}
 mountpoint -q {cand}
 btrfs subvolume create {top}/@usr-cand
 btrfs subvolume create {top}/@etc-cand
-btrfs subvolume snapshot {top}/@blank {top}/@root-cand
+btrfs subvolume create {top}/@root-cand
 mount --bind {top}/@root-cand {cand}
 mount --bind {top}/@usr-cand {cand}/usr
 mount --bind {top}/@etc-cand {cand}/etc

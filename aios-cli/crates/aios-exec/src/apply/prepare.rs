@@ -102,8 +102,9 @@ impl Run<'_> {
 
     /// Unmount a candidate tree left mounted by a run that crashed earlier in this boot,
     /// delete stale candidates, then create fresh ones: snapshots of the booted generation
-    /// (apply) or empty subvolumes (bootstrap), plus `@blank` -> `@root-cand`. From here on
-    /// a failure deletes the candidates.
+    /// plus `@blank` -> `@root-cand` (apply), or three empty subvolumes (bootstrap, whose
+    /// pacstrap can't install over `@blank`'s symlinks; see `pacstrap`). `@blank` must
+    /// exist either way. From here on a failure deletes the candidates.
     pub(super) fn prepare_candidate(&mut self) -> Result<(), ExecError> {
         let (runner, l) = (self.ctx.runner, self.ctx.layout);
         self.candidates = true;
@@ -132,13 +133,15 @@ impl Run<'_> {
                 btrfs::snapshot(runner, &usr, &l.subvol(USR_CAND))?;
                 let etc = l.subvol(&booted.etc_subvol());
                 btrfs::snapshot(runner, &etc, &l.subvol(ETC_CAND))?;
+                btrfs::snapshot(runner, &blank, &l.subvol(ROOT_CAND))
             }
             Mode::Bootstrap => {
-                btrfs::create(runner, &l.subvol(USR_CAND))?;
-                btrfs::create(runner, &l.subvol(ETC_CAND))?;
+                for name in CANDIDATES {
+                    btrfs::create(runner, &l.subvol(name))?;
+                }
+                Ok(())
             }
         }
-        btrfs::snapshot(runner, &blank, &l.subvol(ROOT_CAND))
     }
 
     /// Mount the candidate tree at `layout.cand`: `@root-cand`, with `@usr-cand` on `usr`,

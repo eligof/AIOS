@@ -45,6 +45,8 @@ mask    = []
 # `aios apply` builds the initramfs and UKIs itself; pacman must never write /boot or the ESP.
 "/etc/pacman.d/hooks/90-mkinitcpio-install.hook" = { symlink = "/dev/null" }
 "/etc/pacman.d/hooks/60-mkinitcpio-remove.hook"  = { symlink = "/dev/null" }
+# `aios apply` signs the UKIs on the host; the candidate chroot has no sbctl keys.
+"/etc/pacman.d/hooks/zz-sbctl.hook"              = { symlink = "/dev/null" }
 # Route all lookups through systemd-resolved (DNS over TLS, 90-aios-dot.conf). The
 # `filesystem` package ships a plain /etc/resolv.conf, which NetworkManager would fill
 # with the DHCP servers instead.

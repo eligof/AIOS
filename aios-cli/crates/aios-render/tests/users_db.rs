@@ -129,6 +129,15 @@ fn malformed_entries_name_file_and_line() {
         ),
         (UserDb::parse("", "wheel:x:998\n", "", ""), "group"),
         (UserDb::parse("", "wheel:x:-1:\n", "", ""), "group"),
+        (
+            UserDb::parse("root:x:+0:0::/root:/bin/sh\n", "", "", ""),
+            "passwd",
+        ),
+        (
+            UserDb::parse("root:x:0:+0::/root:/bin/sh\n", "", "", ""),
+            "passwd",
+        ),
+        (UserDb::parse("", "wheel:x:+998:\n", "", ""), "group"),
         (UserDb::parse("", "", "root\n", ""), "shadow"),
         (
             UserDb::parse("", "", "", "wheel:!*::eli:extra\n"),
@@ -167,10 +176,36 @@ fn error_messages() {
         ),
         (
             UserDbError::InvalidHash("eli".to_string()),
-            "user \"eli\": password hash is empty or contains ':' or a newline",
+            "user \"eli\": password hash is empty, has surrounding whitespace, or contains ':' or a control character",
+        ),
+        (
+            UserDbError::InvalidShell("eli".to_string()),
+            "user \"eli\": shell must be an absolute path without ':', whitespace or control characters",
+        ),
+        (
+            UserDbError::InvalidUid {
+                user: "eli".to_string(),
+                uid: 0,
+            },
+            "user \"eli\": uid 0 is outside 1000-59999",
+        ),
+        (
+            UserDbError::DuplicateUid(1000),
+            "uid 1000 is declared for more than one user",
+        ),
+        (
+            UserDbError::MissingRoot,
+            "/etc/passwd has no root account",
         ),
     ];
     for (err, text) in cases {
         assert_eq!(err.to_string(), text);
     }
+}
+
+#[test]
+fn two_field_shadow_line_round_trips() {
+    let db = UserDb::parse("", "", "root:!*\n", "").unwrap();
+    assert_eq!(db.shadow[0].rest, "");
+    assert_eq!(db.render().shadow, "root:!*\n");
 }

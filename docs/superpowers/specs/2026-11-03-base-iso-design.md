@@ -222,7 +222,7 @@ Each step aborts on failure. Abort deletes the candidate subvolumes and candidat
    - `[files]` entries, with mode, owner and symlinks.
    - `hostname`, `locale.conf` (plus `locale-gen` in the chroot), `vconsole.conf`, the `localtime` symlink.
    - `fstab` (§3 step 9).
-   - `tmpfiles.d/aios-persist.conf` and `tmpfiles.d/aios-home.conf`. The latter creates empty file targets owned by the user.
+   - `tmpfiles.d/aios-persist.conf` and `tmpfiles.d/aios-home.conf`. The latter creates each user's home (`0700`) and the directories between it and each managed home path (`0700` under `~/.ssh`, else `0755`), owned by the user. Paths are tmpfiles-escaped.
    - Home-managed sources copied to `/etc/aios/home/<user>/…`, the bind sources.
    - `kernel/cmdline`.
    - `aios/generation.toml`.
@@ -252,8 +252,8 @@ Each step aborts on failure. Abort deletes the candidate subvolumes and candidat
 
 ### 4.4 Managed home paths
 
-- Each `[users.<u>.home]` entry becomes an `fstab` line `/etc/aios/home/<u>/<path> /home/<u>/<path> none bind,ro,x-systemd.requires-mounts-for=/home 0 0`.
-- Directory targets are created by systemd as mount points. File targets are created empty by `tmpfiles.d` (`f /home/<u>/<path> 0644 <u> <u> -`).
+- Each `[users.<u>.home]` entry becomes an `fstab` line `/etc/aios/home/<u>/<path> /home/<u>/<path> none bind,ro,nofail,x-systemd.requires-mounts-for=/home 0 0`. `nofail`: a user who deletes or replaces a target can't drop the next boot into emergency mode.
+- systemd creates directory targets as mount points, and the executor creates file targets at apply time; either may leave root-owned parents. `tmpfiles.d` then fixes the owner and mode of the home and of every parent directory of a target (`d /home/<u>/<dir> 0755 <u> <u> -`; `0700` for the home and under `~/.ssh`). It never names a target: after the first boot each is a read-only bind, and a `d` or `f` line on it would fail with EROFS.
 - **Effect:** a user-level RAT can't add autostart entries, user units, shell-rc hooks, `~/.local/bin` shims or SSH keys. To change these, edit the manifest.
 - **Known limit:** other autostart vectors exist (compositor configs, `.desktop` overrides, editor plugins). They're added to the manifest defaults when the Cockpit picks the compositor. Sentinel watches the rest of `/home`.
 

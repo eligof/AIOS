@@ -41,9 +41,11 @@ pub fn fstab(m: &Manifest, ctx: &RenderCtx) -> String {
             "/persist{dir} {dir} none bind,x-systemd.requires-mounts-for=/persist 0 0"
         ));
     }
+    // `nofail`: a user who deletes or replaces a bind target must not be able to drop the
+    // next boot into emergency mode.
     for bind in home_binds(m) {
         lines.push(format!(
-            "{} {} none bind,ro,x-systemd.requires-mounts-for=/home 0 0",
+            "{} {} none bind,ro,nofail,x-systemd.requires-mounts-for=/home 0 0",
             fstab_escape(&bind.bind_source),
             fstab_escape(&bind.target)
         ));

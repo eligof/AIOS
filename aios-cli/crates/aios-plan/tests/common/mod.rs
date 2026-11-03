@@ -154,6 +154,16 @@ impl FakeProbe {
         probe
     }
 
+    /// A booted system whose `/etc` holds only a passwd with root.
+    pub fn root_only() -> FakeProbe {
+        let mut probe = FakeProbe::default();
+        probe.etc.insert(
+            "/etc/passwd".to_string(),
+            text_file("root:x:0:0::/root:/usr/bin/bash\n", 0o644),
+        );
+        probe
+    }
+
     /// A booted generation built from exactly this fixture: the planner must see no changes.
     pub fn synced(fx: &Fixture) -> FakeProbe {
         let mut probe = FakeProbe::base();

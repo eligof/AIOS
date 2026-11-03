@@ -11,8 +11,8 @@ const GOLDEN: &str = "\
 UUID=7A1B-2C3D /efi vfat noauto,x-systemd.automount,umask=0077 0 2
 /persist/var/lib/NetworkManager /var/lib/NetworkManager none bind,x-systemd.requires-mounts-for=/persist 0 0
 /persist/var/cache/pacman/pkg /var/cache/pacman/pkg none bind,x-systemd.requires-mounts-for=/persist 0 0
-/etc/aios/home/eli/.config/autostart /home/eli/.config/autostart none bind,ro,x-systemd.requires-mounts-for=/home 0 0
-/etc/aios/home/eli/.zshrc /home/eli/.zshrc none bind,ro,x-systemd.requires-mounts-for=/home 0 0
+/etc/aios/home/eli/.config/autostart /home/eli/.config/autostart none bind,ro,nofail,x-systemd.requires-mounts-for=/home 0 0
+/etc/aios/home/eli/.zshrc /home/eli/.zshrc none bind,ro,nofail,x-systemd.requires-mounts-for=/home 0 0
 ";
 
 #[test]
@@ -33,7 +33,7 @@ fn paths_with_spaces_are_escaped_in_lines() {
         "\"Notes/My File.txt\" = \"home/eli/notes.txt\"",
     ));
     let text = fstab(&m, &ctx());
-    let line = "/etc/aios/home/eli/Notes/My\\040File.txt /home/eli/Notes/My\\040File.txt none bind,ro,x-systemd.requires-mounts-for=/home 0 0\n";
+    let line = "/etc/aios/home/eli/Notes/My\\040File.txt /home/eli/Notes/My\\040File.txt none bind,ro,nofail,x-systemd.requires-mounts-for=/home 0 0\n";
     assert!(text.contains(line), "got:\n{text}");
 }
 

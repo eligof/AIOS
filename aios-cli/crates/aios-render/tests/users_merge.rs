@@ -179,15 +179,133 @@ fn merge_is_idempotent() {
 }
 
 #[test]
-fn empty_database_gets_declared_users() {
+fn empty_database_has_no_root_and_is_an_error() {
     let m = manifest_from(&MANIFEST.replace("groups = [\"wheel\", \"video\"]", "groups = []"));
-    let files = merge_users(&m, &UserDb::default(), &hashes(&[("eli", "$y$h")]), TODAY)
+    let err = merge_users(&m, &UserDb::default(), &hashes(&[("eli", "$y$h")]), TODAY).unwrap_err();
+    assert_eq!(err, UserDbError::MissingRoot);
+}
+
+#[test]
+fn root_only_database_gets_declared_users_and_a_locked_root_shadow() {
+    let m = manifest_from(&MANIFEST.replace("groups = [\"wheel\", \"video\"]", "groups = []"));
+    let db = UserDb::parse("root:x:0:0::/root:/usr/bin/bash\n", "", "", "").unwrap();
+    let files = merge_users(&m, &db, &hashes(&[("eli", "$y$h")]), TODAY)
         .unwrap()
         .render();
-    assert_eq!(files.passwd, "eli:x:1000:1000::/home/eli:/usr/bin/zsh\n");
+    assert_eq!(
+        files.passwd,
+        "root:x:0:0::/root:/usr/bin/bash\neli:x:1000:1000::/home/eli:/usr/bin/zsh\n"
+    );
     assert_eq!(files.group, "eli:x:1000:\n");
-    assert_eq!(files.shadow, "eli:$y$h:20760:0:99999:7:::\n");
+    assert_eq!(
+        files.shadow,
+        "root:!*:::::::\neli:$y$h:20760:0:99999:7:::\n"
+    );
     assert_eq!(files.gshadow, "eli:!*::\n");
+}
+
+#[test]
+fn root_with_a_managed_uid_is_dropped_and_missing() {
+    let db = UserDb::parse(
+        &PASSWD.replace("root:x:0:0:", "root:x:1003:0:"),
+        GROUP,
+        SHADOW,
+        GSHADOW,
+    )
+    .unwrap();
+    let err = merge_users(&two_users(), &db, &default_hashes(), TODAY).unwrap_err();
+    assert_eq!(err, UserDbError::MissingRoot);
+}
+
+#[test]
+fn root_shadow_entry_is_added_when_missing() {
+    let db = UserDb::parse(
+        PASSWD,
+        GROUP,
+        &SHADOW.replace("root:$6$oldroot$hash:20000::::::\n", ""),
+        GSHADOW,
+    )
+    .unwrap();
+    let files = merge_users(&two_users(), &db, &default_hashes(), TODAY)
+        .unwrap()
+        .render();
+    assert!(
+        files
+            .shadow
+            .starts_with("root:!*:::::::\nbin:!*:20000::::::\n"),
+        "got:\n{}",
+        files.shadow
+    );
+    assert_eq!(files.shadow.matches("root:").count(), 1);
+}
+
+#[test]
+fn invalid_shell_is_an_error() {
+    let cases = [
+        "usr/bin/zsh",
+        "",
+        "/usr/bin/zsh:/x",
+        "/usr/bin/z sh",
+        r"/usr/bin/zsh\n",
+        r"/usr/bin/z\tsh",
+        r"/usr/bin/z\u0000sh",
+        r"/usr/bin/z\u007fsh",
+    ];
+    for shell in cases {
+        let m = manifest_from(&format!(
+            "{MANIFEST}\n[users.ada]\nuid = 1001\ngroups = [\"video\"]\nshell = \"{shell}\"\n"
+        ));
+        let err = merge_users(&m, &db(), &default_hashes(), TODAY).unwrap_err();
+        assert_eq!(
+            err,
+            UserDbError::InvalidShell("ada".to_string()),
+            "shell {shell:?}"
+        );
+    }
+}
+
+#[test]
+fn uid_outside_the_managed_range_is_an_error() {
+    for uid in [0, 1, 999, 60000, 65534] {
+        let m = manifest_from(&MANIFEST.replace("uid = 1000", &format!("uid = {uid}")));
+        let err = merge_users(&m, &db(), &hashes(&[("eli", "$y$h")]), TODAY).unwrap_err();
+        assert_eq!(
+            err,
+            UserDbError::InvalidUid {
+                user: "eli".to_string(),
+                uid
+            },
+            "uid {uid}"
+        );
+    }
+}
+
+#[test]
+fn duplicate_uid_is_an_error() {
+    let m = manifest_from(&format!(
+        "{MANIFEST}\n[users.ada]\nuid = 1000\ngroups = [\"video\"]\nshell = \"/usr/bin/bash\"\n"
+    ));
+    let err = merge_users(&m, &db(), &default_hashes(), TODAY).unwrap_err();
+    assert_eq!(err, UserDbError::DuplicateUid(1000));
+}
+
+#[test]
+fn gshadow_admins_drop_removed_and_declared_users() {
+    let db = UserDb::parse(
+        PASSWD,
+        GROUP,
+        SHADOW,
+        &GSHADOW.replace("wheel:!*::bob,eli\n", "wheel:!*:bob,daemon,eli:bob,eli\n"),
+    )
+    .unwrap();
+    let files = merge_users(&two_users(), &db, &default_hashes(), TODAY)
+        .unwrap()
+        .render();
+    assert!(
+        files.gshadow.contains("\nwheel:!*:daemon:eli\n"),
+        "got:\n{}",
+        files.gshadow
+    );
 }
 
 #[test]
@@ -217,7 +335,9 @@ fn missing_hash_is_an_error() {
 
 #[test]
 fn invalid_hashes_are_errors() {
-    for bad in ["", "$y$a:b", "$y$ab\n"] {
+    for bad in [
+        "", "$y$a:b", "$y$ab\n", "$y$ab\r", "$y$a\0b", " $y$ab", "$y$ab ", "\t$y$ab",
+    ] {
         let err = merge_users(
             &two_users(),
             &db(),

@@ -109,12 +109,26 @@ fn account_files_merge_declared_users_into_the_probe_state() {
 #[test]
 fn absent_account_files_mean_empty_databases() {
     let fx = fixture_with(&MANIFEST.replace("groups = [\"wheel\"]", "groups = []"));
-    let d = desired_etc(&fx.inputs(), &FakeProbe::default()).unwrap();
+    let d = desired_etc(&fx.inputs(), &FakeProbe::root_only()).unwrap();
     assert_eq!(
         d["/etc/passwd"],
-        text_file("eli:x:1000:1000::/home/eli:/usr/bin/zsh\n", 0o644)
+        text_file(
+            "root:x:0:0::/root:/usr/bin/bash\neli:x:1000:1000::/home/eli:/usr/bin/zsh\n",
+            0o644
+        )
     );
     assert_eq!(d["/etc/group"], text_file("eli:x:1000:\n", 0o644));
+    let shadow = format!("root:!*:::::::\neli:{ELI_HASH}:20760:0:99999:7:::\n");
+    assert_eq!(d["/etc/shadow"], text_file(&shadow, 0o600));
+}
+
+#[test]
+fn probe_without_passwd_has_no_root_and_fails() {
+    let fx = fixture_with(&MANIFEST.replace("groups = [\"wheel\"]", "groups = []"));
+    assert_eq!(
+        desired_etc(&fx.inputs(), &FakeProbe::default()).unwrap_err(),
+        PlanError::Users(UserDbError::MissingRoot)
+    );
 }
 
 #[test]

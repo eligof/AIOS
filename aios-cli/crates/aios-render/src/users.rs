@@ -20,7 +20,7 @@ pub struct GroupEntry {
 }
 
 /// One `/etc/shadow` line. `rest` is fields 3 to 9 verbatim
-/// (`lastchg:min:max:warn:inactive:expire:reserved`).
+/// (`lastchg:min:max:warn:inactive:expire:reserved`); empty for a 2-field line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShadowEntry {
     pub name: String,
@@ -57,8 +57,8 @@ pub struct UserFiles {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserDbError {
-    /// Wrong field count, empty name or non-numeric id. `file` is `passwd`, `group`,
-    /// `shadow` or `gshadow`; `line` is 1-based.
+    /// Wrong field count, empty name or an id that isn't plain ASCII digits. `file` is
+    /// `passwd`, `group`, `shadow` or `gshadow`; `line` is 1-based.
     Malformed { file: &'static str, line: usize },
     /// A declared user lists a group that does not exist after merging.
     MissingGroup { user: String, group: String },
@@ -66,8 +66,17 @@ pub enum UserDbError {
     NameConflict(String),
     /// No password hash was supplied for a declared user.
     MissingHash(String),
-    /// The hash is empty or contains `:` or a newline.
+    /// The hash is empty, has leading or trailing whitespace, or contains `:` or a control
+    /// character (newline, `\r`, NUL, ...).
     InvalidHash(String),
+    /// A declared user's shell isn't absolute or contains `:`, whitespace or a control character.
+    InvalidShell(String),
+    /// A declared uid is outside [`MANAGED_IDS`](crate::MANAGED_IDS).
+    InvalidUid { user: String, uid: u32 },
+    /// Two declared users share this uid.
+    DuplicateUid(u32),
+    /// No `root` entry survives in `/etc/passwd`.
+    MissingRoot,
 }
 
 impl fmt::Display for UserDbError {
@@ -89,8 +98,19 @@ impl fmt::Display for UserDbError {
             ),
             UserDbError::InvalidHash(name) => write!(
                 f,
-                "user {name:?}: password hash is empty or contains ':' or a newline"
+                "user {name:?}: password hash is empty, has surrounding whitespace, or contains ':' or a control character"
             ),
+            UserDbError::InvalidShell(name) => write!(
+                f,
+                "user {name:?}: shell must be an absolute path without ':', whitespace or control characters"
+            ),
+            UserDbError::InvalidUid { user, uid } => {
+                write!(f, "user {user:?}: uid {uid} is outside 1000-59999")
+            }
+            UserDbError::DuplicateUid(uid) => {
+                write!(f, "uid {uid} is declared for more than one user")
+            }
+            UserDbError::MissingRoot => write!(f, "/etc/passwd has no root account"),
         }
     }
 }
@@ -134,7 +154,10 @@ impl UserDb {
             shadow: self
                 .shadow
                 .iter()
-                .map(|e| format!("{}:{}:{}\n", e.name, e.hash, e.rest))
+                .map(|e| match e.rest.as_str() {
+                    "" => format!("{}:{}\n", e.name, e.hash),
+                    rest => format!("{}:{}:{rest}\n", e.name, e.hash),
+                })
                 .collect(),
             gshadow: self
                 .gshadow
@@ -176,8 +199,8 @@ fn parse_passwd(fields: &[&str]) -> Option<PasswdEntry> {
     };
     Some(PasswdEntry {
         name: non_empty(name)?,
-        uid: uid.parse().ok()?,
-        gid: gid.parse().ok()?,
+        uid: parse_id(uid)?,
+        gid: parse_id(gid)?,
         gecos: gecos.to_string(),
         home: home.to_string(),
         shell: shell.to_string(),
@@ -190,7 +213,7 @@ fn parse_group(fields: &[&str]) -> Option<GroupEntry> {
     };
     Some(GroupEntry {
         name: non_empty(name)?,
-        gid: gid.parse().ok()?,
+        gid: parse_id(gid)?,
         members: split_list(members),
     })
 }
@@ -216,6 +239,14 @@ fn parse_gshadow(fields: &[&str]) -> Option<GshadowEntry> {
         admins: split_list(admins),
         members: split_list(members),
     })
+}
+
+/// A uid or gid: ASCII digits only, so `+0` or ` 0` don't parse.
+fn parse_id(field: &str) -> Option<u32> {
+    if field.is_empty() || !field.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    field.parse().ok()
 }
 
 fn non_empty(name: &str) -> Option<String> {

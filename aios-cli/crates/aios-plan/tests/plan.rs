@@ -22,13 +22,20 @@ fn unit(name: &str, from: UnitState, to: UnitState) -> UnitChange {
 }
 
 #[test]
-fn empty_probe_adds_everything() {
+fn probe_with_only_root_adds_everything_else() {
     let fx = fixture_with(&MANIFEST.replace("groups = [\"wheel\"]", "groups = []"));
-    let plan = build_plan(&fx.inputs(), &FakeProbe::default()).unwrap();
+    let plan = build_plan(&fx.inputs(), &FakeProbe::root_only()).unwrap();
     assert_eq!(plan.packages_add, fx.manifest.package_set());
     assert!(plan.packages_remove.is_empty());
     assert_eq!(plan.etc_changes.len(), 19);
-    assert!(plan.etc_changes.iter().all(|c| c.kind == ChangeKind::Add));
+    for c in &plan.etc_changes {
+        let want = if c.path == "/etc/passwd" {
+            ChangeKind::Modify
+        } else {
+            ChangeKind::Add
+        };
+        assert_eq!(c.kind, want, "{}", c.path);
+    }
     assert!(plan.etc_changes.windows(2).all(|w| w[0].path < w[1].path));
     assert_eq!(
         plan.unit_changes,

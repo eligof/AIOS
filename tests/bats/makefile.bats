@@ -154,3 +154,13 @@ EOF
     run mk release-check RELEASE_BIN=empty
     [ "$status" -ne 0 ]
 }
+
+# grep exits 2 when it can't read the file: that is no proof the binary is clean.
+@test "make release-check fails when grep can't read the binary" {
+    [ "$(id -u)" -ne 0 ] || skip "root reads any file"
+    printf 'ELF\0usage: aios <command>\0' >"$W/unreadable"
+    chmod 000 "$W/unreadable"
+    run mk release-check RELEASE_BIN=unreadable
+    chmod 644 "$W/unreadable"
+    [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+}

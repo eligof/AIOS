@@ -63,11 +63,14 @@ rust-check:
 	$(check-release-bin)
 
 # The shipped binary reads no AIOS_* variable at all, so any AIOS_ string in it means an
-# override leaked into the release build. `make release-check` checks a binary already built.
+# override leaked into the release build. Only grep's "no match" (status 1) passes: a read
+# error (2) proves nothing. `make release-check` checks a binary already built.
 RELEASE_BIN ?= aios-cli/target/release/aios
 define check-release-bin
 	test -s $(RELEASE_BIN)
-	! grep -q AIOS_ $(RELEASE_BIN)
+	grep -q AIOS_ $(RELEASE_BIN); rc=$$?; [ $$rc -eq 1 ] || { \
+		echo "$(RELEASE_BIN): grep -q AIOS_ exited $$rc (0: an AIOS_ string is in it)" >&2; \
+		exit 1; }
 endef
 
 release-check:

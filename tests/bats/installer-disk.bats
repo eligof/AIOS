@@ -16,24 +16,39 @@ setup() {
     ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$BIN/findmnt"
     PATH="$BIN:$PATH"
     export FAKE_SYS="$BATS_TEST_TMPDIR/sys" CALLS="$BATS_TEST_TMPDIR/calls"
-    mkdir -p "$FAKE_SYS"
+    export AIOS_SYS_BLOCK="$BATS_TEST_TMPDIR/sysfs"
+    mkdir -p "$FAKE_SYS" "$AIOS_SYS_BLOCK"
     : >"$CALLS"
     GIB=$((1024 * 1024 * 1024))
-    blk vda disk $((20 * GIB)) 0 "" ""
-    blk sr0 rom $((1 * GIB)) 1 "/run/archiso/bootmnt" ""
+    blk vda disk $((20 * GIB)) 0 ""
+    blk sr0 rom $((1 * GIB)) 1 "/run/archiso/bootmnt"
     live /dev/sr0
     PACMAN_CONF="$BATS_TEST_DIRNAME/../../manifest/files/pacman.conf"
 }
 
-# blk NAME TYPE SIZE RO MOUNTPOINTS PKNAME: a fake block device /dev/NAME.
+# blk NAME TYPE SIZE RO MOUNTPOINTS: a fake block device /dev/NAME with nothing on it: lsblk
+# answers for it (also its tree, and with -s its stack, both just itself), and sysfs has its
+# diskseq and an empty holders/.
 blk() {
     local d="$FAKE_SYS/blk/$1"
-    mkdir -p "$d"
+    mkdir -p "$d" "$AIOS_SYS_BLOCK/$1/holders"
     printf '%s\n' "$2" >"$d/TYPE"
     printf '%s\n' "$3" >"$d/SIZE"
     printf '%s\n' "$4" >"$d/RO"
     printf '%s\n' "$5" >"$d/MOUNTPOINTS"
-    printf '%s\n' "$6" >"$d/PKNAME"
+    printf '%s %s\n' "$1" "$2" >"$d/NAME,TYPE"
+    printf '%s %s\n' "$1" "$2" >"$d/NAME,TYPE.inverse"
+    printf 'QEMU HARDDISK\n' >"$d/MODEL"
+    printf '\n' >"$d/SERIAL"
+    echo 9 >"$AIOS_SYS_BLOCK/$1/diskseq"
+}
+
+# part DISK NAME [MOUNTPOINTS]: partition NAME of DISK.
+part() {
+    blk "$2" part $((2 * GIB)) 0 "${3:-}"
+    printf '%s part\n' "$2" >>"$FAKE_SYS/blk/$1/NAME,TYPE"
+    printf '%s disk\n' "$1" >>"$FAKE_SYS/blk/$2/NAME,TYPE.inverse"
+    mkdir -p "$AIOS_SYS_BLOCK/$1/$2/holders"
 }
 
 # live SOURCE: the archiso boot medium is mounted from SOURCE.
@@ -64,7 +79,7 @@ ldso() {
 }
 
 @test "partitions, optical drives and missing devices are refused" {
-    blk vda1 part $((20 * GIB)) 0 "" vda
+    part vda vda1
 
     run validate_disk /dev/vda1
     [ "$status" -eq 1 ]
@@ -79,9 +94,9 @@ ldso() {
 }
 
 @test "the disk holding the live medium is refused" {
-    blk sdb disk $((32 * GIB)) 0 "" ""
+    blk sdb disk $((32 * GIB)) 0 ""
     live /dev/sdb1
-    blk sdb1 part $((2 * GIB)) 0 "/run/archiso/bootmnt" sdb
+    part sdb sdb1 /run/archiso/bootmnt
 
     run validate_disk /dev/sdb
 
@@ -90,7 +105,7 @@ ldso() {
 }
 
 @test "a live medium written to the whole disk is refused too" {
-    blk sdc disk $((32 * GIB)) 0 "" ""
+    blk sdc disk $((32 * GIB)) 0 ""
     live /dev/sdc
 
     run validate_disk /dev/sdc
@@ -99,8 +114,31 @@ ldso() {
     [[ "$output" == *"holds the live medium"* ]]
 }
 
+@test "a live medium on a device-mapper target (Ventoy) is traced down to its disk" {
+    blk sdd disk $((32 * GIB)) 0 ""
+    part sdd sdd1
+    mkdir -p "$FAKE_SYS/blk/mapper/ventoy"
+    printf '%s\n' "ventoy dm" "sdd1 part" "sdd disk" >"$FAKE_SYS/blk/mapper/ventoy/NAME,TYPE.inverse"
+    live /dev/mapper/ventoy
+
+    run validate_disk /dev/sdd
+
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: /dev/sdd holds the live medium this system booted from" ]
+    [ "$(live_medium_disks)" = /dev/sdd ]
+    grep -qx 'lsblk -nrso NAME,TYPE /dev/mapper/ventoy' "$CALLS"
+}
+
+@test "without a live medium device (copytoram, PXE) every disk may be used" {
+    rm "$FAKE_SYS/mnt/run/archiso/bootmnt"
+
+    [ -z "$(live_medium_disks)" ]
+    run validate_disk /dev/vda
+    [ "$status" -eq 0 ]
+}
+
 @test "a disk with mounted filesystems is refused" {
-    blk vdb disk $((20 * GIB)) 0 "$(printf '\n/mnt/data\n')" ""
+    blk vdb disk $((20 * GIB)) 0 "$(printf '\n/mnt/data\n')"
 
     run validate_disk /dev/vdb
 
@@ -109,15 +147,112 @@ ldso() {
 }
 
 @test "read-only and small disks are refused" {
-    blk vdc disk $((20 * GIB)) 1 "" ""
+    blk vdc disk $((20 * GIB)) 1 ""
     run validate_disk /dev/vdc
     [ "$status" -eq 1 ]
     [ "$output" = "aios-install: error: /dev/vdc is read-only" ]
 
-    blk vdd disk $((8 * GIB)) 0 "" ""
+    blk vdd disk $((8 * GIB)) 0 ""
     run validate_disk /dev/vdd
     [ "$status" -eq 1 ]
     [ "$output" = "aios-install: error: /dev/vdd has 8 GiB, AIOS needs at least 16 GiB" ]
+}
+
+@test "a disk with LVM, MD RAID or dm-crypt on it is refused" {
+    blk vdb disk $((20 * GIB)) 0 ""
+    part vdb vdb1
+    printf '%s\n' "vg0-root lvm" >>"$FAKE_SYS/blk/vdb/NAME,TYPE"
+
+    run validate_disk /dev/vdb
+
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: /dev/vdb is in use by vg0-root (LVM/MD/dm); deactivate it first" ]
+}
+
+@test "a sysfs holder of the disk or of a partition is refused too" {
+    blk vdb disk $((20 * GIB)) 0 ""
+    mkdir "$AIOS_SYS_BLOCK/vdb/holders/dm-3"
+    run validate_disk /dev/vdb
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: /dev/vdb is in use by dm-3 (LVM/MD/dm); deactivate it first" ]
+
+    blk nvme0n1 disk $((20 * GIB)) 0 ""
+    part nvme0n1 nvme0n1p1
+    part nvme0n1 nvme0n1p2
+    ln -s ../../md127 "$AIOS_SYS_BLOCK/nvme0n1/nvme0n1p2/holders/md127"
+    run validate_disk /dev/nvme0n1
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: /dev/nvme0n1 is in use by md127 (LVM/MD/dm); deactivate it first" ]
+}
+
+@test "plain partitions are no reason to refuse a disk" {
+    part vda vda1
+    part vda vda2
+
+    run validate_disk /dev/vda
+
+    [ "$status" -eq 0 ]
+}
+
+@test "validation records the disk's identity for the confirmation" {
+    printf 'Samsung SSD 990 PRO 1TB   \n' >"$FAKE_SYS/blk/vda/MODEL"
+    printf 'S6Z1NJ0W\n' >"$FAKE_SYS/blk/vda/SERIAL"
+    echo 42 >"$AIOS_SYS_BLOCK/vda/diskseq"
+
+    validate_disk /dev/vda
+
+    [ "$DISK_SEQ" = 42 ]
+    [ "$(disk_identity)" = "model Samsung SSD 990 PRO 1TB, serial S6Z1NJ0W, 20 GiB (21474836480 bytes), diskseq 42" ]
+    blk vdb disk $((20 * GIB)) 0 ""
+    printf '\n' >"$FAKE_SYS/blk/vdb/MODEL"
+    validate_disk /dev/vdb
+    [ "$(disk_identity)" = "model unknown, serial unknown, 20 GiB (21474836480 bytes), diskseq 9" ]
+}
+
+@test "a disk without a readable diskseq is refused" {
+    rm "$AIOS_SYS_BLOCK/vda/diskseq"
+
+    run validate_disk /dev/vda
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"cannot read the disk sequence number of /dev/vda"* ]]
+}
+
+@test "a different disk under the same name is noticed before the wipe" {
+    disk_unchanged /dev/vda 9
+
+    echo 10 >"$AIOS_SYS_BLOCK/vda/diskseq"
+    run disk_unchanged /dev/vda 9
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: /dev/vda: disk changed since validation (diskseq 9, now 10)" ]
+
+    rm "$AIOS_SYS_BLOCK/vda/diskseq"
+    run disk_unchanged /dev/vda 9
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"disk changed since validation (diskseq 9, now none)"* ]]
+}
+
+@test "after partitioning the disk must have exactly the two new partitions" {
+    part vda vda1
+    part vda vda2
+    check_partitions /dev/vda
+
+    part vda vda3
+    run check_partitions /dev/vda
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: /dev/vda should now have exactly the partitions /dev/vda1 /dev/vda2, but has: /dev/vda1 /dev/vda2 /dev/vda3" ]
+
+    blk nvme0n1 disk $((20 * GIB)) 0 ""
+    part nvme0n1 nvme0n1p1
+    run check_partitions /dev/nvme0n1
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"exactly the partitions /dev/nvme0n1p1 /dev/nvme0n1p2, but has: /dev/nvme0n1p1" ]]
+    part nvme0n1 nvme0n1p2
+    check_partitions /dev/nvme0n1
+
+    blk vdb disk $((20 * GIB)) 0 ""
+    run check_partitions /dev/vdb
+    [[ "$output" == *"but has: none" ]]
 }
 
 @test "x86-64-v3 is detected from the loader's hwcaps list" {

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Multi-call fake for the installer tests, linked under the name of the command it fakes.
-# Every call is appended to $CALLS as "<name> <args>". Answers come from $FAKE_SYS:
-#   lsblk      -o COLUMN ... DEV   prints $FAKE_SYS/blk/<DEV without /dev/>/<COLUMN>
-#                                  (exit 32 "not a block device" if that dir is missing)
+# Every call is appended to $CALLS as "<name> <args>". Then, if $FAKE_SYS/hook.<name>
+# exists, sh runs it with the same arguments (to change the fake machine mid-run).
+# Answers come from $FAKE_SYS:
+#   lsblk      -o COLUMNS ... DEV  prints $FAKE_SYS/blk/<DEV without /dev/>/<COLUMNS>, or
+#                                  <COLUMNS>.inverse with -s (exit 32 "not a block device"
+#                                  if that dir is missing)
 #   findmnt    ... ARG             prints $FAKE_SYS/mnt<ARG> (ARG is the last argument: a mount
 #                                  point for its SOURCE, or with -S a source for its TARGETs),
 #                                  else exit 1
@@ -18,13 +21,18 @@ set -euo pipefail
 
 name=${0##*/}
 echo "$name $*" >>"$CALLS"
+if [ -f "$FAKE_SYS/hook.$name" ]; then
+    sh "$FAKE_SYS/hook.$name" "$@"
+fi
 
 case "$name" in
     lsblk)
         column=""
+        suffix=""
         prev=""
         for arg in "$@"; do
             case "$prev" in -o | -*o) column=$arg ;; esac
+            case "$arg" in --*) ;; -*s*) suffix=.inverse ;; esac
             prev=$arg
         done
         dev=${!#}
@@ -33,7 +41,7 @@ case "$name" in
             echo "lsblk: $dev: not a block device" >&2
             exit 32
         fi
-        cat "$dir/$column"
+        cat "$dir/$column$suffix"
         ;;
     findmnt)
         file="$FAKE_SYS/mnt${!#}"

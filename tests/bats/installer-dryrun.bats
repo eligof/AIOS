@@ -2,8 +2,9 @@
 # installer/aios-install end to end in dry-run mode (spec §6.2, §7, §9): the ordered list of
 # commands that change the system, what actually runs (read-only queries only), the failure
 # trap, and the unattended/interactive/--auto entry points.
-# bats sets $stderr for `run --separate-stderr`; each test runs in a subshell.
-# shellcheck disable=SC2030,SC2031,SC2154
+# bats sets $stderr for `run --separate-stderr`; each test runs in a subshell; literal $ in
+# single quotes is test data (fake hooks).
+# shellcheck disable=SC2016,SC2030,SC2031,SC2154
 
 bats_require_minimum_version 1.5.0
 
@@ -20,7 +21,7 @@ setup() {
 
     # The fake machine: a 20 GiB /dev/vda, the live medium on /dev/sr0, a CachyOS-trusting
     # keyring, firmware in Setup Mode, one USB controller, a v3 CPU.
-    export FAKE_SYS="$T/sys" CALLS="$T/calls"
+    export FAKE_SYS="$T/sys" CALLS="$T/calls" AIOS_SYS_BLOCK="$T/sysfs"
     : >"$CALLS"
     blk vda disk $((20 * 1024 * 1024 * 1024)) 0 ""
     blk sr0 rom 1073741824 1 /run/archiso/bootmnt
@@ -60,21 +61,29 @@ EOF
     for n in lsblk findmnt mountpoint gpg mkpasswd cryptsetup sbctl usbguard curl modprobe; do
         ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$T/bin/$n"
     done
-    for n in sgdisk udevadm mkfs.fat systemd-cryptenroll mkfs.btrfs btrfs mount umount git aios \
-        bootctl install cp mv chown chmod; do
+    for n in wipefs sgdisk blockdev udevadm mkfs.fat systemd-cryptenroll mkfs.btrfs btrfs mount \
+        umount git aios bootctl install cp mv chown chmod; do
         ln -s "$BATS_TEST_DIRNAME/fakes/record" "$T/bin/$n"
     done
     PATH="$T/bin:$PATH"
 }
 
+# blk NAME TYPE SIZE RO MOUNTPOINTS: a fake block device /dev/NAME with nothing on it, its
+# lsblk answers, and its sysfs diskseq (7) and holders/.
 blk() {
     local d="$FAKE_SYS/blk/$1"
-    mkdir -p "$d"
+    mkdir -p "$d" "$AIOS_SYS_BLOCK/$1/holders"
     printf '%s\n' "$2" >"$d/TYPE"
     printf '%s\n' "$3" >"$d/SIZE"
     printf '%s\n' "$4" >"$d/RO"
     printf '%s\n' "$5" >"$d/MOUNTPOINTS"
-    printf '\n' >"$d/PKNAME"
+    printf '%s %s\n' "$1" "$2" >"$d/NAME,TYPE"
+    printf '%s %s\n' "$1" "$2" >"$d/NAME,TYPE.inverse"
+    printf 'QEMU HARDDISK\n' >"$d/MODEL"
+    printf 'aios-e2e-disk\n' >"$d/SERIAL"
+    printf 'NAME SIZE FSTYPE LABEL MODEL\n%s   20G              QEMU HARDDISK\n' "$1" \
+        >"$d/NAME,SIZE,FSTYPE,LABEL,MODEL"
+    echo 7 >"$AIOS_SYS_BLOCK/$1/diskseq"
 }
 
 keyring() {
@@ -98,8 +107,10 @@ install_dry() {
 # The commands of an unattended install on a v3 CPU in Setup Mode, in order.
 golden() {
     cat <<EOF
+wipefs -a /dev/vda
 sgdisk --zap-all /dev/vda
 sgdisk -n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309 /dev/vda
+blockdev --rereadpt /dev/vda
 udevadm settle
 mkfs.fat -F32 -n EFI /dev/vda1
 cryptsetup luksFormat --type luks2 --pbkdf argon2id --batch-mode --key-file - /dev/vda2 <secret
@@ -185,12 +196,16 @@ mountpoint -q -- /mnt/aios-esp
 mountpoint -q -- /var/lib/sbctl
 lsblk -ndro TYPE /dev/vda
 findmnt -nro SOURCE /run/archiso/bootmnt
-lsblk -ndro PKNAME /dev/sr0
+lsblk -nrso NAME,TYPE /dev/sr0
 lsblk -ndro RO /dev/vda
 lsblk -nro MOUNTPOINTS /dev/vda
+lsblk -nro NAME,TYPE /dev/vda
 lsblk -ndbro SIZE /dev/vda
+lsblk -ndo MODEL /dev/vda
+lsblk -ndo SERIAL /dev/vda
 curl -sI --max-time 20 --retry 3 --retry-connrefused https://geo.mirror.pkgbuild.com
 gpg --homedir /etc/pacman.d/gnupg --batch --no-permission-warning --with-colons --list-keys -- admin@cachyos.org
+lsblk -o NAME,SIZE,FSTYPE,LABEL,MODEL /dev/vda
 cryptsetup luksUUID /dev/vda2
 mkpasswd -m yescrypt -s
 sbctl status --json
@@ -260,6 +275,49 @@ EOF
     [ "$(sed -n '/^aios bootstrap /,$p' <<<"$DRY" | tail -n +5)" = "$(printf '%s\n' \
         'umount -R /run/aios/top/@persist/x' 'umount -R /mnt/aios-top/@home' 'umount -R /mnt/aios-top' \
         'cryptsetup close aios')" ]
+}
+
+@test "before the wipe the log shows which disk it is and what is on it" {
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 0 ]
+    [[ "$LOG" == *"aios-install: /dev/vda: model QEMU HARDDISK, serial aios-e2e-disk, 20 GiB (21474836480 bytes), diskseq 7"* ]]
+    [[ "$LOG" == *"NAME SIZE FSTYPE LABEL MODEL"$'\n'"vda   20G              QEMU HARDDISK"* ]]
+}
+
+@test "a disk that changes between validation and the wipe is left alone" {
+    # Another disk takes the name while the confirmation is shown.
+    printf '[ "$2" != NAME,SIZE,FSTYPE,LABEL,MODEL ] || echo 8 >"%s"\n' \
+        "$AIOS_SYS_BLOCK/vda/diskseq" >"$FAKE_SYS/hook.lsblk"
+
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 1 ]
+    [ -z "$DRY" ]
+    [[ "$LOG" == *"/dev/vda: disk changed since validation (diskseq 7, now 8)"* ]]
+    [[ "$LOG" == *"step 3 (partition) failed"* ]]
+    [[ "$LOG" == *"nothing on the disk was changed"* ]]
+}
+
+@test "the kernel must re-read the new partition table" {
+    export AIOS_INSTALL_DRYRUN_FAILS="$T/fails"
+    echo "blockdev --rereadpt /dev/vda" >"$AIOS_INSTALL_DRYRUN_FAILS"
+
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 1 ]
+    [ "$(tail -n 1 <<<"$DRY")" = "blockdev --rereadpt /dev/vda" ]
+    [[ "$LOG" == *"the kernel did not re-read the new partition table of /dev/vda"* ]]
+}
+
+@test "a disk in use by LVM is refused before anything is changed" {
+    printf '%s\n' "vda1 part" "vg0-root lvm" >>"$FAKE_SYS/blk/vda/NAME,TYPE"
+
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 1 ]
+    [ -z "$DRY" ]
+    [[ "$LOG" == *"/dev/vda is in use by vg0-root (LVM/MD/dm); deactivate it first"* ]]
 }
 
 @test "a failure after LUKS opens but before any mount only closes LUKS" {
@@ -350,6 +408,7 @@ EOF
 
     run --separate-stderr "$SCRIPT" <<<"${answers}/dev/vda"
     [ "$status" -eq 0 ]
+    [[ "$stderr" == *"/dev/vda: model QEMU HARDDISK, serial aios-e2e-disk, 20 GiB"*"Everything on /dev/vda will be erased. Type /dev/vda to continue: "* ]]
     diff <(golden | sed '$d') <(grep '^DRYRUN ' <<<"$output" | sed 's/^DRYRUN //')
 
     run --separate-stderr "$SCRIPT" <<<"${answers}yes"

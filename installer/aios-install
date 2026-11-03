@@ -47,9 +47,9 @@ DEFAULTS=${AIOS_DEFAULTS:-/usr/share/aios/defaults/manifest}
 LIVE_REPO=${AIOS_LIVE_REPO:-/opt/aios-repo}
 TOP=/mnt/aios-top
 ESP=/mnt/aios-esp
-TOOLS=(sgdisk udevadm mkfs.fat cryptsetup systemd-cryptenroll mkfs.btrfs btrfs mount umount
-    mountpoint lsblk findmnt git mkpasswd gpg sbctl aios bootctl usbguard curl install cp mv chown
-    chmod)
+TOOLS=(wipefs sgdisk blockdev udevadm mkfs.fat cryptsetup systemd-cryptenroll mkfs.btrfs btrfs
+    mount umount mountpoint lsblk findmnt git mkpasswd gpg sbctl aios bootctl usbguard curl install
+    cp mv chown chmod)
 
 usage() {
     sed -n '2,8s/^# \{0,1\}//p' "$0"
@@ -175,6 +175,8 @@ main() {
     [[ -f $LIVE_REPO/aios-local.db.tar.gz ]] || die "no local package repo in $LIVE_REPO"
 
     step 2 confirm
+    log "$DISK: $(disk_identity)"
+    lsblk -o NAME,SIZE,FSTYPE,LABEL,MODEL "$DISK" >&2 || true
     if ((unattended)); then
         log "WIPE=yes: erasing $DISK"
     else
@@ -185,10 +187,17 @@ main() {
     fi
 
     step 3 partition
+    # The disk shown in step 2 must still be the one under this name.
+    disk_unchanged "$DISK" "$DISK_SEQ" || die "not erasing $DISK"
     AIOS_DISK_CHANGED=1
+    run_cmd wipefs -a "$DISK"
     run_cmd sgdisk --zap-all "$DISK"
     run_cmd sgdisk -n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309 "$DISK"
+    run_cmd blockdev --rereadpt "$DISK" ||
+        die "the kernel did not re-read the new partition table of $DISK (is something still using it?)"
     run_cmd udevadm settle
+    # Dry-run mode made no partitions to check.
+    dry_run || check_partitions "$DISK" || die "unexpected partition table on $DISK"
     run_cmd mkfs.fat -F32 -n EFI "$ESP_PART"
 
     step 4 encrypt

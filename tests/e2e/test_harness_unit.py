@@ -644,12 +644,16 @@ def test_a_mount_option_is_matched_as_a_whole_element_of_findmnts_options() -> N
     assert not has_option("ro,relatime\nrw,relatime", "ro")
 
 
-def test_the_vm_disk_is_deleted_only_after_a_passing_run_without_keep_vm() -> None:
-    assert should_delete_vm(keep_vm=False, failures=0)
-    assert not should_delete_vm(keep_vm=True, failures=0)
+def test_the_vm_disk_is_deleted_only_when_every_test_passed_and_without_keep_vm() -> None:
+    assert should_delete_vm(keep_vm=False, passed=7, total=7)
+    assert not should_delete_vm(keep_vm=True, passed=7, total=7)
     # A failed run keeps the disk and the TPM state to inspect what went wrong.
-    assert not should_delete_vm(keep_vm=False, failures=1)
-    assert not should_delete_vm(keep_vm=True, failures=3)
+    assert not should_delete_vm(keep_vm=False, passed=3, total=7)
+    # So does a run that stopped early (Ctrl-C) or selected a few tests (-k): nothing failed,
+    # but not every test passed.
+    assert not should_delete_vm(keep_vm=False, passed=2, total=7)
+    assert not should_delete_vm(keep_vm=False, passed=0, total=7)
+    assert not should_delete_vm(keep_vm=False, passed=0, total=0)
 
 
 def test_the_install_wait_fails_at_once_on_an_error_line_and_quotes_all_of_it(sock_path: Path) -> None:

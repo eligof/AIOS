@@ -117,10 +117,11 @@ def has_option(options: str, name: str) -> bool:
     return len(lines) == 1 and name in lines[0].split(",")
 
 
-def should_delete_vm(keep_vm: bool, failures: int) -> bool:
-    """Whether teardown deletes the VM disk and TPM state: only after a passing run without
-    --keep-vm. A failed run keeps them to inspect (or boot) what went wrong."""
-    return not keep_vm and failures == 0
+def should_delete_vm(keep_vm: bool, passed: int, total: int) -> bool:
+    """Whether teardown deletes the VM disk and TPM state: only when every test of the module
+    passed, and without --keep-vm. A failed, interrupted (Ctrl-C) or partial run keeps them
+    to inspect (or boot) what went wrong."""
+    return not keep_vm and total > 0 and passed == total
 
 
 @pytest.fixture(scope="module")
@@ -132,8 +133,11 @@ def machine(request: pytest.FixtureRequest):
         yield Machine(vm)
     finally:
         vm.stop()
-    # testsfailed counts setup, call and teardown failures, not the xfails that follow one.
-    if should_delete_vm(request.config.getoption("--keep-vm"), request.session.testsfailed):
+    # conftest.py counts the passes of the module's tests in pytest_runtest_makereport.
+    module = request.node
+    total = sum(1 for item in request.session.items if item.parent is module)
+    passed = getattr(module, "_aios_passed", 0)
+    if should_delete_vm(request.config.getoption("--keep-vm"), passed, total):
         CONFIG.disk.unlink(missing_ok=True)
         shutil.rmtree(CONFIG.tpm_dir, ignore_errors=True)
 

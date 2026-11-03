@@ -20,9 +20,17 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
-def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo) -> None:
-    if "incremental" in item.keywords and call.excinfo is not None and call.when == "call":
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
+    outcome = yield
+    report = outcome.get_result()
+    if "incremental" not in item.keywords:
+        return
+    if call.when == "call" and call.excinfo is not None:
         item.parent._aios_failed = item.name  # type: ignore[attr-defined]
+    if call.when == "call" and report.passed:
+        # The module's fixture deletes the VM disk only if all of its tests passed.
+        item.parent._aios_passed = getattr(item.parent, "_aios_passed", 0) + 1  # type: ignore[attr-defined]
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:

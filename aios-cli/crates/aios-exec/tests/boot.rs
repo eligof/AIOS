@@ -90,25 +90,77 @@ fn missing_inputs_mean_unknown() {
     assert!(state.ukis.is_empty());
 }
 
+/// A read-only look at the top level, then `bootctl set-default ENTRY`.
+const ROLLBACK: &str = "
+mount -t btrfs -o subvolid=5,ro /dev/mapper/aios {ro}
+umount {ro}
+bootctl set-default ";
+
 #[test]
-fn rollback_sets_the_default_entry_without_the_counter() {
+fn rollback_checks_the_generation_then_sets_the_default_entry_without_the_counter() {
     let fx = many_gens();
     assert_eq!(
-        rollback(&fx.runner, &fx.layout, GenId(3)).unwrap(),
+        rollback(&fx.runner, &fx.layout, GenId(3), false).unwrap(),
         "aios-gen-0003-cachyos.efi"
     );
     assert_eq!(
         fx.calls(),
-        ["bootctl set-default aios-gen-0003-cachyos.efi"]
+        fx.expand(&format!("{ROLLBACK}aios-gen-0003-cachyos.efi"))
     );
 }
 
 #[test]
 fn rollback_needs_a_boot_entry() {
     let fx = many_gens();
-    let err = rollback(&fx.runner, &fx.layout, GenId(42)).unwrap_err();
+    let err = rollback(&fx.runner, &fx.layout, GenId(42), false).unwrap_err();
     assert_eq!(err.to_string(), "no boot entry for gen-0042");
     assert!(fx.calls().is_empty());
+}
+
+#[test]
+fn rollback_needs_both_subvolumes() {
+    let fx = many_gens();
+    for (gone, other) in [
+        ("@usr-gen-0003", "@etc-gen-0003"),
+        ("@etc-gen-0004", "@usr-gen-0004"),
+    ] {
+        fs::remove_dir(fx.layout.subvol(gone)).unwrap();
+        let gen = if gone.ends_with('3') {
+            GenId(3)
+        } else {
+            GenId(4)
+        };
+        let err = rollback(&fx.runner, &fx.layout, gen, true).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("gen-{gen} is not installed: {gone} is missing")
+        );
+        assert!(fx.layout.subvol(other).is_dir());
+    }
+    assert!(!fx.calls().iter().any(|c| c.starts_with("bootctl")));
+    assert!(
+        !fx.layout.ro_top().exists(),
+        "the read-only mount point is removed"
+    );
+}
+
+#[test]
+fn rollback_refuses_a_bad_generation_unless_forced() {
+    let fx = many_gens();
+    let err = rollback(&fx.runner, &fx.layout, GenId(9), false).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "gen-0009 is marked bad (its boot tries ran out); use --force to boot it anyway"
+    );
+    assert!(fx.calls().is_empty());
+    assert_eq!(
+        rollback(&fx.runner, &fx.layout, GenId(9), true).unwrap(),
+        "aios-gen-0009-cachyos.efi"
+    );
+    assert_eq!(
+        fx.calls(),
+        fx.expand(&format!("{ROLLBACK}aios-gen-0009-cachyos.efi"))
+    );
 }
 
 #[test]

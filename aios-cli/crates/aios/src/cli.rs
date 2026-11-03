@@ -38,6 +38,9 @@ pub enum Command {
         /// Generation number, e.g. 7 or 0007
         #[arg(value_parser = clap::value_parser!(u32).range(1..=9999))]
         gen: u32,
+        /// Boot it even if it is marked bad (it failed to boot and has no tries left)
+        #[arg(long)]
+        force: bool,
     },
     /// Delete old generations
     Gc {

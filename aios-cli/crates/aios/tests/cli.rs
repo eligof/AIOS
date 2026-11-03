@@ -389,13 +389,62 @@ fn rollback_needs_a_boot_entry() {
     assert_eq!(text(&out.stderr), "aios: no boot entry for gen-0007\n");
 }
 
+/// gen-7: both subvolumes, and a main UKI named `uki`.
+fn gen_7(m: &Machine, uki: &str) {
+    fs::create_dir_all(m.path("top/@usr-gen-0007")).unwrap();
+    fs::create_dir_all(m.path("top/@etc-gen-0007")).unwrap();
+    m.write(&format!("esp/EFI/Linux/{uki}"), "uki", 0o644);
+}
+
+/// What `aios rollback 7` (process `pid`) runs: a read-only look at the top level, then
+/// bootctl.
+fn rollback_calls(m: &Machine, pid: u32) -> String {
+    let ro = m.path(&format!("ro.{pid}"));
+    format!(
+        "mount -t btrfs -o subvolid=5,ro /dev/mapper/aios {}\numount {}\n\
+         bootctl set-default aios-gen-0007-cachyos.efi\n",
+        ro.display(),
+        ro.display()
+    )
+}
+
 #[test]
 fn rollback_sets_the_boot_default() {
     let m = Machine::new();
-    m.write("esp/EFI/Linux/aios-gen-0007-cachyos+3.efi", "uki", 0o644);
-    let out = m.aios(&["rollback", "0007"]);
+    gen_7(&m, "aios-gen-0007-cachyos+3.efi");
+    let (out, pid) = m.aios_with_stdin(&["rollback", "0007"], "");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));
-    assert_eq!(m.calls(), "bootctl set-default aios-gen-0007-cachyos.efi\n");
+    assert_eq!(m.calls(), rollback_calls(&m, pid));
+}
+
+#[test]
+fn rollback_refuses_a_bad_generation_without_dash_dash_force() {
+    let m = Machine::new();
+    gen_7(&m, "aios-gen-0007-cachyos+0-3.efi");
+    let out = m.aios(&["rollback", "7"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "aios: gen-0007 is marked bad (its boot tries ran out); use --force to boot it \
+         anyway\n"
+    );
+    assert_eq!(m.calls(), "");
+    let (out, pid) = m.aios_with_stdin(&["rollback", "--force", "7"], "");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));
+    assert_eq!(m.calls(), rollback_calls(&m, pid));
+}
+
+#[test]
+fn rollback_needs_the_generation_s_subvolumes() {
+    let m = Machine::new();
+    m.write("esp/EFI/Linux/aios-gen-0007-cachyos+3.efi", "uki", 0o644);
+    let out = m.aios(&["rollback", "7"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "aios: gen-0007 is not installed: @usr-gen-0007 is missing\n"
+    );
+    assert!(!m.calls().contains("bootctl"));
 }
 
 #[test]

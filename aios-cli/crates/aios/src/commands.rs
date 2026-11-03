@@ -17,7 +17,7 @@ pub fn run(command: Command) -> Result<(), Failure> {
         Command::Gen {
             command: GenCommand::List,
         } => gen_list(&cx),
-        Command::Rollback { gen } => rollback(&cx, gen),
+        Command::Rollback { gen, force } => rollback(&cx, gen, force),
         Command::Gc { keep } => gc(&cx, keep),
         Command::Passwd { user } => passwd(&cx, &user),
         Command::Secureboot {
@@ -131,10 +131,10 @@ fn gen_list(cx: &Context) -> Result<(), Failure> {
     Ok(())
 }
 
-fn rollback(cx: &Context, gen: u32) -> Result<(), Failure> {
+fn rollback(cx: &Context, gen: u32, force: bool) -> Result<(), Failure> {
     let _lock = cx.lock(true)?;
     let gen = GenId::new(gen).ok_or_else(|| Failure::op("aios: generation out of range"))?;
-    let entry = ops::rollback(cx.runner(), &cx.layout, gen)?;
+    let entry = ops::rollback(cx.runner(), &cx.layout, gen, force)?;
     println!("gen-{gen} boots next ({entry}); reboot to activate it");
     Ok(())
 }

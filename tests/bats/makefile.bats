@@ -25,11 +25,11 @@ fake() {
     chmod +x "$FAKES/$1"
 }
 
-# has_hint [SUDO]: $output holds both lines make prints when rm cannot clear build/iso-work.
+# has_hint: $output holds both lines make prints when rm cannot clear build/iso-work.
 has_hint() {
     local line
-    for line in 'If rm said "Device or resource busy", an interrupted build left mounts under build/iso-work.' \
-        "Unmount them with \"${1:+$1 }umount -R MOUNTPOINT\" (findmnt lists them), then run make again."; do
+    for line in "If rm reported 'different device' or 'Device or resource busy', unmount leftovers under build/iso-work (findmnt -R build/iso-work; umount -R ...)." \
+        "If it reported 'Permission denied', clear it with the same mode that built it (sudo, or SUDO= for unprivileged)."; do
         grep -Fxq -- "$line" <<<"$output" || { echo "no line: $line"; echo "$output"; return 1; }
     done
 }
@@ -59,7 +59,7 @@ has_hint() {
     run mk -o iso-build iso
     [ "$status" -ne 0 ]
     [ "$(cat "$LOG")" = 'sudo rm -rf --one-file-system build/iso-work' ]
-    has_hint sudo
+    has_hint
 
     mkdir -p "$W/build/iso-work" "$W/iso-build"
     : >"$LOG"
@@ -67,7 +67,7 @@ has_hint() {
     [ "$status" -ne 0 ]
     [ ! -e "$W/iso-build" ]
     [ "$(cat "$LOG")" = 'sudo rm -rf --one-file-system build/iso-work' ]
-    has_hint sudo
+    has_hint
 
     : >"$LOG"
     fake unshare 1
@@ -75,7 +75,6 @@ has_hint() {
     [ "$status" -ne 0 ]
     [ "$(cat "$LOG")" = 'unshare --map-auto --map-root-user rm -rf --one-file-system build/iso-work' ]
     has_hint
-    [[ $output != *sudo* ]]
 
     : >"$LOG"
     fake unshare

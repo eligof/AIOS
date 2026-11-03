@@ -431,7 +431,7 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
   - It accepts the keys file only as `make keys` writes it: comment lines plus exactly one `AIOS_CACHYOS_KEYS="<fingerprints>"` line, since the installer sources it as root.
 - `make iso` writes `iso-build/` without root (the profile, `pacman.conf`, the installer, `/opt/aios-repo`, `keys.sh`), clears `build/iso-work`, then runs `sudo mkarchiso -v -w build/iso-work -o out iso-build/`. The developer runs it.
   - `make iso SUDO=` builds unprivileged (archiso ≥ 89). mkarchiso then leaves files owned by the user's subordinate IDs, so the work directory is cleared with `unshare --map-auto --map-root-user rm -rf --one-file-system`. This needs `/etc/subuid` and `/etc/subgid` ranges for the user.
-  - If clearing fails, make prints a hint and stops: "Device or resource busy" means an interrupted build left mounts under `build/iso-work`, to be unmounted with `umount -R`. `make clean-iso` clears the work directory the same way.
+  - If clearing fails, make prints a hint and stops. If rm reported "different device" or "Device or resource busy", an interrupted build left mounts under `build/iso-work`: unmount them (`findmnt -R build/iso-work`; `umount -R …`). If it reported "Permission denied", clear the directory with the same mode that built it (`sudo`, or `SUDO=` for an unprivileged build). `make clean-iso` clears the work directory the same way.
 
 ### 6.2 `aios-install` (bash, `set -euo pipefail`, shellcheck-clean, helpers in `lib/` unit-tested with bats)
 

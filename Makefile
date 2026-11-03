@@ -42,8 +42,8 @@ ISO_OUT := out
 # namespace mapping them can delete. rm fails with EBUSY on mounts an interrupted build left.
 ISO_RM_WORK = $(if $(SUDO),$(SUDO),unshare --map-auto --map-root-user) rm -rf --one-file-system \
 	$(ISO_WORK) || { \
-	echo 'If rm said "Device or resource busy", an interrupted build left mounts under $(ISO_WORK).'; \
-	echo 'Unmount them with "$(strip $(SUDO) umount -R) MOUNTPOINT" (findmnt lists them), then run make again.'; \
+	echo "If rm reported 'different device' or 'Device or resource busy', unmount leftovers under $(ISO_WORK) (findmnt -R $(ISO_WORK); umount -R ...)."; \
+	echo "If it reported 'Permission denied', clear it with the same mode that built it (sudo, or SUDO= for unprivileged)."; \
 	exit 1; } >&2
 
 .PHONY: check rust-check release-check shell-check bats-check unit-check e2e-unit tools repo \

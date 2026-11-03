@@ -81,14 +81,19 @@ package_set_sha256 = "…"            # sha256 of sorted `pacman -Qq` output
 4. The initrd is mkinitcpio, systemd-based: `HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems aios)`.
 5. `systemd-cryptsetup@aios` unlocks LUKS: TPM2 + PIN, or passphrase, or recovery key.
 6. `aios-root.service` runs in the initrd (`After=cryptsetup.target`, `Before=sysroot.mount`, `DefaultDependencies=no`) and executes `/usr/lib/aios/initrd/aios-root.sh`:
-   - Parses `aios.gen=` from `/proc/cmdline`. If it's absent or not 4 digits, it fails with "aios: no generation on cmdline".
+   - Parses `aios.gen=` from `/proc/cmdline`. If it's absent, or any `aios.gen=` value isn't a 4-digit generation (empty and `0000` included, even next to a valid one), it fails with "aios: no generation on cmdline". Conflicting values fail too.
    - Mounts the btrfs top level (`subvolid=5`) at `/run/aios/top`.
-   - If `@usr-gen-N` or `@etc-gen-N` is missing, it fails with "aios: generation N missing — pick another boot entry". The unit fails and the emergency shell opens.
+   - If `@usr-gen-N` or `@etc-gen-N` is missing, it fails with "aios: generation N missing — pick another boot entry".
+   - If `@blank` is missing, it fails with "aios: @blank missing — reinstall required" before deleting anything.
    - Deletes `@root-live` and `@etc-live` if present, plus stale `@usr-cand`, `@etc-cand` and `@root-cand` left by a power loss mid-apply.
+     - Each must be a subvolume (`btrfs subvolume show`). Otherwise it fails with "aios: <name> exists but is not a subvolume".
+     - Deletion is `btrfs subvolume delete --recursive`, which also removes nested subvolumes (systemd creates `/var/lib/machines` and `/var/lib/portables` as subvolumes). Subvolume names are never parsed.
    - Snapshots `@blank → @root-live` (rw) and `@etc-gen-N → @etc-live` (rw).
-   - Unmounts the top level.
+   - Unmounts the top level. If that fails, it retries with `umount -l`, because `/run` survives switch-root.
+
+   If the unit fails, `sysroot.mount` and `initrd-root-fs.target` fail, and `emergency.target` starts. The initrd's root account is locked, so no emergency shell opens and the boot stops there. Recovery is choosing another boot entry or booting the ISO.
 7. `sysroot.mount` mounts `@root-live`. The systemd fstab-generator mounts `/sysroot/usr` from `mount.usr=` (ro).
-8. `sysroot-etc.mount` (initrd unit, `WantedBy=initrd-fs.target`, `After=sysroot.mount`) mounts `@etc-live` at `/sysroot/etc`.
+8. `sysroot-etc.mount` (initrd unit, `After=sysroot.mount`) mounts `@etc-live` at `/sysroot/etc`. The mount is Required: the hook links it into `initrd-fs.target.requires/`, so a failed mount fails `initrd-fs.target` and the boot stops (as in step 6) rather than continuing with the empty `/etc` from `@blank`.
 9. switch-root. Real systemd mounts the rest from `/etc/fstab`, which `aios apply` generates:
    - `/persist`, `/home`, `/var/log` as subvolumes.
    - `/efi` with `noauto,x-systemd.automount,umask=0077`.
@@ -98,6 +103,7 @@ package_set_sha256 = "…"            # sha256 of sorted `pacman -Qq` output
 11. `aios-health.service` (`Type=oneshot`, `RequiredBy=boot-complete.target`, `Before=boot-complete.target`) runs `/usr/lib/aios/aios-health.sh`, which checks:
     - `/usr` is mounted read-only from subvolume `@usr-gen-<aios.gen>`.
     - `/etc` is mounted from `@etc-live`.
+    - Both are read with `findmnt -fno OPTIONS -M`, which matches the exact mount point and takes its first mount, so a mount stacked on top can't break the match.
     - `/persist`, `/home` and `/var/log` are mounted.
     - The `/etc/aios/generation.toml` id equals `aios.gen`.
     - `aios.test.fail_health=1` is absent from the cmdline. This test-only flag forces failure.
@@ -158,14 +164,23 @@ shell  = "/usr/bin/zsh"
 
 [users.eli.home]
 # Read-only bind mounts into /home/eli. Sources are relative to the manifest repo.
-# A trailing "/" marks a directory.
-".zshrc"                 = "home/eli/zshrc"
-".profile"               = "home/eli/profile"
-".config/autostart/"     = "home/eli/autostart/"
-".config/systemd/user/"  = "home/eli/systemd-user/"
-".config/environment.d/" = "home/eli/environment.d/"
-".local/bin/"            = "home/eli/bin/"
-".ssh/authorized_keys"   = "home/eli/authorized_keys"
+# A trailing "/" marks a directory. This is the default set (§4.4).
+".zshrc"                         = "home/eli/zshrc"
+".zshenv"                        = "home/eli/zshenv"
+".zprofile"                      = "home/eli/zprofile"
+".zlogin"                        = "home/eli/zlogin"
+".profile"                       = "home/eli/profile"
+".bashrc"                        = "home/eli/bashrc"
+".bash_profile"                  = "home/eli/bash_profile"
+".ssh/authorized_keys"           = "home/eli/authorized_keys"
+".ssh/authorized_keys2"          = "home/eli/authorized_keys2"
+".ssh/rc"                        = "home/eli/ssh-rc"
+".config/autostart/"             = "home/eli/autostart/"
+".config/systemd/user/"          = "home/eli/systemd-user/"
+".config/systemd/user.control/"  = "home/eli/systemd-user-control/"
+".local/share/systemd/user/"     = "home/eli/local-share-systemd-user/"
+".config/environment.d/"         = "home/eli/environment.d/"
+".local/bin/"                    = "home/eli/bin/"
 ```
 
 **Validation:** `aios plan` and `aios apply` refuse to run, citing `manifest.toml:line:col`, if any of these hold:
@@ -254,8 +269,15 @@ Each step aborts on failure. Abort deletes the candidate subvolumes and candidat
 
 - Each `[users.<u>.home]` entry becomes an `fstab` line `/etc/aios/home/<u>/<path> /home/<u>/<path> none bind,ro,nofail,x-systemd.requires-mounts-for=/home 0 0`. `nofail`: a user who deletes or replaces a target can't drop the next boot into emergency mode.
 - systemd creates directory targets as mount points, and the executor creates file targets at apply time; either may leave root-owned parents. `tmpfiles.d` then fixes the owner and mode of the home and of every parent directory of a target (`d /home/<u>/<dir> 0755 <u> <u> -`; `0700` for the home and under `~/.ssh`). It never names a target: after the first boot each is a read-only bind, and a `d` or `f` line on it would fail with EROFS.
-- **Effect:** a user-level RAT can't add autostart entries, user units, shell-rc hooks, `~/.local/bin` shims or SSH keys. To change these, edit the manifest.
-- **Known limit:** other autostart vectors exist (compositor configs, `.desktop` overrides, editor plugins). They're added to the manifest defaults when the Cockpit picks the compositor. Sentinel watches the rest of `/home`.
+- **Default set** (the §4.1 example), each closing one vector:
+  - Shell startup: `.zshenv`, `.zprofile`, `.zshrc`, `.zlogin` (zsh), and `.profile`, `.bash_profile`, `.bashrc` (sh and bash). The defaults are minimal; `.bash_profile` sources `.profile` and `.bashrc`.
+  - SSH: `.ssh/authorized_keys`, `.ssh/authorized_keys2` (both empty) and `.ssh/rc` (comment only; sshd runs it at every login).
+  - XDG autostart: `.config/autostart/`.
+  - systemd user units: `.config/systemd/user/`, `.config/systemd/user.control/` and `.local/share/systemd/user/`, the per-user unit directories in `~` on the user manager's search path.
+  - User session environment: `.config/environment.d/`.
+  - PATH shims: `.local/bin/`.
+- **Effect:** a user-level RAT can't add autostart entries, user units, shell startup hooks, `~/.local/bin` shims or SSH keys. To change these, edit the manifest.
+- **Known limit:** other autostart vectors exist, such as compositor configs, `.desktop` overrides, editor plugins, and `~/.config/systemd/user.conf`, whose `DefaultEnvironment=` reaches every user unit. They're added to the manifest defaults when the Cockpit picks the compositor (follow-up #5). Sentinel watches the rest of `/home`.
 
 ### 4.5 Code structure (Rust workspace `aios-cli/`)
 
@@ -296,7 +318,7 @@ All system interaction goes through `CommandRunner` and `SystemProbe`, so no uni
 **Packaging:**
 - PKGBUILDs live in `packaging/aios-cli/` and `packaging/aios-base/`.
 - `make repo` builds them with `makepkg` (no root) and creates `build/repo/aios-local.db.tar.gz` via `repo-add`.
-- The ISO uses this repo. The installer copies it to `/persist/aios/repo`, and the installed `pacman.conf` points `[aios-local]` at `file:///persist/aios/repo`. In the candidate chroot that's a bind of the same path.
+- The ISO uses this repo. The installer copies it to `/persist/aios/repo`, and the installed `pacman.conf` points `[aios-local]` at `file:///persist/aios/repo`. In the candidate chroot that's a bind of the same path. `[aios-local]` is the last repo in `pacman.conf`, so a package dropped into it can never shadow a signed one.
 - The repo is unsigned (`SigLevel = Optional TrustAll`) for v0.1, because it's built locally on the same machine. Signing the repo is follow-up #2.
 
 ## 5. Hardening
@@ -358,14 +380,20 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
   - The root account is locked.
   - `sudo` is not installed. Admin is `run0` via polkit, with wheel as admin per Arch's default polkit rules.
 - **Network:** `nftables.conf` (default `/etc/nftables.conf` from the manifest):
-  - `input` policy `drop`, accepting loopback, `ct state established,related`, ICMP/ICMPv6 essentials (echo-reply, unreachable, time-exceeded, NDP) and DHCPv6 client.
+  - `input` policy `drop`, accepting loopback, `ct state established,related`, ICMP/ICMPv6 essentials (echo-reply, unreachable, time-exceeded, NDP, MLD listener query per RFC 4890) and DHCPv6 client.
   - `forward` policy `drop`.
   - `output` policy `accept`. The app firewall comes with Sentinel.
+  - **Trade-off, containers and VMs:** `forward` policy `drop` blocks the NAT that rootful podman and libvirt set up. The ruleset starts with `flush ruleset`, so restarting `nftables.service` also wipes the tables netavark and libvirt added at runtime. Rootless podman (slirp4netns/pasta) is unaffected. Users who need rootful NAT add forward rules in their `files/nftables.conf`.
+- **Network trade-offs** (follow-up #6):
+  - Strict reverse-path filtering (`rp_filter = 1`, §5.2) drops asymmetrically routed packets, which can break multi-homed hosts and some VPN setups.
+  - Strict DNS over TLS (`DNSOverTLS=yes`, §4.6) can't reach a captive portal's local resolver, so captive-portal networks need DoT relaxed until login.
+  - The DoT resolvers are IPv4 only, so IPv6-only networks have no DNS.
 - **USBGuard:**
-  - `usbguard-daemon.conf`: `RuleFile=/var/lib/usbguard/rules.conf` (persisted), `ImplicitPolicyTarget=block`, `PresentDevicePolicy=apply-policy`, `InsertedDevicePolicy=apply-policy`, `IPCAllowedGroups=wheel`.
+  - `usbguard-daemon.conf`: `RuleFile=/var/lib/usbguard/rules.conf` (persisted), `ImplicitPolicyTarget=block`, `PresentDevicePolicy=apply-policy`, `InsertedDevicePolicy=apply-policy`, `IPCAllowedUsers=root`, `IPCAllowedGroups=` (empty).
+  - Only root may use the daemon's IPC. Every policy change therefore goes through `run0` and its polkit prompt, and a process running as a wheel user can't allow a device on its own.
   - The installer writes `usbguard generate-policy` output, which allows devices present at install.
   - The installer then appends `block with-interface one-of { 03:*:* }` followed by `allow`, so new HID devices are blocked and other new devices are allowed.
-  - Approve a device with `usbguard allow-device -p <id>`.
+  - Approve a device with `run0 usbguard allow-device -p <id>`.
 - **AppArmor** is enabled via `lsm=` and `apparmor.service`, with packaged profiles enforced.
 - **Swap:** zram only. No disk swap, no hibernation.
 - **Firmware:** `fwupd-refresh.timer`.
@@ -424,7 +452,9 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
 | ESP full | Auto-gc respecting protected gens. If still short, abort before finalizing |
 | UKI signing or verification fails | Abort before finalizing. No unsigned UKI is copied to the ESP |
 | Gen fails health check | Not blessed. After 3 tries systemd-boot boots the next entry. `aios status` lists it as bad |
-| Generation subvolume missing at boot | `aios-root.service` fails with a clear message → emergency shell. The boot menu still lists other gens |
+| Generation subvolume missing at boot | `aios-root.service` fails with a clear message and the boot stops. The initrd's root account is locked, so no emergency shell opens. Recovery: choose another boot entry (the menu still lists other gens) or boot the ISO |
+| `@blank` missing, or a live/candidate name that isn't a subvolume, at boot | `aios-root.service` fails before deleting anything, with the same recovery |
+| `@etc-live` fails to mount in the initrd | `sysroot-etc.mount` is required by `initrd-fs.target`, so the boot stops, with the same recovery |
 | Concurrent `aios` commands | The second exits 1: "another aios operation is running" |
 | Runtime edits to `/etc` | Allowed, but discarded at reboot. `aios status` lists them |
 | Installer step fails | Stop with the step name. Leave LUKS closed if it was opened, unmount everything (trap). The disk is left in an undefined state and the user re-runs the installer |
@@ -438,7 +468,7 @@ The Base ISO includes no desktop. The Cockpit sub-project picks the compositor. 
 | Layer | Tooling | What |
 |---|---|---|
 | Rust unit/golden | `cargo test --workspace` | Manifest validation (each rule), gen naming/counter/GC, renderers (golden files), planner diff, argv sequences for apply/bootstrap/rollback/gc/secureboot/tpm with the fake runner, cleanup on a failure injected at every step |
-| Shell | `shellcheck`, `bats` | `aios-root.sh` with a fake `btrfs`/`mount`/`umount` on PATH and a fake `/proc/cmdline` (env override): normal boot, missing gen, no gen on cmdline, stale candidates. `aios-health.sh` with fake `findmnt` and cmdline. Installer `lib/` helpers: config parser (rejects unknown keys and shell metacharacters), disk validation, v3 detection parsing |
+| Shell | `shellcheck`, `bats` | `aios-root.sh` with a fake `btrfs`/`mount`/`umount` on PATH (with failure injection) and a fake `/proc/cmdline` (env override): normal boot, missing gen, missing `@blank`, no or invalid gen on cmdline, stale candidates, nested subvolumes (including one named like a top-level subvolume), a non-subvolume at a live name, and mount/snapshot/unmount failures. `aios-health.sh` with fake `findmnt` (including stacked mounts) and cmdline. Installer `lib/` helpers: config parser (rejects unknown keys and shell metacharacters), disk validation, v3 detection parsing |
 | Units | `systemd-analyze verify` | `aios-root.service`, `sysroot-etc.mount`, `aios-health.service` |
 | Packaging | `makepkg` in `make repo`, `namcap` if available | PKGBUILDs build |
 | E2E | `make e2e`: pytest harness in `tests/e2e/`, QEMU (`-enable-kvm -cpu host -m 4G`), OVMF `OVMF_CODE.secboot.4m.fd` + a copy of the vars, `swtpm` socket TPM 2.0, a 20 GiB qcow2 | Boots the ISO with the fw_cfg install config, drives the serial console via a unix socket: install → reboot → LUKS passphrase → log in as the test user → assertions (a)–(f) from §1. Needs `out/aios-*.iso` |
@@ -467,4 +497,5 @@ AIOS/
 2. Signed `aios-local` repo.
 3. "Block USB while locked" (Cockpit).
 4. Offline install from the ISO's local repo.
-5. Managed home paths for the compositor chosen by the Cockpit.
+5. Managed home paths for the compositor chosen by the Cockpit, plus `~/.config/systemd/user.conf` (§4.4).
+6. Network trade-offs (§5.5): a manifest switch for loose `rp_filter` on multi-homed/VPN hosts, a captive-portal flow under strict DoT, IPv6 DoT resolvers, and opt-in forward rules for rootful container/VM NAT.

@@ -39,7 +39,7 @@ ISO_WORK := build/iso-work
 ISO_OUT := out
 
 .PHONY: check rust-check shell-check bats-check unit-check e2e-unit tools repo keys iso-build \
-	iso iso-check clean-iso
+	iso iso-check clean-iso e2e
 
 check: rust-check shell-check bats-check unit-check e2e-unit
 
@@ -133,3 +133,10 @@ iso-check: tools
 clean-iso:
 	rm -rf $(ISO_BUILD)
 	if [ -e $(ISO_WORK) ]; then $(SUDO) rm -rf --one-file-system $(ISO_WORK); fi
+
+# Install the newest out/aios-*.iso into a VM and run spec §1 (a)-(g). No root, about an
+# hour. E2E_ARGS=--keep-vm keeps the VM disk in build/e2e/ afterwards.
+E2E_ARGS ?=
+e2e: tools
+	cd tests && $(PYTHON) -m e2e.vm
+	$(PYTEST) -p no:cacheprovider -v -rs tests/e2e/test_e2e.py $(E2E_ARGS)

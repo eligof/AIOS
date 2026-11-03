@@ -391,3 +391,40 @@ def test_boot_menu_luks_and_login_are_answered_in_order(sock_path: Path) -> None
     assert shell.count == 1
     serial.close()
     console.join()
+
+
+# --- test_e2e.py: the boot menu position and the manifest edits it relies on -------------
+
+from .test_e2e import ADD_FAIL_HEALTH, ADD_TREE, ISO_SERIAL_KEY, ISO_SERIAL_TITLE, MANIFEST  # noqa: E402
+
+
+def test_the_serial_entry_is_the_second_in_the_iso_boot_menu() -> None:
+    entries = REPO / "iso" / "efiboot" / "loader" / "entries"
+    keys = {}
+    for entry in entries.glob("*.conf"):
+        text = entry.read_text()
+        keys[re.search(r"^sort-key\s+(\S+)", text, re.M).group(1)] = re.search(
+            r"^title\s+(.*)$", text, re.M
+        ).group(1)
+    titles = [keys[k] for k in sorted(keys)]
+
+    assert titles[int(ISO_SERIAL_KEY) - 1].replace("%ARCH%", "x86_64") == ISO_SERIAL_TITLE
+
+
+def test_the_manifest_edits_apply_once_to_the_installed_manifest(tmp_path: Path) -> None:
+    template = (REPO / "manifest" / "manifest.toml").read_text()
+    manifest = tmp_path / "manifest.toml"
+    manifest.write_text(
+        template.replace("@HOSTNAME@", "aios-e2e")
+        .replace("@USERNAME@", "tester")
+        .replace("@TIMEZONE@", "UTC")
+        .replace("@EXTRA_CMDLINE@", '"console=ttyS0,115200"')
+    )
+
+    for edit, expected in (
+        (ADD_TREE, '"tree",'),
+        (ADD_FAIL_HEALTH, '"aios.test.fail_health=1"]'),
+    ):
+        cmd = edit.replace(MANIFEST, str(manifest))
+        subprocess.run(["sh", "-c", cmd], check=True)
+        assert manifest.read_text().count(expected) == 1, cmd

@@ -8,6 +8,7 @@ use rustix::fs::{flock, FlockOperation};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::SystemTime;
@@ -120,6 +121,11 @@ impl Machine {
 
     /// Run `aios ARGS` with `stdin` as its standard input. Returns its pid too.
     fn aios_with_stdin(&self, args: &[&str], stdin: &str) -> (Output, u32) {
+        self.spawn(self.command(args), stdin)
+    }
+
+    /// `aios ARGS` with every path pointed into the tempdir.
+    fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_aios"));
         cmd.args(args)
             .env("AIOS_FAKE_RUNNER", self.path("fake.json"))
@@ -146,6 +152,11 @@ impl Machine {
         ] {
             cmd.env(var, self.path(rel));
         }
+        cmd
+    }
+
+    /// Run `cmd` with `stdin` as its standard input. Returns its pid too.
+    fn spawn(&self, mut cmd: Command, stdin: &str) -> (Output, u32) {
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -579,6 +590,28 @@ fn apply_builds_gen_2_and_reports_post_commit_failures_as_warnings() {
         .path("esp/EFI/Linux/aios-gen-0002-cachyos+3.efi")
         .is_file());
     assert!(!m.path("top/@root-cand").exists());
+}
+
+/// aios sets its own umask (022), so what it creates never inherits a caller's looser one.
+#[test]
+fn a_loose_umask_does_not_reach_what_apply_creates() {
+    let m = Machine::new();
+    m.buildable("[]");
+    let mut cmd = m.command(&["apply", "--yes"]);
+    // SAFETY: umask(2) is async-signal-safe and touches no memory.
+    unsafe {
+        cmd.pre_exec(|| {
+            rustix::process::umask(rustix::fs::Mode::empty());
+            Ok(())
+        });
+    }
+    let (out, _) = m.spawn(cmd, "");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));
+    let persist = m.path("persist/var/lib/NetworkManager");
+    assert_eq!(
+        fs::metadata(&persist).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
 }
 
 #[test]

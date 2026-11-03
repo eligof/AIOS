@@ -9,9 +9,13 @@ mod failure;
 mod lock;
 
 use clap::Parser;
+use rustix::fs::Mode;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    // What aios creates (directories under /persist, the candidate tree, files in /etc)
+    // never inherits a looser umask from whoever started it.
+    rustix::process::umask(Mode::WGRP | Mode::WOTH);
     let cli = match cli::Cli::try_parse() {
         Ok(cli) => cli,
         Err(e) => {

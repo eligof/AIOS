@@ -27,6 +27,15 @@ has_opt() {
     esac
 }
 
+# is_gen VALUE: true if VALUE is a generation as aios.gen= carries it (4 digits, not 0000).
+is_gen() {
+    case "$1" in
+        0000) return 1 ;;
+        [0-9][0-9][0-9][0-9]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # strip_zeros DIGITS: "0007" -> "7", "0000" -> "0".
 strip_zeros() {
     n=$1
@@ -44,7 +53,9 @@ set -f
 for arg in $cmdline; do
     case "$arg" in
         aios.gen=*)
+            # Like gen_from_cmdline in aios-gen: one invalid value means no generation.
             value="${arg#aios.gen=}"
+            is_gen "$value" || fail "no generation on cmdline"
             if [ -n "$gen" ] && [ "$gen" != "$value" ]; then
                 fail "conflicting aios.gen= values on cmdline"
             fi
@@ -57,17 +68,16 @@ set +f
 
 [ "$forced" = no ] || fail "forced failure (aios.test.fail_health=1 on the cmdline)"
 
-case "$gen" in
-    [0-9][0-9][0-9][0-9]) ;;
-    *) fail "no generation on cmdline" ;;
-esac
+[ -n "$gen" ] || fail "no generation on cmdline"
 
-usr_opts=$("$FINDMNT" -no OPTIONS /usr) || fail "/usr is not mounted"
+# -M matches the mount point exactly; -f takes the first mount there, so a mount stacked
+# on top cannot turn the options into several lines that never match.
+usr_opts=$("$FINDMNT" -fno OPTIONS -M /usr) || fail "/usr is not mounted"
 has_opt "$usr_opts" ro || fail "/usr is not mounted read-only ($usr_opts)"
 has_opt "$usr_opts" "subvol=/@usr-gen-$gen" ||
     fail "/usr is not subvolume @usr-gen-$gen ($usr_opts)"
 
-etc_opts=$("$FINDMNT" -no OPTIONS /etc) || fail "/etc is not mounted"
+etc_opts=$("$FINDMNT" -fno OPTIONS -M /etc) || fail "/etc is not mounted"
 has_opt "$etc_opts" "subvol=/@etc-live" || fail "/etc is not subvolume @etc-live ($etc_opts)"
 
 for mountpoint in /persist /home /var/log; do

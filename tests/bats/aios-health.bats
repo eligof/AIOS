@@ -29,6 +29,11 @@ unmnt() {
     rm -f "$FAKE_MOUNTS$1"
 }
 
+# stack MOUNTPOINT OPTIONS: mount something else on top of MOUNTPOINT.
+stack() {
+    printf '%s\n' "$2" >>"$FAKE_MOUNTS$1"
+}
+
 cmdline() {
     printf '%s\n' "$*" >"$AIOS_CMDLINE_FILE"
 }
@@ -139,4 +144,70 @@ TOML
 
     [ "$status" -eq 1 ]
     [ "$output" = "aios-health: conflicting aios.gen= values on cmdline" ]
+}
+
+@test "an empty aios.gen= fails even next to a valid one" {
+    cmdline "aios.gen= aios.gen=0007"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-health: no generation on cmdline" ]
+}
+
+@test "a mount stacked on /usr does not hide the generation's /usr" {
+    stack /usr "rw,nosuid,nodev,size=1024k,mode=755,inode64"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "aios-health: generation 0007 is healthy" ]
+}
+
+@test "a mount stacked on /etc does not hide @etc-live" {
+    stack /etc "rw,nosuid,nodev,size=1024k,mode=755,inode64"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "aios-health: generation 0007 is healthy" ]
+}
+
+@test "aios.gen=0100 matches id = 100" {
+    cmdline "root=/dev/mapper/aios aios.gen=0100 quiet"
+    mnt /usr "ro,$BTRFS_OPTS,subvolid=361,subvol=/@usr-gen-0100"
+    gen_file 100
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "aios-health: generation 0100 is healthy" ]
+}
+
+@test "/usr not mounted fails" {
+    unmnt /usr
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-health: /usr is not mounted" ]
+}
+
+@test "missing /home fails" {
+    unmnt /home
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-health: /home is not mounted" ]
+}
+
+@test "generation.toml without an id line fails" {
+    gen_file 7
+    sed -i '/^id = /d' "$AIOS_GEN_FILE"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-health: no id in $AIOS_GEN_FILE" ]
 }

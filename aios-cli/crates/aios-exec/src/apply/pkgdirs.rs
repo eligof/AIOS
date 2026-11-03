@@ -37,34 +37,56 @@ impl Run<'_> {
     ///
     /// apply's candidate root is a fresh snapshot of `@blank`, holding only what this
     /// transaction installed. A path some package still owns but the candidate lacks keeps
-    /// the booted generation's line (its package was installed by an earlier generation).
+    /// the booted generation's line (its package was installed by an earlier generation);
+    /// one below a symlink in the candidate lives wherever that points now, and is dropped.
     pub(super) fn write_pkgdirs(&mut self, etc: &Path) -> Result<(), ExecError> {
-        let listed = self.chroot(&["pacman", "-Qlq"], &[])?.stdout_text();
+        let listed = self.chroot(&["pacman", "-Qlq"], &[])?.stdout;
         let previous = self.previous_pkgdirs()?;
         let blank = self.ctx.layout.subvol("@blank");
         let persisted = &self.ctx.manifest.persist.files;
+        let outside = |path: &str| !KEPT_TREES.iter().any(|tree| at_or_under(path, tree));
         let mut paths = Vec::new();
-        let unique: BTreeSet<&str> = listed
-            .lines()
-            .map(|line| line.trim_end_matches('/'))
-            .collect();
+        let mut unique = BTreeSet::new();
+        for line in listed.split(|b| *b == b'\n').filter(|l| !l.is_empty()) {
+            match std::str::from_utf8(line) {
+                Ok(path) => {
+                    unique.insert(path.trim_end_matches('/'));
+                }
+                Err(_) => {
+                    let lossy = String::from_utf8_lossy(line);
+                    let path = lossy.trim_end_matches('/');
+                    if outside(path) {
+                        self.warnings.push(format!(
+                            "package file {} has a name that isn't UTF-8 and is lost at every \
+                             boot",
+                            escape_unprintable(path)
+                        ));
+                    }
+                }
+            }
+        }
         for path in unique {
             let Some(rel) = relative(path) else { continue };
-            if KEPT_TREES.iter().any(|tree| at_or_under(path, tree))
+            if !outside(path)
                 || persisted.iter().any(|file| file == path)
                 || !matches!(find(&blank, rel)?, Found::Missing)
             {
                 continue;
             }
             let cand = &self.ctx.layout.cand;
-            let Found::Here(meta) = find(cand, rel)? else {
-                paths.extend(previous.get(path).cloned());
-                continue;
+            let meta = match find(cand, rel)? {
+                Found::Here(meta) => meta,
+                Found::Missing => {
+                    paths.extend(previous.get(path).cloned());
+                    continue;
+                }
+                Found::BelowLink => continue,
             };
+            // tmpfiles reads an argument of `-` as none at all.
             let target = if meta.file_type().is_symlink() {
                 let full = cand.join(rel);
                 let target = fs::read_link(&full).map_err(|e| ExecError::io(&full, e))?;
-                target.to_str().map(str::to_string)
+                target.to_str().filter(|t| *t != "-").map(str::to_string)
             } else {
                 None
             };
@@ -79,7 +101,7 @@ impl Run<'_> {
             } else if let Some(target) = target {
                 paths.push(PackagePath::Symlink { path, target });
             } else {
-                // A regular file, or a symlink tmpfiles can't name the target of.
+                // A regular file, or a symlink whose target tmpfiles can't write.
                 self.warnings.push(format!(
                     "package file {} lives outside /usr and /etc and is lost at every boot",
                     escape_unprintable(&path)

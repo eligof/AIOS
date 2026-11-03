@@ -8,6 +8,7 @@ pub const CORE_PACKAGES: &[&str] = &[
     "aios-base",
     "btrfs-progs",
     "cryptsetup",
+    "dosfstools",
     "tpm2-tss",
     "sbctl",
     "systemd-ukify",

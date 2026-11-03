@@ -2,6 +2,7 @@ mod common;
 
 use aios_manifest::{
     locate, locate_key, locate_section, locate_value, offset_to_line_col, parse, Lockdown,
+    CORE_PACKAGES,
 };
 use common::VALID;
 
@@ -77,6 +78,15 @@ fn package_set_is_core_plus_kernels_plus_install_sorted_dedup() {
     sorted.dedup();
     assert_eq!(set, sorted, "package_set must be sorted and deduplicated");
     assert_eq!(set.iter().filter(|p| *p == "base").count(), 1);
+}
+
+/// The ESP is in fstab with fsck pass 2, so systemd-fsck needs `fsck.vfat` (spec §4.6).
+#[test]
+fn core_set_has_dosfstools_for_the_esp_fsck() {
+    assert!(CORE_PACKAGES.contains(&"dosfstools"), "{CORE_PACKAGES:?}");
+    assert_eq!(CORE_PACKAGES.len(), 16);
+    let set = parse(VALID).unwrap().package_set();
+    assert!(set.contains(&"dosfstools".to_string()), "{set:?}");
 }
 
 #[test]

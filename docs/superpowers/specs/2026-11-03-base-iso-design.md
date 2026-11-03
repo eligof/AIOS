@@ -326,7 +326,7 @@ All system interaction goes through `CommandRunner` and `SystemProbe`, so no uni
   - Mask symlinks for `90-mkinitcpio-install.hook` and `60-mkinitcpio-remove.hook`.
   - `/etc/nftables.conf`.
   - `/etc/usbguard/usbguard-daemon.conf`.
-- AIOS core package set, always added: `base aios-cli aios-base btrfs-progs cryptsetup tpm2-tss sbctl systemd-ukify mkinitcpio nftables usbguard apparmor zram-generator fwupd polkit` + the manifest kernels.
+- AIOS core package set (16 packages), always added: `base aios-cli aios-base btrfs-progs cryptsetup dosfstools tpm2-tss sbctl systemd-ukify mkinitcpio nftables usbguard apparmor zram-generator fwupd polkit` + the manifest kernels. `dosfstools` provides `fsck.vfat`: the ESP's fstab line has fsck pass 2.
 
 **Packaging:**
 - PKGBUILDs live in `packaging/aios-cli/` and `packaging/aios-base/`.

@@ -1,6 +1,9 @@
 mod common;
 
-use aios_exec::ops::{drift, gen_list, gen_rows, render_gen_list, status, Drift, GenRow, Status};
+use aios_exec::ops::{
+    drift, gen_list, gen_rows, render_gen_list, status, Drift, GenRow, Modified, Status,
+    DRIFT_READ_MAX,
+};
 use aios_gen::{GenId, GenerationMeta};
 use common::{mkdir, write, Fixture};
 use std::fs;
@@ -168,13 +171,164 @@ fn drift_lists_added_modified_and_removed_paths() {
         Drift {
             added: vec!["/etc/ld.so.preload".to_string()],
             modified: vec![
-                "/etc/hostname".to_string(),
-                "/etc/localtime".to_string(),
-                "/etc/nftables.conf".to_string(),
+                modified("/etc/hostname", &["size differs"]),
+                modified("/etc/localtime", &["target differs"]),
+                modified("/etc/nftables.conf", &["mode 0600 -> 0644"]),
             ],
             removed: vec!["/etc/issue".to_string()],
             skipped: vec![],
         }
+    );
+}
+
+fn modified(path: &str, what: &[&str]) -> Modified {
+    Modified {
+        path: path.to_string(),
+        what: what.iter().map(|w| w.to_string()).collect(),
+    }
+}
+
+/// `drift` of the fixture's live `/etc` against the booted snapshot.
+fn drift_of(fx: &Fixture) -> Drift {
+    drift(&fx.layout.live_etc, &fx.layout.subvol("@etc-gen-0007")).unwrap()
+}
+
+#[test]
+fn files_of_the_same_size_are_compared_byte_for_byte() {
+    let fx = drifted();
+    let (live, snap) = (&fx.layout.live_etc, fx.layout.subvol("@etc-gen-0007"));
+    write(&live.join("motd"), "abc\n", 0o644);
+    write(&snap.join("motd"), "abd\n", 0o644);
+    assert!(drift_of(&fx)
+        .modified
+        .contains(&modified("/etc/motd", &["content differs"])));
+}
+
+/// Directories count too: their mode, and those only one tree has (shown with a `/`).
+#[test]
+fn directories_that_changed_mode_appeared_or_went_away_are_drift() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = drifted();
+    let (live, snap) = (&fx.layout.live_etc, fx.layout.subvol("@etc-gen-0007"));
+    fs::set_permissions(live.join("empty.d"), fs::Permissions::from_mode(0o777)).unwrap();
+    fs::set_permissions(snap.join("empty.d"), fs::Permissions::from_mode(0o755)).unwrap();
+    mkdir(&live.join("sudoers.d"));
+    mkdir(&snap.join("old.d"));
+    let d = drift_of(&fx);
+    assert!(
+        d.modified
+            .contains(&modified("/etc/empty.d/", &["mode 0755 -> 0777"])),
+        "{d:?}"
+    );
+    assert!(d.added.contains(&"/etc/sudoers.d/".to_string()), "{d:?}");
+    assert!(d.removed.contains(&"/etc/old.d/".to_string()), "{d:?}");
+}
+
+#[test]
+fn a_changed_type_is_drift() {
+    let fx = drifted();
+    let (live, snap) = (&fx.layout.live_etc, fx.layout.subvol("@etc-gen-0007"));
+    write(&snap.join("resolv.conf"), "nameserver ::1\n", 0o644);
+    symlink(
+        "/run/systemd/resolve/stub-resolv.conf",
+        live.join("resolv.conf"),
+    )
+    .unwrap();
+    write(&snap.join("profile.d"), "a file\n", 0o644);
+    mkdir(&live.join("profile.d"));
+    let d = drift_of(&fx);
+    assert!(
+        d.modified
+            .contains(&modified("/etc/resolv.conf", &["file -> symlink"])),
+        "{d:?}"
+    );
+    assert!(
+        d.modified
+            .contains(&modified("/etc/profile.d/", &["file -> directory"])),
+        "{d:?}"
+    );
+}
+
+fn mkfifo(path: &std::path::Path) {
+    let status = std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+/// A FIFO is never opened, so drift can't hang waiting for a writer.
+#[test]
+fn special_files_are_compared_without_being_opened() {
+    let fx = drifted();
+    let (live, snap) = (&fx.layout.live_etc, fx.layout.subvol("@etc-gen-0007"));
+    mkfifo(&live.join("initctl"));
+    mkfifo(&snap.join("initctl"));
+    write(&snap.join("pipe"), "", 0o644);
+    mkfifo(&live.join("pipe"));
+    let d = drift_of(&fx);
+    assert!(!d
+        .added
+        .iter()
+        .chain(&d.removed)
+        .any(|p| p.contains("initctl")));
+    assert!(
+        !d.modified.iter().any(|m| m.path.contains("initctl")),
+        "{d:?}"
+    );
+    assert!(
+        d.modified
+            .contains(&modified("/etc/pipe", &["file -> special file"])),
+        "{d:?}"
+    );
+}
+
+/// Files over the cap are not read: a size difference still shows, equal sizes get a note.
+#[test]
+fn files_over_the_read_cap_are_compared_by_size_only() {
+    let fx = drifted();
+    let (live, snap) = (&fx.layout.live_etc, fx.layout.subvol("@etc-gen-0007"));
+    let sparse = |path: std::path::PathBuf, len: u64| {
+        fs::File::create(path).unwrap().set_len(len).unwrap();
+    };
+    sparse(live.join("big"), DRIFT_READ_MAX + 1);
+    sparse(snap.join("big"), DRIFT_READ_MAX + 1);
+    sparse(live.join("bigger"), DRIFT_READ_MAX + 2);
+    sparse(snap.join("bigger"), DRIFT_READ_MAX + 1);
+    let d = drift_of(&fx);
+    assert_eq!(
+        d.skipped,
+        ["/etc/big: larger than 16 MiB, contents not compared"]
+    );
+    assert!(!d.modified.iter().any(|m| m.path == "/etc/big"), "{d:?}");
+    assert!(d
+        .modified
+        .contains(&modified("/etc/bigger", &["size differs"])));
+}
+
+/// A path can't forge another line of the report.
+#[test]
+fn control_characters_in_paths_are_escaped() {
+    let fx = drifted();
+    write(
+        &fx.layout.live_etc.join("x\nnote: all clear\x1b[2J"),
+        "",
+        0o644,
+    );
+    let st = Status {
+        booted: Some(GenId(7)),
+        default: Some(GenId(7)),
+        bad: vec![],
+        drift: Some(drift_of(&fx)),
+    };
+    let text = st.to_string();
+    assert!(
+        text.contains("\n  + /etc/x\\nnote: all clear\\u{1b}[2J\n"),
+        "{text}"
+    );
+    assert!(
+        !text.lines().any(|l| l.starts_with("note: all clear")),
+        "{text}"
     );
 }
 
@@ -185,7 +339,10 @@ fn identical_trees_have_no_drift() {
     for etc in [live, &snap] {
         write(&etc.join("hostname"), "nightcity\n", 0o644);
     }
-    assert!(drift(live, &snap).unwrap().is_empty());
+    // The snapshot's own generation.toml is ignored, but not the directory it is in.
+    mkdir(&live.join("aios"));
+    let d = drift(live, &snap).unwrap();
+    assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]
@@ -203,9 +360,9 @@ default: gen-0008
 bad:     gen-0006
 drift (discarded at the next boot):
   + /etc/ld.so.preload
-  ~ /etc/hostname
-  ~ /etc/localtime
-  ~ /etc/nftables.conf
+  ~ /etc/hostname (size differs)
+  ~ /etc/localtime (target differs)
+  ~ /etc/nftables.conf (mode 0600 -> 0644)
   - /etc/issue
 "
     );
@@ -249,7 +406,7 @@ fn unreadable_files_are_skipped_with_a_note() {
     }
     let d = drift(live, &snap).unwrap();
     assert_eq!(d.skipped, ["/etc/secret: Permission denied (os error 13)"]);
-    assert!(!d.modified.contains(&"/etc/secret".to_string()));
+    assert!(!d.modified.iter().any(|m| m.path == "/etc/secret"));
     let st = Status {
         booted: Some(GenId(7)),
         default: Some(GenId(7)),

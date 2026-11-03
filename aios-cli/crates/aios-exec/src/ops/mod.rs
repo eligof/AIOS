@@ -17,7 +17,7 @@ pub use keys::{secureboot_enroll, tpm_enroll};
 pub use passwd::passwd;
 pub use plan::plan;
 pub use rollback::rollback;
-pub use status::{drift, status, Drift, Status};
+pub use status::{drift, status, Drift, Modified, Status, DRIFT_READ_MAX};
 
 use crate::{btrfs, CommandRunner, ExecError, Layout};
 use std::fs;

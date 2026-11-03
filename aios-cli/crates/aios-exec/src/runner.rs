@@ -244,15 +244,22 @@ fn tail(bytes: &[u8]) -> String {
     lines[lines.len().saturating_sub(3)..].join("; ")
 }
 
-fn escape_line(line: &str) -> String {
+/// `text` with every control or other unprintable character written as its escape
+/// (`\n`, `\u{1b}`), so it can't forge or rewrite a line of output.
+pub(crate) fn escape_unprintable(text: &str) -> String {
     let mut escaped = String::new();
-    for c in line.chars() {
+    for c in text.chars() {
         if unprintable(c) {
             escaped.extend(c.escape_debug());
         } else {
             escaped.push(c);
         }
     }
+    escaped
+}
+
+fn escape_line(line: &str) -> String {
+    let escaped = escape_unprintable(line);
     match escaped.char_indices().nth(TAIL_LINE_MAX) {
         Some((cut, _)) => format!("{}…", &escaped[..cut]),
         None => escaped,

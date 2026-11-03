@@ -7,6 +7,10 @@
 # so the ISO boots on any x86_64 CPU. [aios-local] is last and unsigned (spec §4.6).
 
 [options]
+# A private cache (build/iso-pkgcache/, written by make iso-build): a CachyOS host's
+# /var/cache/pacman/pkg holds CachyOS builds under the same file names as Arch's, and those
+# fail Arch's signature check when the ISO installs from [core] and [extra].
+CacheDir = @AIOS_CACHE@
 HoldPkg      = pacman glibc
 Architecture = x86_64
 ParallelDownloads = 5

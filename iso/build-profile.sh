@@ -26,6 +26,8 @@ fail() {
 [[ -f $repo/aios-local.db.tar.gz ]] || fail "no $repo/aios-local.db.tar.gz: run make repo first"
 repo=$(readlink -f "$repo")
 [[ $repo =~ ^/[A-Za-z0-9._/+-]+$ ]] || fail "the repo path $repo has characters pacman.conf cannot hold"
+# mkarchiso's pacstrap -c would otherwise use the host cache (see pacman.conf.in).
+cache=$(dirname "$repo")/iso-pkgcache
 # The installer sources KEYS as root, so take it only as make keys writes it: lines that
 # start with # and exactly one assignment line.
 LC_ALL=C grep -Eqx 'AIOS_CACHYOS_KEYS="[0-9A-F]{40}( [0-9A-F]{40})*"' "$keys" 2>/dev/null ||
@@ -40,7 +42,8 @@ fi
 mkdir -p "$out"
 : >"$out/$marker"
 cp -a "$here/profiledef.sh" "$here/packages.x86_64" "$here/efiboot" "$here/airootfs" "$out/"
-sed "s|@AIOS_REPO@|$repo|" "$here/pacman.conf.in" >"$out/pacman.conf"
+mkdir -p "$cache"
+sed -e "s|@AIOS_REPO@|$repo|" -e "s|@AIOS_CACHE@|$cache/|" "$here/pacman.conf.in" >"$out/pacman.conf"
 lib=$out/airootfs/usr/local/lib/aios-install
 install -D -m 0755 "$root/installer/aios-install" "$out/airootfs/usr/local/bin/aios-install"
 install -d -m 0755 "$lib"

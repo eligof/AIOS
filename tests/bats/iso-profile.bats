@@ -114,6 +114,9 @@ unit_key() {
     [ "$(grep '^\[' "$ISO/pacman.conf.in" | paste -sd' ')" = "[options] [core] [extra] [cachyos] [aios-local]" ]
     [ "$(sed -n '/^\[aios-local\]/,$p' "$ISO/pacman.conf.in" | grep -c '^SigLevel = Optional TrustAll$')" -eq 1 ]
     grep -qx 'Architecture = x86_64' "$ISO/pacman.conf.in"
+    # A private package cache: a CachyOS host's /var/cache/pacman/pkg holds CachyOS builds
+    # under the same file names as Arch's, which then fail Arch's signature check.
+    [ "$(grep -c '^CacheDir = @AIOS_CACHE@$' "$ISO/pacman.conf.in")" -eq 1 ]
 }
 
 @test "build-profile.sh assembles the complete profile" {
@@ -124,6 +127,10 @@ unit_key() {
     [ ! -e "$OUT/pacman.conf.in" ] && [ ! -e "$OUT/build-profile.sh" ]
     grep -qx "Server = file://$(readlink -f "$REPO")" "$OUT/pacman.conf"
     [ "$(grep -c '@AIOS_REPO@' "$OUT/pacman.conf")" -eq 0 ]
+    cache="$(dirname "$(readlink -f "$REPO")")/iso-pkgcache"
+    grep -qx "CacheDir = $cache/" "$OUT/pacman.conf"
+    [ -d "$cache" ]
+    [ "$(grep -c '@AIOS_CACHE@' "$OUT/pacman.conf")" -eq 0 ]
     [ "$(stat -c %a "$OUT/airootfs/usr/local/bin/aios-install")" = 755 ]
     cmp "$ROOT/installer/aios-install" "$OUT/airootfs/usr/local/bin/aios-install"
     for f in "$ROOT"/installer/lib/*.sh; do

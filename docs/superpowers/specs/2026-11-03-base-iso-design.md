@@ -434,7 +434,7 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
 ### 6.1 archiso profile (`iso/`)
 - Copied from `/usr/share/archiso/configs/releng/` and modified.
 - `profiledef.sh`: `iso_name="aios"`, `iso_label="AIOS_<YYYYMM>"`, `bootmodes=('uefi.systemd-boot')` (archiso 86 merged the ESP and El Torito modes into one). UEFI only.
-- `pacman.conf`: `core`, `extra`, the CachyOS repos, and `[aios-local]` → `file://<repo>/build/repo`. `make iso-build` generates it from `iso/pacman.conf.in` with the absolute path. `[cachyos]` only provides the keyring and the mirrorlists.
+- `pacman.conf`: `core`, `extra`, the CachyOS repos, and `[aios-local]` → `file://<repo>/build/repo`. `make iso-build` generates it from `iso/pacman.conf.in` with the absolute path. `[cachyos]` only provides the keyring and the mirrorlists. `CacheDir` is a private `build/iso-pkgcache/`. mkarchiso's `pacstrap -c` would otherwise use the host cache, and a CachyOS host's cache holds CachyOS builds under the same file names as Arch's. Those fail the signature check of Arch's `[core]`/`[extra]`.
 - `packages.x86_64`: the releng list plus `arch-install-scripts sbctl btrfs-progs cryptsetup gptfdisk tpm2-tools git usbguard whois aios-cli aios-base cachyos-keyring cachyos-mirrorlist cachyos-v3-mirrorlist`. Bootstrap needs the CachyOS keyring and mirrorlists on the live system.
 - `airootfs/usr/local/bin/aios-install` and `airootfs/usr/local/lib/aios-install/*.sh`.
 - `efiboot/loader/entries/`: `01-aios-linux.conf` (default), `03-aios-serial.conf` (the same plus `console=ttyS0,115200`; the second menu entry) and `04-aios-memtest86+x64.conf`. releng's speech entry is dropped.

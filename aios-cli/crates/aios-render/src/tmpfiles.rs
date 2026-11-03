@@ -39,19 +39,23 @@ pub fn persist_tmpfiles(m: &Manifest) -> String {
 /// user, for each declared user's home (`0700`) and every directory between the home and a
 /// `[users.<u>.home]` target (`0700` at or under `~/.ssh`, else `0755`).
 ///
-/// The targets themselves are left out. systemd creates the mount points, before tmpfiles
-/// runs and as root, which is why the parents are listed here: `d` fixes their owner and mode.
-/// A `d` or `f` line for a target would hit the read-only bind on every later boot (EROFS).
+/// Targets are never listed, not even as the parent of another target: systemd creates the
+/// mount points, before tmpfiles runs and as root, which is why the parents are listed here
+/// (`d` fixes their owner and mode). A `d` or `f` line for a target would hit the read-only
+/// bind on every later boot (EROFS).
 pub fn home_tmpfiles(m: &Manifest) -> String {
     let mut dirs: BTreeMap<String, (&str, &str)> = BTreeMap::new();
     for (user, u) in &m.users {
         let home = format!("/home/{user}");
+        let targets: BTreeSet<&str> = u.home.keys().map(|k| k.trim_end_matches('/')).collect();
         for key in u.home.keys() {
             let parts: Vec<&str> = key.trim_end_matches('/').split('/').collect();
             let mode = if parts[0] == ".ssh" { "0700" } else { "0755" };
             for depth in 1..parts.len() {
-                let dir = format!("{home}/{}", parts[..depth].join("/"));
-                dirs.insert(dir, (user.as_str(), mode));
+                let rel = parts[..depth].join("/");
+                if !targets.contains(rel.as_str()) {
+                    dirs.insert(format!("{home}/{rel}"), (user.as_str(), mode));
+                }
             }
         }
         dirs.insert(home, (user.as_str(), "0700"));

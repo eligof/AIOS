@@ -1,6 +1,7 @@
 use aios_gen::GenId;
 
-/// Machine facts the renderers need beyond the manifest.
+/// Machine facts the renderers need beyond the manifest. Build it with [`RenderCtx::new`],
+/// which validates the values; the fields are public only so tests can write fixtures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderCtx {
     /// The generation being rendered (`aios.gen=`, `@usr-gen-NNNN`, fstab header).

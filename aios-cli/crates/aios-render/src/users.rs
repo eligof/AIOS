@@ -20,7 +20,8 @@ pub struct GroupEntry {
 }
 
 /// One `/etc/shadow` line. `rest` is fields 3 to 9 verbatim
-/// (`lastchg:min:max:warn:inactive:expire:reserved`); empty for a 2-field line.
+/// (`lastchg:min:max:warn:inactive:expire:reserved`). Empty `rest` renders as a 2-field line,
+/// so `name:hash` round-trips but `name:hash:` comes back without the trailing `:`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShadowEntry {
     pub name: String,

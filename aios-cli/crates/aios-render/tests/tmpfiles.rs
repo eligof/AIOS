@@ -155,3 +155,15 @@ fn persist_dirs_handle_top_level_files_and_duplicates() {
         ]
     );
 }
+
+#[test]
+fn home_tmpfiles_never_names_a_bind_target_even_as_a_parent() {
+    let raw = MANIFEST.replace(
+        "\".zshrc\" = \"home/eli/zshrc\"",
+        "\".config/\" = \"home/eli/config/\"\n\
+         \"bin\" = \"home/eli/bin\"\n\
+         \"bin/tool\" = \"home/eli/tool\"",
+    );
+    let expected = format!("{HEADER}d /home/eli 0700 eli eli -\n");
+    assert_eq!(home_tmpfiles(&manifest_from(&raw)), expected);
+}

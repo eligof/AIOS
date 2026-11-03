@@ -7747,11 +7747,11 @@ These follow from the Phase 3 code. Later phases must honor them.
    - `/persist/aios/config/manifest.toml` (git repo) and `/persist/aios/secrets/passwd/<user>` (one yescrypt line, 0600; `secrets/` and `passwd/` 0700).
    - `/usr/lib/aios/cmdline-hardening` (read verbatim) and `/usr/share/zoneinfo`.
    - The ESP's `/EFI/Linux/aios-gen-NNNN-{cachyos,lts}+3.efi`. Transient copies are `…+3.efi.tmp` and are never booted.
-5. **Test hooks (env):**
+5. **Test hooks (env), in `test-hooks` builds only.** The `aios` binary reads these only when built with the `test-hooks` cargo feature (off by default; the CLI tests need `--all-features`). The shipped binary reads no `AIOS_*` variable at all, and `make check` fails if its release build contains any `AIOS_` string. Later phases can't use them to steer an installed or ISO `aios`.
    - Layout overrides: `AIOS_TOP AIOS_CAND AIOS_ESP AIOS_CONFIG AIOS_SECRETS AIOS_PERSIST AIOS_HOME AIOS_LOG AIOS_LIVE_ETC AIOS_CMDLINE AIOS_EFIVARS AIOS_LOCK AIOS_DEVICE`.
    - Other inputs: `AIOS_ZONEINFO` and `AIOS_HARDENING_CMDLINE_FILE`.
-   - `AIOS_FAKE_RUNNER=<json>` with `{"respond": [{"argv": [...], "status": 0, "stdout": "", "stderr": ""}], "fail_on": [[...]]}`. Calls are appended to `<json>.calls`. Under it, `AIOS_TEST_PASSWORD` feeds `aios passwd`, and the trusted owner is the caller's euid instead of root.
-6. **Ownership (TOCTOU mitigation).** `plan`, `apply` and `bootstrap` refuse unless the manifest repo directory and the secrets directory are owned by root and not group/world-writable. The installer must create `@persist/aios/config` and `@persist/aios/secrets` as root, 0755/0700 or stricter.
+   - `AIOS_FAKE_RUNNER=<json>` with `{"respond": [{"argv": [...], "status": 0, "stdout": "", "stderr": ""}], "fail_on": [[...]], "emulate_top": "<top>", "emulate_subvolumes": false}`, every key optional. Calls are appended to `<json>.calls`. Under it, `AIOS_TEST_PASSWORD` feeds `aios passwd`, and the trusted owner is the caller's euid instead of root.
+6. **Ownership (TOCTOU mitigation).** `plan`, `apply` and `bootstrap` refuse unless the manifest repo directory and the secrets directory are owned by root and not group/world-writable. The same goes for the repo's `.git` and `.git/config` where present, which may not be symlinks either (nor `.git` a `gitdir:` file), because git as root reads no other config. The installer must create `@persist/aios/config` (with `git init` as root and the default umask) and `@persist/aios/secrets` as root, 0755/0700 or stricter.
 7. **What `bootstrap` expects from the installer:**
    - **Disk:** the btrfs top level mounted at `--target`, containing:
      - `@blank` (the §2 skeleton, read-only, including `var/lib/pacman → ../../usr/lib/pacman`);

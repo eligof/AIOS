@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 /// GUID of the systemd-boot loader interface EFI variables.
 const LOADER_GUID: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
 
-/// Every path aios reads or writes. `from_vars` reads an override for each one; the `aios`
-/// binary passes its test hook, which only builds with the `test-hooks` feature consult, so
-/// tests can point all of them at a tempdir while release builds use the defaults.
+/// Every path aios reads or writes. `from_vars` asks its lookup function for an override of
+/// each one. The `aios` binary passes its test hook, which reads the environment only in
+/// builds with the `test-hooks` feature, so tests can point every path at a tempdir while
+/// release builds always use the defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     /// btrfs top level (`subvolid=5`) mount point. `AIOS_TOP`, default `/run/aios/top`.

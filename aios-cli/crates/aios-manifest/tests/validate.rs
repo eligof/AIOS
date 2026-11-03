@@ -706,3 +706,74 @@ fn sibling_home_keys_sharing_a_prefix_are_not_nested() {
     );
     assert_eq!(errors(&raw), Vec::<String>::new());
 }
+
+#[test]
+fn package_names_valid_forms_accepted() {
+    let raw = VALID.replace(
+        "install = [\"base\", \"zsh\", \"git\"]",
+        "install = [\"base\", \"lib32-glibc\", \"g++\", \"python-3.12\", \"_x\", \"@grp\", \"c++\", \"9wm\"]",
+    );
+    assert_eq!(errors(&raw), Vec::<String>::new());
+}
+
+#[test]
+fn package_name_leading_dash_rejected() {
+    let raw = VALID.replace("\"zsh\"", "\"--overwrite=/*\"");
+    assert_error(&raw, "invalid package name \"--overwrite=/*\"");
+}
+
+#[test]
+fn package_name_bad_chars_rejected() {
+    for bad in ["Zsh", "a b", "a/b", "", "-x", ".x", "a;b"] {
+        let raw = VALID.replace("\"zsh\"", &format!("\"{bad}\""));
+        assert_error(&raw, &format!("invalid package name {bad:?}"));
+    }
+}
+
+#[test]
+fn unit_names_valid_forms_accepted() {
+    let raw = VALID.replace(
+        "enable = [\"NetworkManager\"]",
+        "enable = [\"NetworkManager\", \"fwupd-refresh.timer\", \"systemd-timesyncd\", \"getty@tty1.service\", \"dev-sda1.device\", \"a.b.service\", \"x\\\\x2dy.mount\"]\ndisable = [\"foo.socket\"]\nmask = [\"bar.path\"]",
+    );
+    assert_eq!(errors(&raw), Vec::<String>::new());
+}
+
+#[test]
+fn unit_name_leading_dash_rejected() {
+    let raw = VALID.replace("\"NetworkManager\"", "\"--root=/mnt\"");
+    assert_error(&raw, "invalid unit name \"--root=/mnt\"");
+}
+
+#[test]
+fn unit_name_bad_chars_or_suffix_rejected() {
+    for bad in ["a b", "a/b", "", "foo.exe", "foo.", "a$b"] {
+        let raw = VALID.replace("\"NetworkManager\"", &format!("\"{bad}\""));
+        assert_error(&raw, &format!("invalid unit name {bad:?}"));
+    }
+}
+
+#[test]
+fn unit_name_checked_in_disable_and_mask() {
+    let raw = VALID.replace(
+        "enable = [\"NetworkManager\"]",
+        "enable = []\ndisable = [\"-x\"]\nmask = [\"-y\"]",
+    );
+    assert_error(&raw, "invalid unit name \"-x\"");
+    assert_error(&raw, "invalid unit name \"-y\"");
+}
+
+#[test]
+fn file_owner_and_group_validated() {
+    let raw = VALID.replace(
+        "mode = \"0600\" }",
+        "mode = \"0600\", owner = \"root\", group = \"wheel\" }",
+    );
+    assert_eq!(errors(&raw), Vec::<String>::new());
+    for bad in ["0", "-R", "Root", "a:b", ""] {
+        let raw = VALID.replace("mode = \"0600\" }", &format!("owner = {bad:?} }}"));
+        assert_error(&raw, &format!("invalid owner {bad:?}"));
+        let raw = VALID.replace("mode = \"0600\" }", &format!("group = {bad:?} }}"));
+        assert_error(&raw, &format!("invalid group {bad:?}"));
+    }
+}

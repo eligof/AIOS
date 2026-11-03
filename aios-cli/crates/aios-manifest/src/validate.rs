@@ -78,6 +78,8 @@ pub fn validate(m: &Manifest, raw: &str, env: &ValidationEnv) -> Vec<ManifestErr
     };
     v.system(m, env);
     v.kernel(m);
+    v.packages(m);
+    v.services(m);
     v.files(m, env);
     v.persist(m);
     v.users(m, env);
@@ -164,6 +166,27 @@ impl Validator<'_> {
         }
     }
 
+    /// Package names reach `pacman` as argv, so they may not start with `-`.
+    fn packages(&mut self, m: &Manifest) {
+        for p in &m.packages.install {
+            if !valid_package_name(p) {
+                let pos = locate_value(self.raw, "packages", &format!("\"{p}\""));
+                self.err(pos, format!("invalid package name {p:?}"));
+            }
+        }
+    }
+
+    /// Unit names reach `systemctl` as argv, so they may not start with `-`.
+    fn services(&mut self, m: &Manifest) {
+        let s = &m.services;
+        for u in s.enable.iter().chain(&s.disable).chain(&s.mask) {
+            if !valid_unit_name(u) {
+                let pos = locate_value(self.raw, "services", &format!("\"{u}\""));
+                self.err(pos, format!("invalid unit name {u:?}"));
+            }
+        }
+    }
+
     fn files(&mut self, m: &Manifest, env: &ValidationEnv) {
         for (path, entry) in &m.files {
             let pos = locate_key(self.raw, "files", &format!("\"{path}\""));
@@ -204,6 +227,17 @@ impl Validator<'_> {
             if let Some(mode) = &entry.mode {
                 if !valid_mode(mode) {
                     self.err(pos, format!("file {path:?}: invalid mode {mode:?}"));
+                }
+            }
+            // Names only (no numeric ids, no leading '-'): they reach `chown` as argv.
+            if let Some(o) = &entry.owner {
+                if !valid_username(o) {
+                    self.err(pos, format!("file {path:?}: invalid owner {o:?}"));
+                }
+            }
+            if let Some(g) = &entry.group {
+                if !valid_username(g) {
+                    self.err(pos, format!("file {path:?}: invalid group {g:?}"));
                 }
             }
         }
@@ -478,4 +512,47 @@ fn valid_username(n: &str) -> bool {
     first_ok
         && n.len() <= 32
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// `^[a-z0-9@_+][a-z0-9@._+-]*$`: pacman's package-name alphabet, with no leading `-` or `.`.
+fn valid_package_name(n: &str) -> bool {
+    let mut chars = n.chars();
+    let first_ok = matches!(chars.next(), Some(c) if c.is_ascii_lowercase()
+        || c.is_ascii_digit() || matches!(c, '@' | '_' | '+'));
+    first_ok
+        && chars.all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '@' | '.' | '_' | '+' | '-')
+        })
+}
+
+/// Unit types systemctl accepts as a suffix.
+const UNIT_SUFFIXES: &[&str] = &[
+    "service",
+    "socket",
+    "timer",
+    "path",
+    "mount",
+    "automount",
+    "target",
+    "slice",
+    "swap",
+    "device",
+    "scope",
+];
+
+/// Non-empty, no leading `-`, only `[A-Za-z0-9:_.@\-\\]`; a name with a `.` must end in a
+/// known unit suffix.
+fn valid_unit_name(u: &str) -> bool {
+    if u.is_empty()
+        || u.starts_with('-')
+        || !u
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '_' | '.' | '@' | '-' | '\\'))
+    {
+        return false;
+    }
+    match u.rsplit_once('.') {
+        Some((_, suffix)) => UNIT_SUFFIXES.contains(&suffix),
+        None => true,
+    }
 }

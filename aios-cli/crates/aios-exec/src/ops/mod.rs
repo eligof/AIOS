@@ -1,12 +1,16 @@
-//! The other `aios` commands: rollback and gc.
+//! The other `aios` commands: rollback, gc, gen list and status.
 
 mod boot;
 mod gc;
+mod gens;
 mod rollback;
+mod status;
 
 pub use boot::{read_ukis, BootState, EspUki};
 pub use gc::{gc, gc_mounted};
+pub use gens::{gen_list, gen_rows, render_gen_list, GenRow};
 pub use rollback::rollback;
+pub use status::{drift, status, Drift, Status};
 
 use crate::{btrfs, CommandRunner, ExecError, Layout};
 

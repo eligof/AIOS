@@ -1,14 +1,21 @@
-//! The other `aios` commands: rollback, gc, gen list and status.
+//! The other `aios` commands: rollback, gc, gen list, status, passwd, plan, Secure Boot
+//! and TPM enrollment.
 
 mod boot;
 mod gc;
 mod gens;
+mod keys;
+mod passwd;
+mod plan;
 mod rollback;
 mod status;
 
 pub use boot::{read_ukis, BootState, EspUki};
 pub use gc::{gc, gc_mounted};
 pub use gens::{gen_list, gen_rows, render_gen_list, GenRow};
+pub use keys::{secureboot_enroll, tpm_enroll};
+pub use passwd::passwd;
+pub use plan::plan;
 pub use rollback::rollback;
 pub use status::{drift, status, Drift, Status};
 

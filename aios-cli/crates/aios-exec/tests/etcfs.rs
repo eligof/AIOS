@@ -106,6 +106,23 @@ fn create_dirs_makes_the_whole_path() {
 }
 
 #[test]
+fn set_mode_changes_a_file_and_never_follows_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let (etc, outside) = (dir.path().join("etc"), dir.path().join("outside"));
+    fs::create_dir(&etc).unwrap();
+    fs::write(&outside, "x").unwrap();
+    fs::set_permissions(&outside, fs::Permissions::from_mode(0o644)).unwrap();
+    etcfs::write(&etc, "/etc/helper", &file("#!/bin/sh\n", 0o755)).unwrap();
+    etcfs::set_mode(&etc, "/etc/helper", 0o4755).unwrap();
+    assert_eq!(mode(&etc.join("helper")), 0o4755);
+    symlink(&outside, etc.join("link")).unwrap();
+    assert!(etcfs::set_mode(&etc, "/etc/link", 0o4755).is_err());
+    assert_eq!(mode(&outside), 0o644);
+    let err = etcfs::set_mode(&etc, "/etc/missing/helper", 0o755).unwrap_err();
+    assert!(err.to_string().contains("missing/helper"), "{err}");
+}
+
+#[test]
 fn only_paths_below_etc() {
     let dir = tempfile::tempdir().unwrap();
     for bad in ["/usr/x", "/etc/../x", "/etc/", "/etc/a//b"] {

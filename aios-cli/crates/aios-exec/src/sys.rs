@@ -4,6 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// `O_NOFOLLOW`, for `OpenOptionsExt::custom_flags`: opening a symlink fails with `ELOOP`.
 pub(crate) const O_NOFOLLOW: i32 = rustix::fs::OFlags::NOFOLLOW.bits() as i32;
 
+/// `O_NONBLOCK`: opening a FIFO doesn't wait for a writer.
+pub(crate) const O_NONBLOCK: i32 = rustix::fs::OFlags::NONBLOCK.bits() as i32;
+
 /// The LUKS UUID from `rd.luks.name=<uuid>=aios`. `None` if absent, conflicting, or not a
 /// canonical UUID (8-4-4-4-12 hex digits): it becomes a `/dev/disk/by-uuid/` path.
 pub fn luks_uuid_from_cmdline(cmdline: &str) -> Option<String> {

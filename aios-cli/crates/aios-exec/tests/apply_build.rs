@@ -149,6 +149,42 @@ fn generation_toml_records_ids_commit_kernels_and_package_hash() {
     );
 }
 
+/// `arch-chroot ROOT chown -h -- SPEC PATH`: the file has no setuid or setgid bit while
+/// root still owns it, and (as the kernel does on chown) it has none afterwards either.
+fn chown_drops_setuid(argv: &[&str]) {
+    let path = Path::new(argv[1]).join(argv.last().unwrap().trim_start_matches('/'));
+    let meta = fs::symlink_metadata(&path).unwrap();
+    if meta.is_file() {
+        let mode = meta.permissions().mode();
+        assert_eq!(
+            mode & 0o6000,
+            0,
+            "{} is setuid/setgid before chown",
+            path.display()
+        );
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode & !0o6000)).unwrap();
+    }
+}
+
+#[test]
+fn setuid_and_setgid_are_set_after_the_owner() {
+    let mut fx = Fixture::booted();
+    let entry =
+        "\"/etc/aios-helper\" = { source = \"files/helper\", mode = \"6750\", owner = \"eli\" }\n";
+    fx.set_manifest(&MANIFEST.replace("\n[persist]", &format!("{entry}\n[persist]")));
+    common::write(&fx.layout.config.join("files/helper"), "#!/bin/sh\n", 0o644);
+    let cand = fx.layout.cand.display().to_string();
+    fx.runner
+        .on_success(&["arch-chroot", &cand, "chown"], chown_drops_setuid);
+    fx.run().unwrap();
+    let etc = fx.layout.cand.join("etc");
+    assert_eq!(mode(&etc.join("aios-helper")), 0o6750);
+    assert_eq!(mode(&etc.join("usbguard/usbguard-daemon.conf")), 0o600);
+    assert!(fx
+        .calls()
+        .contains(&"arch-chroot {cand} chown -h -- eli:root /etc/aios-helper".to_string()));
+}
+
 #[test]
 fn c_utf8_needs_no_locale_gen() {
     let mut fx = Fixture::booted();

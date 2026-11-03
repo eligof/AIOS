@@ -4,17 +4,23 @@ use crate::{sha256_hex, Cmd, DirProbe, ExecError};
 use aios_gen::GenerationMeta;
 use aios_plan::{desired_etc, EtcEntry, Inputs, GENERATION_TOML, MANAGED_FILES};
 use aios_render::{home_binds, parse_managed_list, persist_dirs};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+
+/// The setuid and setgid bits.
+const SETID: u32 = 0o6000;
 
 impl Run<'_> {
     /// Spec §4.3 steps 5–6: write the desired `/etc` (files, generated config, merged
     /// accounts, home bind sources) into `@etc-cand`, drop paths the previous generation
     /// managed and this one doesn't, write `generation.toml`, run `locale-gen`, apply
     /// `[files]` owners, and create the persist directories the binds need (plus, for
-    /// bootstrap, the home directories).
+    /// bootstrap, the home directories). A file that gets an owner is written without its
+    /// setuid and setgid bits, which it gets only after the `chown` (that would clear them,
+    /// and until then root owns the file).
     pub(super) fn render_etc(&mut self) -> Result<(), ExecError> {
         let (runner, l, m) = (self.ctx.runner, self.ctx.layout, self.ctx.manifest);
         let etc = l.cand.join("etc");
@@ -40,8 +46,26 @@ impl Run<'_> {
                 }
             }
         }
+        let owners: BTreeMap<&str, String> = m
+            .files
+            .iter()
+            .filter_map(|(path, file)| {
+                let (owner, group) = (file.owner_or_default(), file.group_or_default());
+                (owner != "root" || group != "root")
+                    .then(|| (path.as_str(), format!("{owner}:{group}")))
+            })
+            .collect();
         for (path, entry) in &desired {
-            etcfs::write(&etc, path, entry)?;
+            match entry {
+                EtcEntry::File { content, mode } if owners.contains_key(path.as_str()) => {
+                    let provisional = EtcEntry::File {
+                        content: content.clone(),
+                        mode: mode & !SETID,
+                    };
+                    etcfs::write(&etc, path, &provisional)?;
+                }
+                _ => etcfs::write(&etc, path, entry)?,
+            }
         }
         for bind in home_binds(m).iter().filter(|b| b.is_dir) {
             etcfs::create_dirs(&etc, &bind.bind_source)?;
@@ -51,11 +75,10 @@ impl Run<'_> {
         if desired.contains_key("/etc/locale.gen") {
             self.chroot(&["locale-gen"], &[])?;
         }
-        for (path, file) in &m.files {
-            let (owner, group) = (file.owner_or_default(), file.group_or_default());
-            if owner != "root" || group != "root" {
-                let spec = format!("{owner}:{group}");
-                self.chroot(&["chown", "-h", "--", &spec, path], &[])?;
+        for (path, spec) in &owners {
+            self.chroot(&["chown", "-h", "--", spec, path], &[])?;
+            if let Some(EtcEntry::File { mode, .. }) = desired.get(*path) {
+                etcfs::set_mode(&etc, path, *mode)?;
             }
         }
         for dir in persist_dirs(m) {

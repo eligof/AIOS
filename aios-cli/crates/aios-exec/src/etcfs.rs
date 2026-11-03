@@ -1,6 +1,7 @@
 //! Writes into a candidate's `/etc` that never follow a symlink out of it. Paths are given
 //! as `/etc/...` and resolved below `etc_root`.
 
+use crate::sys::{O_NOFOLLOW, O_NONBLOCK};
 use crate::ExecError;
 use aios_plan::EtcEntry;
 use std::fs::{self, OpenOptions, Permissions};
@@ -30,11 +31,31 @@ pub fn write(etc_root: &Path, path: &str, entry: &EtcEntry) -> Result<(), ExecEr
                 .open(&full)
                 .map_err(io)?;
             file.write_all(content).map_err(io)?;
-            fs::set_permissions(&full, Permissions::from_mode(*mode)).map_err(io)?;
+            file.set_permissions(Permissions::from_mode(*mode))
+                .map_err(io)?;
         }
         EtcEntry::Symlink(target) => symlink(target, &full).map_err(io)?,
     }
     Ok(())
+}
+
+/// Set the mode of the regular file at `path` through a descriptor opened without following
+/// a symlink (any symlink, at `path` or in a parent, is an error). For after a `chown`,
+/// which clears the setuid and setgid bits.
+pub fn set_mode(etc_root: &Path, path: &str, mode: u32) -> Result<(), ExecError> {
+    let full = parents(etc_root, path, false)?
+        .ok_or_else(|| ExecError(format!("{path}: no such file")))?;
+    let io = |e: std::io::Error| ExecError::io(&full, e);
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW | O_NONBLOCK)
+        .open(&full)
+        .map_err(io)?;
+    if !file.metadata().map_err(io)?.is_file() {
+        return Err(ExecError(format!("{}: not a regular file", full.display())));
+    }
+    file.set_permissions(Permissions::from_mode(mode))
+        .map_err(io)
 }
 
 /// Remove the file or symlink at `path`, if there is one.

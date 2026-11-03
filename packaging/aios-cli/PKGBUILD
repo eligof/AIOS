@@ -1,0 +1,29 @@
+# aios-cli: the `aios` command (spec §4.2, §4.6). Built from this repository's Rust
+# workspace by `make repo`.
+
+pkgname=aios-cli
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="AIOS system manager: declarative manifest, generations, rollback"
+arch=(x86_64)
+license=(GPL-3.0-or-later)
+depends=(btrfs-progs arch-install-scripts mkinitcpio systemd-ukify sbctl git whois)
+makedepends=(cargo)
+options=(!lto !debug)
+
+_root="$(realpath "$startdir/../..")"
+
+build() {
+  cd "$_root/aios-cli"
+  # CachyOS's makepkg.conf targets the build host's CPU (-C target-cpu=native,
+  # -march=native). The package must run on any x86_64 machine.
+  export RUSTFLAGS="-C target-cpu=x86-64"
+  export CFLAGS="${CFLAGS//-march=native/-march=x86-64}"
+  export CXXFLAGS="${CXXFLAGS//-march=native/-march=x86-64}"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --locked -p aios
+}
+
+package() {
+  install -Dm755 "$srcdir/target/release/aios" "$pkgdir/usr/bin/aios"
+}

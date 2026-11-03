@@ -6,3 +6,6 @@ work/
 *.qcow2
 *.iso
 __pycache__/
+packaging/*/src/
+packaging/*/pkg/
+packaging/*/*.pkg.tar.*

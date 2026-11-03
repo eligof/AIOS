@@ -1931,11 +1931,12 @@ package() {
   install -Dm644 "$_root/initrd/sysroot-etc.mount" "$lib/aios/initrd/sysroot-etc.mount"
   install -Dm644 "$_root/initrd/install/aios" "$lib/initcpio/install/aios"
 
-  # Default manifest repo, copied by the installer. The .keep files keep the empty
-  # managed home directories.
+  # Default manifest repo, copied by the installer. The whole tree is copied
+  # recursively so dotfiles and the .keep files (which keep empty managed home
+  # directories) are preserved without hand-listing each file.
   local defaults="$pkgdir/usr/share/aios/defaults"
   install -dm755 "$defaults"
-  cp -r "$_root/manifest" "$defaults/manifest"
+  cp -a "$_root/manifest" "$defaults/manifest"
   chmod -R u=rwX,go=rX "$defaults/manifest"
 }
 ```
@@ -2053,12 +2054,23 @@ usr/share/aios/defaults/manifest/files/nftables.conf
 usr/share/aios/defaults/manifest/files/pacman.conf
 usr/share/aios/defaults/manifest/files/usbguard-daemon.conf
 usr/share/aios/defaults/manifest/home/@USERNAME@/authorized_keys
+usr/share/aios/defaults/manifest/home/@USERNAME@/authorized_keys2
 usr/share/aios/defaults/manifest/home/@USERNAME@/autostart/.keep
+usr/share/aios/defaults/manifest/home/@USERNAME@/bash_logout
+usr/share/aios/defaults/manifest/home/@USERNAME@/bash_profile
+usr/share/aios/defaults/manifest/home/@USERNAME@/bashrc
 usr/share/aios/defaults/manifest/home/@USERNAME@/bin/.keep
 usr/share/aios/defaults/manifest/home/@USERNAME@/environment.d/.keep
 usr/share/aios/defaults/manifest/home/@USERNAME@/environment.d/10-aios.conf
+usr/share/aios/defaults/manifest/home/@USERNAME@/local-share-systemd-user/.keep
 usr/share/aios/defaults/manifest/home/@USERNAME@/profile
+usr/share/aios/defaults/manifest/home/@USERNAME@/ssh-rc
+usr/share/aios/defaults/manifest/home/@USERNAME@/systemd-user-control/.keep
 usr/share/aios/defaults/manifest/home/@USERNAME@/systemd-user/.keep
+usr/share/aios/defaults/manifest/home/@USERNAME@/zlogin
+usr/share/aios/defaults/manifest/home/@USERNAME@/zlogout
+usr/share/aios/defaults/manifest/home/@USERNAME@/zprofile
+usr/share/aios/defaults/manifest/home/@USERNAME@/zshenv
 usr/share/aios/defaults/manifest/home/@USERNAME@/zshrc
 usr/share/aios/defaults/manifest/manifest.toml
 EOF

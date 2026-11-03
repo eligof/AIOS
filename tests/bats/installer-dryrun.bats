@@ -160,9 +160,9 @@ chown -R 0:0 /mnt/aios-top/@persist/aios/config
 chmod -R u=rwX,go=rX /mnt/aios-top/@persist/aios/config
 mv /mnt/aios-top/@persist/aios/config/home/@USERNAME@ /mnt/aios-top/@persist/aios/config/home/tester
 write /mnt/aios-top/@persist/aios/config/manifest.toml 0644
-git -C /mnt/aios-top/@persist/aios/config init -q -b main
-git -C /mnt/aios-top/@persist/aios/config add -A
-git -C /mnt/aios-top/@persist/aios/config -c user.name=aios -c user.email=aios@localhost commit -q -m 'aios: initial manifest'
+env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 git -C /mnt/aios-top/@persist/aios/config -c core.hooksPath=/dev/null -c commit.gpgsign=false init -q -b main
+env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 git -C /mnt/aios-top/@persist/aios/config -c core.hooksPath=/dev/null -c commit.gpgsign=false add -A
+env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 git -C /mnt/aios-top/@persist/aios/config -c core.hooksPath=/dev/null -c commit.gpgsign=false -c user.name=aios -c user.email=aios@localhost commit -q --no-verify -m 'aios: initial manifest'
 install -d -m 0700 /mnt/aios-top/@persist/aios/secrets /mnt/aios-top/@persist/aios/secrets/passwd
 write /mnt/aios-top/@persist/aios/secrets/passwd/tester 0600
 cp -a $(quote_cmd "$LIVE_REPO") /mnt/aios-top/@persist/aios/repo
@@ -397,6 +397,18 @@ EOF
     [ "$status" -eq 1 ]
     [[ "$LOG" == *"step 5 (btrfs) failed"* ]]
     [ "$(tail -n 2 <<<"$DRY")" = "$(printf '%s\n' 'mkfs.btrfs -L aios /dev/mapper/aios' 'cryptsetup close aios')" ]
+}
+
+@test "a wipefs that fails leaves the disk unchanged as far as the message goes" {
+    export AIOS_INSTALL_DRYRUN_FAILS="$T/fails"
+    echo "wipefs -a /dev/vda" >"$AIOS_INSTALL_DRYRUN_FAILS"
+
+    install_dry --config "$T/install.conf"
+
+    [ "$status" -eq 1 ]
+    [[ "$LOG" == *"step 3 (partition) failed"* ]]
+    [[ "$LOG" == *"nothing on the disk was changed"* ]]
+    [[ "$LOG" != *"undefined state"* ]]
 }
 
 @test "a failure before LUKS opens leaves nothing to clean up" {

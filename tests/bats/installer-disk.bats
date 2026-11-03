@@ -313,11 +313,32 @@ ldso() {
     [ "$(cat "$CALLS")" = "$ARCH_PROBE"$'\n'"$CACHY_PROBE" ]
 }
 
-@test "an unreachable Arch or CachyOS mirror fails the network check" {
-    echo https://cdn77.cachyos.org/repo/x86_64/cachyos/cachyos.db >"$FAKE_SYS/curl.fail"
+@test "the network check tries the first 3 https CachyOS mirrors and succeeds if one answers" {
+    printf '%s\n' 'Server = https://m1.example/$arch/$repo' 'Server = http://plain.example/$arch/$repo' \
+        'Server = https://m2.example/$arch/$repo' 'Server = https://m3.example/$arch/$repo' \
+        'Server = https://m4.example/$arch/$repo' >"$AIOS_CACHYOS_MIRRORLIST"
+    printf '%s\n' https://m1.example/x86_64/cachyos/cachyos.db https://m2.example/x86_64/cachyos/cachyos.db \
+        >"$FAKE_SYS/curl.fail"
+    run check_network
+    [ "$status" -eq 0 ]
+    [ "$(sed 1d "$CALLS" | awk '{print $NF}' | paste -sd' ')" = \
+        "https://m1.example/x86_64/cachyos/cachyos.db https://m2.example/x86_64/cachyos/cachyos.db https://m3.example/x86_64/cachyos/cachyos.db" ]
+
+    # All three fail: the 4th is never asked.
+    echo https://m3.example/x86_64/cachyos/cachyos.db >>"$FAKE_SYS/curl.fail"
+    : >"$CALLS"
     run check_network
     [ "$status" -eq 1 ]
-    [ "$output" = "aios-install: error: the CachyOS mirror https://cdn77.cachyos.org/repo/x86_64/cachyos/cachyos.db is unreachable (the first Server in $AIOS_CACHYOS_MIRRORLIST)" ]
+    [ "$(grep -c m4.example "$CALLS")" -eq 0 ]
+    [[ "$output" == *"no CachyOS mirror answered"* ]]
+}
+
+@test "an unreachable Arch or CachyOS mirror fails the network check" {
+    printf '%s\n' https://cdn77.cachyos.org/repo/x86_64/cachyos/cachyos.db \
+        https://mirror.cachyos.org/repo/x86_64/cachyos/cachyos.db >"$FAKE_SYS/curl.fail"
+    run check_network
+    [ "$status" -eq 1 ]
+    [ "$output" = "aios-install: error: no CachyOS mirror answered (tried the first 2 https Servers in $AIOS_CACHYOS_MIRRORLIST)" ]
 
     echo https://geo.mirror.pkgbuild.com >"$FAKE_SYS/curl.fail"
     : >"$CALLS"

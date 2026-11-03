@@ -78,12 +78,12 @@ cleanup() {
 }
 
 # on_exit: the EXIT trap. On failure: name the step, clean up, keep the exit status. It runs
-# without errexit and ignores further interrupts and SIGPIPE (stderr may be a dead pipe), so
+# without errexit and ignores further interrupts, hangups and SIGPIPE (stderr may be a dead pipe), so
 # nothing stops the cleanup half way.
 on_exit() {
     local rc=$?
     set +e
-    trap '' INT TERM PIPE
+    trap '' INT TERM HUP PIPE
     trap - EXIT
     if ((rc != 0)); then
         log "step $AIOS_STEP ($AIOS_STEP_NAME) failed (exit $rc)"

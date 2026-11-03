@@ -292,6 +292,30 @@ EOF
     [ "$(grep -e '^umount ' -e '^cryptsetup close' "$CALLS" | paste -sd'|')" = "umount -R /mnt/b|umount -R /efi|cryptsetup close aios" ]
 }
 
+@test "a hangup during the cleanup does not stop it, and the installer turns SIGHUP into exit 129" {
+    # This umount hangs the installer up, like an SSH drop during the cleanup.
+    printf '#!/bin/sh\necho "umount $*" >>"$CALLS"\nkill -HUP "$PPID"\n' >"$BIN/umount-hup"
+    chmod +x "$BIN/umount-hup"
+    ln -sf umount-hup "$BIN/umount"
+    mounted /efi /mnt/b
+    mapping_open
+
+    run bash -c '
+        for f in common cleanup; do . "$1/$f.sh"; done
+        set -euo pipefail
+        trap on_exit EXIT
+        trap "exit 129" HUP
+        luks_open_tracked secret /dev/vda2
+        mount_tracked /dev/vda1 /efi
+        mount_tracked /dev/vda1 /mnt/b
+        exit 3
+    ' _ "$LIB"
+
+    [ "$status" -eq 3 ]
+    [ "$(grep -e '^umount ' -e '^cryptsetup close' "$CALLS" | paste -sd'|')" = "umount -R /mnt/b|umount -R /efi|cryptsetup close aios" ]
+    grep -qF "trap 'exit 129' HUP" "$BATS_TEST_DIRNAME/../../installer/aios-install"
+}
+
 @test "the exit trap does nothing after a success" {
     mounted /efi
     run bash -c '

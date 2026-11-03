@@ -12,34 +12,40 @@ probe() {
     curl -fsI --max-time 20 --retry 3 --retry-connrefused "$1" >/dev/null
 }
 
-# cachyos_mirror_url LIST: the cachyos repo database on the first https Server of LIST.
-cachyos_mirror_url() {
-    local line url
-    while IFS= read -r line || [[ -n $line ]]; do
+# cachyos_mirror_urls LIST: the cachyos repo database on each of the first 3 https Servers of
+# LIST, one per line. Fails if there is none.
+cachyos_mirror_urls() {
+    local line url n=0
+    while ((n < 3)) && { IFS= read -r line || [[ -n $line ]]; }; do
         if [[ $line =~ ^[[:space:]]*Server[[:space:]]*=[[:space:]]*(https://[^[:space:]]+) ]]; then
             url=${BASH_REMATCH[1]}
             url=${url//\$arch/x86_64}
             url=${url//\$repo/cachyos}
             printf '%s/cachyos.db\n' "${url%/}"
-            return 0
+            n=$((n + 1))
         fi
     done 2>/dev/null <"$1"
-    return 1
+    ((n > 0))
 }
 
-# check_network: Arch's mirror and the first CachyOS mirror both answer.
+# check_network: Arch's mirror answers, and so does at least one of the first 3 https CachyOS
+# mirrors (one dead mirror at the top of the list must not fail an install).
 check_network() {
-    local list=${AIOS_CACHYOS_MIRRORLIST:-/etc/pacman.d/cachyos-mirrorlist} url
+    local list=${AIOS_CACHYOS_MIRRORLIST:-/etc/pacman.d/cachyos-mirrorlist} url urls=() n=0
     if ! probe "$AIOS_ARCH_MIRROR"; then
         log "error: no network: $AIOS_ARCH_MIRROR is unreachable (Wi-Fi: iwctl)"
         return 1
     fi
-    if ! url=$(cachyos_mirror_url "$list"); then
+    if ! mapfile -t urls < <(cachyos_mirror_urls "$list") || ((${#urls[@]} == 0)); then
         log "error: no https Server line in $list"
         return 1
     fi
-    if ! probe "$url"; then
-        log "error: the CachyOS mirror $url is unreachable (the first Server in $list)"
-        return 1
-    fi
+    for url in "${urls[@]}"; do
+        n=$((n + 1))
+        if probe "$url"; then
+            return 0
+        fi
+    done
+    log "error: no CachyOS mirror answered (tried the first $n https Servers in $list)"
+    return 1
 }

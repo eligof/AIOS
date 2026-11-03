@@ -61,7 +61,7 @@ TOP=/mnt/aios-top
 # in the sbctl database (kept in @persist) are also right on the installed system.
 ESP=/efi
 TOOLS=(wipefs sgdisk blockdev udevadm mkfs.fat cryptsetup systemd-cryptenroll mkfs.btrfs btrfs
-    mount umount mountpoint lsblk findmnt git mkpasswd gpg sbctl aios bootctl usbguard curl install
+    mount umount mountpoint lsblk findmnt env git mkpasswd gpg sbctl aios bootctl usbguard curl install
     cp mv chown chmod)
 
 usage() {
@@ -86,6 +86,15 @@ ask_secret() {
     printf '\n' >&2
     [[ $a == "$b" ]] || die "the two $1 entries differ"
     CFG[$1]=$a
+}
+
+# git_config_repo DIR ARGS...: git as aios-exec runs it (apply/prepare.rs): no system or global
+# config, no hooks, no signing; nothing outside the repo gets a say in running programs.
+git_config_repo() {
+    local dir=$1
+    shift
+    run_cmd env GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 \
+        git -C "$dir" -c core.hooksPath=/dev/null -c commit.gpgsign=false "$@"
 }
 
 prompt_config() {
@@ -145,6 +154,8 @@ main() {
     done
     trap on_exit EXIT
     trap 'exit 130' INT TERM
+    # An SSH drop: exit (and clean up) once the foreground child is done, not under its feet.
+    trap 'exit 129' HUP
 
     if ((auto)); then
         modprobe -q qemu_fw_cfg 2>/dev/null || true
@@ -217,8 +228,9 @@ main() {
     step 3 partition
     # The disk shown in step 2 must still be the one under this name.
     disk_unchanged "$DISK" "$DISK_SEQ" || die "not erasing $DISK"
-    AIOS_DISK_CHANGED=1
+    # Only a wipe that succeeded changed the disk: a busy disk that refuses it is untouched.
     run_cmd wipefs -a "$DISK"
+    AIOS_DISK_CHANGED=1
     run_cmd sgdisk --zap-all "$DISK"
     run_cmd sgdisk -n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309 "$DISK"
     run_cmd udevadm settle
@@ -275,10 +287,10 @@ main() {
     if ((!V3)); then
         printf '%s\n' "$PACMAN_TEXT" | run_write "$config_dir/files/pacman.conf" 0644
     fi
-    run_cmd git -C "$config_dir" init -q -b main
-    run_cmd git -C "$config_dir" add -A
-    run_cmd git -C "$config_dir" -c user.name=aios -c user.email=aios@localhost \
-        commit -q -m "aios: initial manifest"
+    git_config_repo "$config_dir" init -q -b main
+    git_config_repo "$config_dir" add -A
+    git_config_repo "$config_dir" -c user.name=aios -c user.email=aios@localhost \
+        commit -q --no-verify -m "aios: initial manifest"
     run_cmd install -d -m 0700 "$secrets" "$secrets/passwd"
     printf '%s\n' "$PASSWD_HASH" | run_write "$secrets/passwd/${CFG[USERNAME]}" 0600
     run_cmd cp -a "$LIVE_REPO" "$TOP/@persist/aios/repo"

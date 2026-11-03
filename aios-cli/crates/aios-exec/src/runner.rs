@@ -166,10 +166,22 @@ pub trait CommandRunner {
     /// directory with inode [`SUBVOLUME_ROOT_INO`]. Tests can't make that inode, so
     /// [`FakeRunner::emulate_subvolumes`] counts every directory instead.
     fn is_subvolume_root(&self, meta: &fs::Metadata) -> bool;
+
+    /// fsync the directory `dir`, so the renames and deletes made in it so far are on disk
+    /// before anything that depends on them. A barrier whose order matters, so the fake
+    /// records it (as the call `fsync DIR`).
+    fn sync_dir(&self, dir: &Path) -> Result<(), ExecError>;
 }
 
 fn subvolume_root_inode(meta: &fs::Metadata) -> bool {
     meta.is_dir() && meta.ino() == SUBVOLUME_ROOT_INO
+}
+
+/// `File::open(dir)?.sync_all()`.
+fn fsync_dir(dir: &Path) -> Result<(), ExecError> {
+    fs::File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| ExecError::io(dir, format!("fsync: {e}")))
 }
 
 /// Run `cmd` and turn a non-zero exit into an error naming the command and the last
@@ -298,14 +310,24 @@ impl CommandRunner for RealRunner {
     fn is_subvolume_root(&self, meta: &fs::Metadata) -> bool {
         subvolume_root_inode(meta)
     }
+
+    fn sync_dir(&self, dir: &Path) -> Result<(), ExecError> {
+        fsync_dir(dir)
+    }
 }
 
+/// What [`FakeRunner::on_success`] runs, given the argv.
+pub type Effect = fn(&[&str]);
+
 /// Test double: records every command and answers from a script. Unscripted commands
-/// succeed with empty output.
+/// succeed with empty output. [`CommandRunner::sync_dir`] is recorded and scripted as the
+/// command `fsync DIR`; it syncs nothing.
 #[derive(Debug, Default)]
 pub struct FakeRunner {
     calls: RefCell<Vec<Cmd>>,
     script: Vec<(Vec<String>, Output)>,
+    /// See `on_success`.
+    effects: Vec<(Vec<String>, Effect)>,
     #[cfg(feature = "test-hooks")]
     call_log: Option<PathBuf>,
     emulate_subvolumes: bool,
@@ -358,6 +380,15 @@ impl FakeRunner {
     /// Commands starting with `prefix` exit 1 with `injected failure` on stderr.
     pub fn fail_on(&mut self, prefix: &[&str]) -> &mut FakeRunner {
         self.respond(prefix, Output::failed(1, "injected failure"))
+    }
+
+    /// After each successful command whose argv starts with `prefix`, call `effect` with
+    /// the argv: a side effect the real command has, a check of the state at that moment,
+    /// or a panic.
+    pub fn on_success(&mut self, prefix: &[&str], effect: Effect) -> &mut FakeRunner {
+        let prefix = prefix.iter().map(|w| w.to_string()).collect();
+        self.effects.push((prefix, effect));
+        self
     }
 
     /// Treat plain directories as subvolumes: every directory counts as a subvolume root
@@ -483,12 +514,13 @@ impl CommandRunner for FakeRunner {
             writeln!(file, "{cmd}").map_err(|e| ExecError::io(log, e))?;
         }
         let argv: Vec<&str> = cmd.argv().collect();
+        let matches = |prefix: &Vec<String>| {
+            prefix.len() <= argv.len() && prefix.iter().zip(&argv).all(|(p, a)| p == a)
+        };
         let output = self
             .script
             .iter()
-            .filter(|(prefix, _)| {
-                prefix.len() <= argv.len() && prefix.iter().zip(&argv).all(|(p, a)| p == a)
-            })
+            .filter(|(prefix, _)| matches(prefix))
             .max_by_key(|(prefix, _)| prefix.len())
             .map(|(_, out)| out.clone())
             .unwrap_or_default();
@@ -498,6 +530,11 @@ impl CommandRunner for FakeRunner {
         if let (0, Some(top)) = (output.status, &self.top) {
             self.emulate_top_mount(top, &argv)?;
         }
+        if output.status == 0 {
+            for (_, effect) in self.effects.iter().filter(|(prefix, _)| matches(prefix)) {
+                effect(&argv);
+            }
+        }
         Ok(output)
     }
 
@@ -506,6 +543,16 @@ impl CommandRunner for FakeRunner {
             meta.is_dir()
         } else {
             subvolume_root_inode(meta)
+        }
+    }
+
+    fn sync_dir(&self, dir: &Path) -> Result<(), ExecError> {
+        let out = self.run(&Cmd::new("fsync").arg_path(dir))?;
+        if out.status == 0 {
+            Ok(())
+        } else {
+            let detail = out.stderr_text();
+            Err(ExecError::io(dir, format!("fsync: {}", detail.trim())))
         }
     }
 }

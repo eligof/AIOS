@@ -235,6 +235,55 @@ fn subvolume_emulation_counts_directories_as_subvolume_roots() {
 }
 
 #[test]
+fn the_fake_records_a_directory_sync_as_an_fsync_call() {
+    let mut fake = FakeRunner::new();
+    fake.sync_dir(std::path::Path::new("/efi/EFI/Linux"))
+        .unwrap();
+    assert_eq!(fake.calls(), ["fsync /efi/EFI/Linux"]);
+    fake.fail_on(&["fsync"]);
+    let err = fake
+        .sync_dir(std::path::Path::new("/efi/EFI/Linux"))
+        .unwrap_err();
+    assert_eq!(err.to_string(), "/efi/EFI/Linux: fsync: injected failure");
+}
+
+#[test]
+fn the_real_runner_fsyncs_a_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    RealRunner.sync_dir(dir.path()).unwrap();
+    let missing = dir.path().join("missing");
+    let err = RealRunner.sync_dir(&missing).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        format!(
+            "{}: fsync: No such file or directory (os error 2)",
+            missing.display()
+        )
+    );
+}
+
+fn touch_marker(argv: &[&str]) {
+    fs::write(argv[1], "ran").unwrap();
+}
+
+#[test]
+fn on_success_runs_an_effect_after_matching_successful_commands() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("marker");
+    let mut fake = FakeRunner::new();
+    fake.on_success(&["touch"], touch_marker);
+    fake.fail_on(&["touch", "/never"]);
+    fake.run(&Cmd::new("touch").arg("/never")).unwrap();
+    fake.run(&Cmd::new("other").arg_path(&marker)).unwrap();
+    assert!(
+        !marker.exists(),
+        "failed or unmatched commands have no effect"
+    );
+    fake.run(&Cmd::new("touch").arg_path(&marker)).unwrap();
+    assert_eq!(fs::read_to_string(&marker).unwrap(), "ran");
+}
+
+#[test]
 fn top_mount_emulation_links_the_top_level_entries() {
     let dir = tempfile::tempdir().unwrap();
     let (top, ro) = (dir.path().join("top"), dir.path().join("ro.1"));

@@ -42,6 +42,21 @@ fn many_gens() -> Fixture {
     fx
 }
 
+/// gc deleting gen-`n`, whose UKIs are on the ESP: the UKIs (and an ESP fsync) first,
+/// then the subvolumes.
+fn delete_gen(n: u32) -> String {
+    let gen = GenId(n);
+    format!(
+        "
+        fsync {{esp}}/EFI/Linux
+        btrfs subvolume show {{top}}/@usr-gen-{gen}
+        btrfs subvolume delete --recursive {{top}}/@usr-gen-{gen}
+        btrfs subvolume show {{top}}/@etc-gen-{gen}
+        btrfs subvolume delete --recursive {{top}}/@etc-gen-{gen}
+        "
+    )
+}
+
 fn esp(fx: &Fixture) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(fx.layout.uki_dir())
         .unwrap()
@@ -102,23 +117,12 @@ fn gc_keeps_the_newest_protected_and_gen_one() {
     set_default(&fx, "aios-gen-0003-cachyos.efi");
     let deleted = gc(&fx.runner, &fx.layout, 3).unwrap();
     assert_eq!(deleted, [GenId(2), GenId(4), GenId(5), GenId(6)]);
-    let calls = fx.calls();
-    assert_eq!(
-        calls[0],
-        "mount -t btrfs -o subvolid=5 /dev/mapper/aios {top}"
-    );
-    assert_eq!(calls.last().unwrap(), "umount {top}");
-    assert_eq!(
-        calls[1..5],
-        fx.expand(
-            "
-            btrfs subvolume show {top}/@usr-gen-0002
-            btrfs subvolume delete --recursive {top}/@usr-gen-0002
-            btrfs subvolume show {top}/@etc-gen-0002
-            btrfs subvolume delete --recursive {top}/@etc-gen-0002
-            "
-        )
-    );
+    let mut expected = fx.expand("mount -t btrfs -o subvolid=5 /dev/mapper/aios {top}");
+    for n in [2, 4, 5, 6] {
+        expected.extend(fx.expand(&delete_gen(n)));
+    }
+    expected.extend(fx.expand("btrfs filesystem sync {top}\numount {top}"));
+    assert_eq!(fx.calls(), expected);
     for n in [2, 4, 5, 6] {
         assert!(!fx.layout.subvol(&GenId(n).usr_subvol()).exists());
         assert!(!fx.layout.subvol(&GenId(n).etc_subvol()).exists());

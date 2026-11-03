@@ -7,8 +7,10 @@ use std::path::Path;
 impl Run<'_> {
     /// Spec §4.3 steps 11–12. The UKIs are first copied to the ESP under a `.tmp` name,
     /// which systemd-boot ignores, because they live in the candidate tree that is unmounted
-    /// next. They get their real names only after the subvolume renames, so a bootable UKI
-    /// never exists without its subvolumes.
+    /// next. They get their real names only after the subvolume renames are on disk
+    /// (`btrfs filesystem sync`), so a bootable UKI never exists without its subvolumes, even
+    /// after a power loss. The ESP directory is fsynced before `bootctl set-default ""`, so
+    /// the boot default only moves to an entry that is on disk.
     pub(super) fn finalize(&mut self) -> Result<(), ExecError> {
         let (runner, l) = (self.ctx.runner, self.ctx.layout);
         let uki_dir = l.uki_dir();
@@ -25,10 +27,12 @@ impl Run<'_> {
         }
         rename(&l.subvol(USR_CAND), &l.subvol(&self.gen.usr_subvol()))?;
         rename(&l.subvol(ETC_CAND), &l.subvol(&self.gen.etc_subvol()))?;
+        btrfs::filesystem_sync(runner, &l.top)?;
         for tmp in self.esp_tmp.clone() {
             rename(&tmp, &tmp.with_extension(""))?;
         }
         self.esp_tmp.clear();
+        runner.sync_dir(&uki_dir)?;
         if let Mode::Apply { .. } = self.ctx.mode {
             run_ok(runner, &Cmd::new("bootctl").args(["set-default", ""]))?;
         }

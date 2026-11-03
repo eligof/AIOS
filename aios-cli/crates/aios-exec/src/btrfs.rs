@@ -97,6 +97,17 @@ pub fn mount_top(
     run(runner, cmd.arg_path(device).arg_path(top))
 }
 
+/// `btrfs filesystem sync PATH`: commit the file system holding PATH, so every subvolume
+/// rename, property change and delete made so far is on disk.
+pub fn filesystem_sync(runner: &dyn CommandRunner, path: &Path) -> Result<(), ExecError> {
+    run(
+        runner,
+        Cmd::new("btrfs")
+            .args(["filesystem", "sync"])
+            .arg_path(path),
+    )
+}
+
 /// `mount --bind SRC DST`
 pub fn bind(runner: &dyn CommandRunner, src: &Path, dst: &Path) -> Result<(), ExecError> {
     run(

@@ -3,6 +3,7 @@ mod common;
 use aios_exec::{Output, Step};
 use common::{mkdir, write, Fixture, CLEANUP_MOUNTED, MANIFEST};
 use std::fs;
+use std::path::Path;
 
 const APPLY: &str = "
 mount -t btrfs -o subvolid=5 /dev/mapper/aios {top}
@@ -40,6 +41,8 @@ df --output=avail -B1 {esp}
 umount -R {cand}
 btrfs property set -ts {top}/@usr-cand ro true
 btrfs property set -ts {top}/@etc-cand ro true
+btrfs filesystem sync {top}
+fsync {esp}/EFI/Linux
 bootctl set-default ''
 btrfs subvolume show {top}/@root-cand
 btrfs subvolume delete --recursive {top}/@root-cand
@@ -79,6 +82,8 @@ df --output=avail -B1 {esp}
 umount -R {cand}
 btrfs property set -ts {top}/@usr-cand ro true
 btrfs property set -ts {top}/@etc-cand ro true
+btrfs filesystem sync {top}
+fsync {esp}/EFI/Linux
 btrfs subvolume show {top}/@root-cand
 btrfs subvolume delete --recursive {top}/@root-cand
 ";
@@ -110,6 +115,77 @@ fn golden_bootstrap() {
     let outcome = fx.run().unwrap();
     assert_eq!(fx.calls(), fx.expand(BOOTSTRAP));
     assert_eq!(outcome.gen, aios_gen::GenId(1));
+}
+
+/// Names in `dir`, sorted.
+fn names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+/// At `btrfs filesystem sync TOP`: the subvolumes have their generation names, and the
+/// UKIs are still `.tmp` copies.
+fn at_btrfs_sync(argv: &[&str]) {
+    let top = Path::new(argv[3]);
+    assert!(top.join("@usr-gen-0008").is_dir() && top.join("@etc-gen-0008").is_dir());
+    let esp = names(&top.with_file_name("esp/EFI/Linux"));
+    assert!(
+        esp.contains(&"aios-gen-0008-cachyos+3.efi.tmp".to_string()),
+        "{esp:?}"
+    );
+    assert!(
+        !esp.contains(&"aios-gen-0008-cachyos+3.efi".to_string()),
+        "{esp:?}"
+    );
+}
+
+/// At the ESP fsync: both UKIs have their real names.
+fn at_esp_fsync(argv: &[&str]) {
+    let esp = names(Path::new(argv[1]));
+    for uki in ["aios-gen-0008-cachyos+3.efi", "aios-gen-0008-lts+3.efi"] {
+        assert!(esp.contains(&uki.to_string()), "{esp:?}");
+    }
+    assert!(!esp.iter().any(|n| n.ends_with(".tmp")), "{esp:?}");
+}
+
+#[test]
+fn subvolumes_are_synced_before_ukis_get_their_names_and_those_before_bootctl() {
+    let mut fx = Fixture::booted();
+    fx.runner
+        .on_success(&["btrfs", "filesystem", "sync"], at_btrfs_sync)
+        .on_success(&["fsync"], at_esp_fsync);
+    fx.run().unwrap();
+    let tail: Vec<String> = fx
+        .calls_after("btrfs property set -ts {top}/@etc-cand")
+        .into_iter()
+        .take(3)
+        .collect();
+    assert_eq!(
+        tail,
+        fx.expand(
+            "
+            btrfs filesystem sync {top}
+            fsync {esp}/EFI/Linux
+            bootctl set-default ''
+            "
+        )
+    );
+}
+
+#[test]
+fn a_failed_btrfs_sync_installs_no_uki() {
+    let mut fx = Fixture::booted();
+    fx.runner.fail_on(&["btrfs", "filesystem", "sync"]);
+    let err = fx.run().unwrap_err();
+    assert_eq!(err.step, Step::Finalize);
+    assert_eq!(
+        esp(&fx),
+        ["aios-gen-0006-cachyos.efi", "aios-gen-0007-cachyos.efi"]
+    );
 }
 
 #[test]

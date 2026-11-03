@@ -133,8 +133,8 @@ fn conf_value<'a>(conf: &'a str, key: &str) -> Option<&'a str> {
         .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
 }
 
-/// Spec §4.4: the default home set covers the shell rc, SSH and systemd user-unit
-/// autostart vectors, so a user-level RAT cannot add them.
+/// Spec §4.4: the default home set covers the shell rc, SSH, systemd user-unit and D-Bus
+/// activation autostart vectors, so a user-level RAT cannot add them.
 #[test]
 fn default_home_manages_autostart_vectors() {
     let m = parse_ok(&substitute(&template(), ""));
@@ -164,6 +164,10 @@ fn default_home_manages_autostart_vectors() {
         ),
         (".config/environment.d/", "home/tester/environment.d/"),
         (".local/bin/", "home/tester/bin/"),
+        (
+            ".local/share/dbus-1/services/",
+            "home/tester/local-share-dbus-services/",
+        ),
     ] {
         assert_eq!(
             home.get(target).map(String::as_str),

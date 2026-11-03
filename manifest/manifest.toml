@@ -67,7 +67,8 @@ shell  = "/usr/bin/zsh"
 
 [users.@USERNAME@.home]
 # Read-only bind mounts into the home directory (spec §4.4). A trailing "/" marks a directory.
-# Together they close the shell startup, SSH and systemd user-unit autostart vectors.
+# Together they close the shell startup, SSH, systemd user-unit and D-Bus activation
+# autostart vectors.
 ".zshrc"                         = "home/@USERNAME@/zshrc"
 ".zshenv"                        = "home/@USERNAME@/zshenv"
 ".zprofile"                      = "home/@USERNAME@/zprofile"
@@ -86,3 +87,5 @@ shell  = "/usr/bin/zsh"
 ".local/share/systemd/user/"     = "home/@USERNAME@/local-share-systemd-user/"
 ".config/environment.d/"         = "home/@USERNAME@/environment.d/"
 ".local/bin/"                    = "home/@USERNAME@/bin/"
+# D-Bus activation: the session bus starts a service file found here on first call.
+".local/share/dbus-1/services/"  = "home/@USERNAME@/local-share-dbus-services/"

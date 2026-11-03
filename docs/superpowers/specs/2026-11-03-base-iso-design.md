@@ -186,6 +186,7 @@ shell  = "/usr/bin/zsh"
 ".local/share/systemd/user/"     = "home/eli/local-share-systemd-user/"
 ".config/environment.d/"         = "home/eli/environment.d/"
 ".local/bin/"                    = "home/eli/bin/"
+".local/share/dbus-1/services/"  = "home/eli/local-share-dbus-services/"
 ```
 
 **Validation:** `aios plan` and `aios apply` refuse to run, citing `manifest.toml:line:col`, if any of these hold:
@@ -284,6 +285,7 @@ Each step aborts on failure (or panic). Abort unmounts and deletes the candidate
   - systemd user units: `.config/systemd/user/`, `.config/systemd/user.control/` and `.local/share/systemd/user/`, the per-user unit directories in `~` on the user manager's search path.
   - User session environment: `.config/environment.d/`.
   - PATH shims: `.local/bin/`.
+  - D-Bus activation: `.local/share/dbus-1/services/`. The session bus reads service files there and starts one whenever a client calls its name, so a file planted there would survive a reboot and run on demand.
 - **Effect:** a user-level RAT can't add autostart entries, user units, shell startup hooks, `~/.local/bin` shims or SSH keys. To change these, edit the manifest.
 - **Known limit, nested targets can be bypassed at runtime:** a target below a user-owned directory, such as `.ssh/authorized_keys` or `.config/autostart/`, can be dodged until the next reboot. The user can rename the parent directory, which moves the mount with it, and recreate it unprotected (`mv ~/.ssh ~/.x && mkdir ~/.ssh`). Direct children of the home, like `.zshrc`, can't be dodged this way, because a mount point can't be renamed or removed. A user-planted symlink at a target path could also redirect the bind at boot, and `nofail` would hide that failure. v0.1 mitigation: e2e test (g) checks that a planted symlink target doesn't redirect the bind. Fix: follow-up #7.
 - **Known limit, other autostart vectors:** these also exist, such as compositor configs, `.desktop` overrides, editor plugins, and `~/.config/systemd/user.conf`, whose `DefaultEnvironment=` reaches every user unit. They're added to the manifest defaults when the Cockpit picks the compositor (follow-up #5). Sentinel watches the rest of `/home`.

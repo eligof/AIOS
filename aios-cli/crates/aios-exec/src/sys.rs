@@ -2,7 +2,6 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// `O_NOFOLLOW`, for `OpenOptionsExt::custom_flags`: opening a symlink fails with `ELOOP`.
-#[cfg(feature = "test-hooks")]
 pub(crate) const O_NOFOLLOW: i32 = rustix::fs::OFlags::NOFOLLOW.bits() as i32;
 
 /// The LUKS UUID from `rd.luks.name=<uuid>=aios`. `None` if absent, conflicting, or not a

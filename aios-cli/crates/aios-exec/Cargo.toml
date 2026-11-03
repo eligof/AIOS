@@ -11,7 +11,7 @@ aios-gen = { path = "../aios-gen" }
 aios-manifest = { path = "../aios-manifest" }
 aios-plan = { path = "../aios-plan" }
 aios-render = { path = "../aios-render" }
-rustix = { workspace = true, optional = true }
+rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -22,4 +22,4 @@ tempfile.workspace = true
 
 [features]
 # FakeRunner::from_json_file, behind `aios`'s own `test-hooks`. Never in release builds.
-test-hooks = ["dep:rustix"]
+test-hooks = []

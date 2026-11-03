@@ -11,8 +11,16 @@ pub fn check_trusted_dirs(layout: &Layout, uid: u32) -> Result<(), ExecError> {
     check_dir(&layout.secrets, "secrets directory", uid)
 }
 
-fn check_dir(path: &Path, what: &str, uid: u32) -> Result<(), ExecError> {
-    let meta = fs::metadata(path).map_err(|e| ExecError::io(path, e))?;
+/// `path` is a directory itself (not a symlink to one), owned by `uid` and not group- or
+/// world-writable. `what` names it in the error.
+pub(crate) fn check_dir(path: &Path, what: &str, uid: u32) -> Result<(), ExecError> {
+    let meta = fs::symlink_metadata(path).map_err(|e| ExecError::io(path, e))?;
+    if !meta.is_dir() {
+        return Err(ExecError(format!(
+            "{what} {} must be a real directory, not a symlink",
+            path.display()
+        )));
+    }
     if meta.uid() != uid || meta.mode() & 0o022 != 0 {
         return Err(ExecError(format!(
             "{what} {} must be root-owned and not group/world-writable",

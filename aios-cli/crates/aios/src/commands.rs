@@ -141,7 +141,7 @@ fn gc(cx: &Context, keep: usize) -> Result<(), Failure> {
 fn passwd(cx: &Context, user: &str) -> Result<(), Failure> {
     let _lock = cx.lock(true)?;
     let password = read_password(cx, user)?;
-    let path = ops::passwd(cx.runner(), &cx.layout, user, &password)?;
+    let path = ops::passwd(cx.runner(), &cx.layout, user, &password, cx.trusted_uid())?;
     println!("wrote {}; run `aios apply` to use it", path.display());
     Ok(())
 }

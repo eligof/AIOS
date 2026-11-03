@@ -120,3 +120,82 @@ fn default_package_set_has_cachyos_keyring_and_aios_base() {
         );
     }
 }
+
+fn default_file(name: &str) -> String {
+    let path = default_manifest_dir().join("files").join(name);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()))
+}
+
+/// `KEY=value` settings of a usbguard-daemon.conf, comments skipped.
+fn conf_value<'a>(conf: &'a str, key: &str) -> Option<&'a str> {
+    conf.lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .find_map(|l| l.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// Spec §4.4: the default home set covers the shell rc, SSH and systemd user-unit
+/// autostart vectors, so a user-level RAT cannot add them.
+#[test]
+fn default_home_manages_autostart_vectors() {
+    let m = parse_ok(&substitute(&template(), ""));
+    let home = &m.users["tester"].home;
+    for (target, source) in [
+        (".zshrc", "home/tester/zshrc"),
+        (".zshenv", "home/tester/zshenv"),
+        (".zprofile", "home/tester/zprofile"),
+        (".zlogin", "home/tester/zlogin"),
+        (".profile", "home/tester/profile"),
+        (".bashrc", "home/tester/bashrc"),
+        (".bash_profile", "home/tester/bash_profile"),
+        (".ssh/authorized_keys", "home/tester/authorized_keys"),
+        (".ssh/authorized_keys2", "home/tester/authorized_keys2"),
+        (".ssh/rc", "home/tester/ssh-rc"),
+        (".config/autostart/", "home/tester/autostart/"),
+        (".config/systemd/user/", "home/tester/systemd-user/"),
+        (
+            ".config/systemd/user.control/",
+            "home/tester/systemd-user-control/",
+        ),
+        (
+            ".local/share/systemd/user/",
+            "home/tester/local-share-systemd-user/",
+        ),
+        (".config/environment.d/", "home/tester/environment.d/"),
+        (".local/bin/", "home/tester/bin/"),
+    ] {
+        assert_eq!(
+            home.get(target).map(String::as_str),
+            Some(source),
+            "home entry {target}"
+        );
+    }
+}
+
+/// Spec §5.5: only root may talk to usbguard, so policy changes go through run0.
+#[test]
+fn usbguard_ipc_is_root_only() {
+    let conf = default_file("usbguard-daemon.conf");
+    assert_eq!(conf_value(&conf, "IPCAllowedUsers"), Some("root"));
+    assert_eq!(conf_value(&conf, "IPCAllowedGroups"), Some(""));
+}
+
+/// The unsigned local repo comes last, so it can never shadow a signed package.
+#[test]
+fn aios_local_is_the_last_pacman_repo() {
+    let conf = default_file("pacman.conf");
+    let sections: Vec<&str> = conf
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.starts_with('[') && l.ends_with(']'))
+        .collect();
+    assert_eq!(sections.first(), Some(&"[options]"));
+    assert_eq!(sections.last(), Some(&"[aios-local]"), "{sections:?}");
+    assert_eq!(sections.iter().filter(|s| **s == "[aios-local]").count(), 1);
+}
+
+/// RFC 4890: MLD listener queries must reach the host, along with NDP.
+#[test]
+fn nftables_accepts_mld_listener_query() {
+    let conf = default_file("nftables.conf");
+    assert!(conf.contains("mld-listener-query"), "{conf}");
+}

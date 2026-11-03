@@ -1,0 +1,2 @@
+# ~/.ssh/rc: managed by the AIOS manifest, bind-mounted read-only. sshd runs this file
+# at every SSH login; AIOS keeps it empty so nothing can hook in here.

@@ -1,0 +1,3 @@
+# ~/.zprofile: managed by the AIOS manifest, bind-mounted read-only, so nothing can hook
+# into zsh startup here. Change it in the manifest repo
+# (/persist/aios/config/home/<user>/zprofile), then `aios apply` and reboot.

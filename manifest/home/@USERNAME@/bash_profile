@@ -1,0 +1,5 @@
+# ~/.bash_profile: managed by the AIOS manifest, bind-mounted read-only. bash login
+# shells read this instead of ~/.profile, so it sources both ~/.profile and ~/.bashrc.
+
+[ -r ~/.profile ] && . ~/.profile
+[ -r ~/.bashrc ] && . ~/.bashrc

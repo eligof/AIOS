@@ -1,0 +1,7 @@
+# ~/.bashrc: managed by the AIOS manifest, bind-mounted read-only. Change it in the
+# manifest repo (/persist/aios/config/home/<user>/bashrc), then `aios apply` and reboot.
+
+# Interactive shells only.
+[[ $- == *i* ]] || return
+
+PS1='\u@\h \w \$ '

@@ -48,6 +48,10 @@ class SerialClosed(AssertionError):
     """QEMU closed the serial socket (the VM is gone)."""
 
 
+class SerialFailure(AssertionError):
+    """The guest printed a failure while the harness waited for something else."""
+
+
 class Serial:
     """One connection to the guest's serial console."""
 
@@ -185,6 +189,18 @@ class Serial:
         if self._log:
             self._log.close()
             self._log = None
+
+
+def expect_unless(serial: Serial, pattern: str, failure: str, timeout: float) -> re.Match[str]:
+    """Wait for `pattern` like Serial.expect, but if `failure` shows up first, fail at once
+    with what it matched."""
+    match = serial.expect(re.compile(f"(?P<want>{pattern})|(?P<failure>{failure})"), timeout)
+    if match.group("failure") is not None:
+        raise SerialFailure(
+            f"{match.group('failure').strip()} (while waiting for {pattern!r}); "
+            f"last output:\n{serial.tail()}"
+        )
+    return match
 
 
 def wrap_command(cmd: str, n: int) -> str:

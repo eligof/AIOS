@@ -9,11 +9,12 @@ The steps share one VM and run in order; after a failure the rest xfail.
 
 from __future__ import annotations
 
+import re
 import shutil
 
 import pytest
 
-from .serial import Serial, Shell, choose_boot_entry, login_root_shell, unlock_luks
+from .serial import Serial, Shell, choose_boot_entry, expect_unless, login_root_shell, unlock_luks
 from .vm import E2E_INSTALL, Vm, default_config, missing_requirements
 
 USER = E2E_INSTALL["USERNAME"]
@@ -34,6 +35,10 @@ ADD_FAIL_HEALTH = (
     f"extra_cmdline = [\"console=ttyS0,115200\", \"aios.test.fail_health=1\"]/' {MANIFEST}"
 )
 
+# How aios-install says it failed: die's error line, or the exit trap's line for a command
+# that failed under set -e (installer/lib/common.sh, cleanup.sh). The whole line.
+INSTALL_FAILURE = r"aios-install: (?:error: |step \d+ \([^)\n]*\) failed)[^\n]*\n"
+
 INSTALL_TIMEOUT = 90 * 60
 BOOT_TIMEOUT = 10 * 60
 APPLY_TIMEOUT = 60 * 60
@@ -47,6 +52,12 @@ pytestmark = [
         reason="; ".join(missing_requirements(CONFIG)) or "ready",
     ),
 ]
+
+
+def expect_install(serial: Serial, pattern: str, timeout: float) -> re.Match[str]:
+    """Wait for aios-install to print `pattern`; fail at once when it reports a failure,
+    instead of after the timeout."""
+    return expect_unless(serial, pattern, INSTALL_FAILURE, timeout)
 
 
 class Machine:
@@ -94,11 +105,12 @@ def machine(request: pytest.FixtureRequest):
 
 def test_01_unattended_install_from_the_iso(machine: Machine) -> None:
     """The serial boot entry, then aios-install from the fw_cfg config, then the reboot."""
-    choose_boot_entry(machine.serial, ISO_SERIAL_TITLE, ISO_SERIAL_KEY, BOOT_TIMEOUT)
-    machine.serial.expect(r"aios-install: step 1/13: preflight", BOOT_TIMEOUT)
-    machine.serial.expect(r"gen-0001 built in /mnt/aios-top", INSTALL_TIMEOUT)
-    machine.serial.expect(r"aios-install: installation complete", 10 * 60)
-    machine.serial.expect(r"aios-install: rebooting into AIOS", 60)
+    serial = machine.serial
+    choose_boot_entry(serial, ISO_SERIAL_TITLE, ISO_SERIAL_KEY, BOOT_TIMEOUT)
+    expect_install(serial, r"aios-install: step 1/13: preflight", BOOT_TIMEOUT)
+    expect_install(serial, r"gen-0001 built in /mnt/aios-top", INSTALL_TIMEOUT)
+    expect_install(serial, r"aios-install: installation complete", 10 * 60)
+    expect_install(serial, r"aios-install: rebooting into AIOS", 60)
 
 
 def test_02_gen1_boots_with_secure_boot_and_plan_is_clean(machine: Machine) -> None:

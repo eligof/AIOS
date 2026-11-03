@@ -480,7 +480,68 @@ def test_boot_menu_luks_and_login_are_answered_in_order(sock_path: Path) -> None
 
 # --- test_e2e.py: the boot menu position and the manifest edits it relies on -------------
 
-from .test_e2e import ADD_FAIL_HEALTH, ADD_TREE, ISO_SERIAL_KEY, ISO_SERIAL_TITLE, MANIFEST  # noqa: E402
+from .serial import SerialFailure  # noqa: E402
+from .test_e2e import (  # noqa: E402
+    ADD_FAIL_HEALTH,
+    ADD_TREE,
+    ISO_SERIAL_KEY,
+    ISO_SERIAL_TITLE,
+    MANIFEST,
+    expect_install,
+)
+
+GEN1_BUILT = r"gen-0001 built in /mnt/aios-top"
+
+
+def test_the_install_wait_fails_at_once_on_an_error_line_and_quotes_all_of_it(sock_path: Path) -> None:
+    console = FakeConsole(
+        sock_path,
+        [
+            b"aios-install: step 1/13: preflight\r\n",
+            b"aios-install: error: /dev/vda is 10 GiB",  # the rest of the line comes later
+            b"; AIOS needs at least 20 GiB\r\n",
+        ],
+        gap=0.2,
+    )
+    serial = connect(sock_path)
+
+    started = time.monotonic()
+    with pytest.raises(SerialFailure) as err:
+        expect_install(serial, GEN1_BUILT, 60)
+
+    assert time.monotonic() - started < 5
+    assert str(err.value).startswith(
+        "aios-install: error: /dev/vda is 10 GiB; AIOS needs at least 20 GiB (while waiting for"
+    )
+    serial.close()
+    console.join()
+
+
+def test_the_install_wait_fails_on_the_exit_traps_line_for_a_failed_command(sock_path: Path) -> None:
+    # A command that fails under set -e gets no "error:" line, only the trap's (cleanup.sh).
+    console = FakeConsole(
+        sock_path, [b"aios-install: step 5/13: bootstrap\r\naios-install: step 5 (bootstrap) failed (exit 1)\r\n"]
+    )
+    serial = connect(sock_path)
+
+    with pytest.raises(SerialFailure, match=r"^aios-install: step 5 \(bootstrap\) failed \(exit 1\) "):
+        expect_install(serial, GEN1_BUILT, 5)
+    serial.close()
+    console.join()
+
+
+def test_the_install_wait_returns_on_progress_and_the_next_wait_sees_a_later_error(sock_path: Path) -> None:
+    console = FakeConsole(
+        sock_path,
+        [b"aios-install: step 5/13: bootstrap\r\ngen-0001 built in /mnt/aios-top\r\naios-install: error: sbctl failed\r\n"],
+    )
+    serial = connect(sock_path)
+
+    assert expect_install(serial, GEN1_BUILT, 5).group(0) == "gen-0001 built in /mnt/aios-top"
+    with pytest.raises(SerialFailure, match="^aios-install: error: sbctl failed "):
+        expect_install(serial, r"aios-install: installation complete", 5)
+    serial.close()
+    console.join()
 
 
 def test_the_serial_entry_is_the_second_in_the_iso_boot_menu() -> None:

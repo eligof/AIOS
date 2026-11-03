@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Fake btrfs for tests/bats/aios-root.bats.
+# A "subvolume" is a directory under $AIOS_TOP that contains a .subvol marker file.
+# Every call is appended to $CALLS as one line: "btrfs <args>".
+set -euo pipefail
+
+echo "btrfs $*" >>"$CALLS"
+
+is_subvol() {
+    [ -f "$1/.subvol" ]
+}
+
+# Subvolumes strictly below $1, as paths relative to $AIOS_TOP, sorted.
+nested_subvols() {
+    find "$1" -mindepth 2 -name .subvol | sort | while IFS= read -r marker; do
+        rel=${marker%/.subvol}
+        printf '%s\n' "${rel#"$AIOS_TOP"/}"
+    done
+}
+
+[ "${1:-}" = subvolume ] || { echo "fake btrfs: unsupported: $*" >&2; exit 2; }
+case "${2:-}" in
+    snapshot)
+        src=$3 dst=$4
+        is_subvol "$src" || { echo "ERROR: not a subvolume: $src" >&2; exit 1; }
+        [ ! -e "$dst" ] || { echo "ERROR: target path already exists: $dst" >&2; exit 1; }
+        mkdir "$dst"
+        cp -a "$src/." "$dst/"
+        echo "Create a snapshot of '$src' in '$dst'"
+        ;;
+    delete)
+        target=$3
+        is_subvol "$target" || { echo "ERROR: not a subvolume: $target" >&2; exit 1; }
+        if [ -n "$(nested_subvols "$target")" ]; then
+            echo "ERROR: Could not destroy subvolume/snapshot: Directory not empty" >&2
+            exit 1
+        fi
+        rm -rf "$target"
+        echo "Delete subvolume '$target'"
+        ;;
+    list)
+        [ "${3:-}" = -o ] || { echo "fake btrfs: only 'list -o PATH' is supported" >&2; exit 2; }
+        id=300
+        nested_subvols "$4" | while IFS= read -r rel; do
+            id=$((id + 1))
+            echo "ID $id gen 10 top level 5 path $rel"
+        done
+        ;;
+    *)
+        echo "fake btrfs: unsupported: $*" >&2
+        exit 2
+        ;;
+esac

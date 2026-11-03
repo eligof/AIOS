@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Fake mount/umount for tests/bats/aios-root.bats: records "<name> <args>" in $CALLS and succeeds.
+set -euo pipefail
+
+echo "${0##*/} $*" >>"$CALLS"

@@ -82,6 +82,14 @@ impl Layout {
         self.config.join("manifest.toml")
     }
 
+    /// Where a read-only command mounts the top level: `ro.<pid>` next to `top`
+    /// (`/run/aios/ro.<pid>`). Read-only commands share the lock, so each needs its own
+    /// mount point.
+    pub fn ro_top(&self) -> PathBuf {
+        self.top
+            .with_file_name(format!("ro.{}", std::process::id()))
+    }
+
     /// A subvolume in the top level, e.g. `@usr-gen-0007`.
     pub fn subvol(&self, name: &str) -> PathBuf {
         self.top.join(name)

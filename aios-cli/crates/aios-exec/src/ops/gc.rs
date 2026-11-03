@@ -9,7 +9,7 @@ pub fn gc(
     layout: &Layout,
     keep: usize,
 ) -> Result<Vec<GenId>, ExecError> {
-    with_top(runner, layout, false, || gc_mounted(runner, layout, keep))
+    with_top(runner, layout, false, |top| gc_mounted(runner, top, keep))
 }
 
 /// Delete generations beyond the newest `keep`, never the booted one, the default (the

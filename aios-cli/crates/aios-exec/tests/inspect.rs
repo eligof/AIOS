@@ -102,11 +102,41 @@ fn gen_list_mounts_the_top_level_read_only() {
         fx.calls(),
         fx.expand(
             "
-            mount -t btrfs -o subvolid=5,ro /dev/mapper/aios {top}
-            umount {top}
+            mount -t btrfs -o subvolid=5,ro /dev/mapper/aios {ro}
+            umount {ro}
             "
         )
     );
+}
+
+#[test]
+fn readers_mount_at_a_private_directory_and_remove_it() {
+    let fx = machine();
+    let ro = fx.layout.ro_top();
+    assert_ne!(ro, fx.layout.top);
+    gen_list(&fx.runner, &fx.layout).unwrap();
+    status(&fx.runner, &fx.layout).unwrap();
+    assert!(!ro.exists(), "{} left behind", ro.display());
+    assert!(fx.layout.subvol("@etc-gen-0007").is_dir(), "top untouched");
+}
+
+#[test]
+fn a_failed_read_only_mount_leaves_no_directory() {
+    let mut fx = machine();
+    fx.runner.fail_on(&["mount"]);
+    let err = gen_list(&fx.runner, &fx.layout).unwrap_err();
+    assert!(err.to_string().contains("injected failure"), "{err}");
+    assert_eq!(fx.calls().len(), 1, "no umount after a failed mount");
+    assert!(!fx.layout.ro_top().exists());
+}
+
+#[test]
+fn a_failed_unmount_is_reported_and_keeps_the_mount_point() {
+    let mut fx = machine();
+    fx.runner.fail_on(&["umount"]);
+    let err = gen_list(&fx.runner, &fx.layout).unwrap_err();
+    assert!(err.to_string().starts_with("`umount "), "{err}");
+    assert!(fx.layout.ro_top().is_dir(), "still mounted, so not removed");
 }
 
 /// The live /etc and the booted snapshot, identical except for a few runtime changes.
@@ -181,7 +211,7 @@ drift (discarded at the next boot):
     );
     assert_eq!(
         fx.calls()[0],
-        "mount -t btrfs -o subvolid=5,ro /dev/mapper/aios {top}"
+        "mount -t btrfs -o subvolid=5,ro /dev/mapper/aios {ro}"
     );
 }
 

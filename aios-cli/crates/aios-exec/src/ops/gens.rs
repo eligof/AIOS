@@ -17,7 +17,7 @@ pub struct GenRow {
 
 /// `aios gen list`: mount the top level read-only, read every generation, unmount.
 pub fn gen_list(runner: &dyn CommandRunner, layout: &Layout) -> Result<Vec<GenRow>, ExecError> {
-    with_top(runner, layout, true, || gen_rows(layout))
+    with_top(runner, layout, true, gen_rows)
 }
 
 /// Every complete generation in the (mounted) top level, ascending.

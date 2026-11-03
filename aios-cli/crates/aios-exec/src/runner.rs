@@ -4,9 +4,7 @@ use std::fmt;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
-#[cfg(feature = "test-hooks")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// One command line. `stdin`, when set, is written to the child's standard input. It is
@@ -292,6 +290,10 @@ pub struct FakeRunner {
     #[cfg(feature = "test-hooks")]
     call_log: Option<PathBuf>,
     emulate_subvolumes: bool,
+    /// See `emulate_top_mounts`.
+    top: Option<PathBuf>,
+    /// Emulated top-level mounts: each mount point with the symlinks made in it.
+    top_mounts: RefCell<Vec<(PathBuf, Vec<PathBuf>)>>,
 }
 
 /// `AIOS_FAKE_RUNNER` file format.
@@ -303,6 +305,9 @@ struct Script {
     respond: Vec<Scripted>,
     #[serde(default)]
     fail_on: Vec<Vec<String>>,
+    /// `emulate_top_mounts` with this top level.
+    #[serde(default)]
+    emulate_top: Option<PathBuf>,
 }
 
 #[cfg(feature = "test-hooks")]
@@ -344,6 +349,15 @@ impl FakeRunner {
         self
     }
 
+    /// Emulate mounting the btrfs top level elsewhere than `top` (where readers mount it):
+    /// a successful `mount -t btrfs -o subvolid=5[,...] DEVICE DIR` with DIR other than
+    /// `top` puts a symlink to each entry of `top` into DIR, and `umount DIR` removes them.
+    /// Mounting at `top` itself changes nothing.
+    pub fn emulate_top_mounts(&mut self, top: impl Into<PathBuf>) -> &mut FakeRunner {
+        self.top = Some(top.into());
+        self
+    }
+
     /// Every command run so far, in `Display` form.
     pub fn calls(&self) -> Vec<String> {
         self.calls.borrow().iter().map(Cmd::to_string).collect()
@@ -355,7 +369,7 @@ impl FakeRunner {
     }
 
     /// Load a script (`{"respond": [{"argv": [..], "status": 0, "stdout": "", "stderr": ""}],
-    /// "fail_on": [[..]]}`) and append each call to `<path>.calls`, one line per call
+    /// "fail_on": [[..]], "emulate_top": "<top>"}`, every key optional) and append each call to `<path>.calls`, one line per call
     /// (never through a symlink). Only with the `test-hooks` feature: the `aios` CLI tests
     /// drive the binary with it.
     #[cfg(feature = "test-hooks")]
@@ -379,6 +393,9 @@ impl FakeRunner {
             let argv: Vec<&str> = prefix.iter().map(String::as_str).collect();
             fake.fail_on(&argv);
         }
+        if let Some(top) = script.emulate_top {
+            fake.emulate_top_mounts(top);
+        }
         let mut log = path.as_os_str().to_owned();
         log.push(".calls");
         fake.call_log = Some(PathBuf::from(log));
@@ -395,6 +412,37 @@ impl FakeRunner {
             }
             _ => Ok(()),
         }
+    }
+
+    fn emulate_top_mount(&self, top: &Path, argv: &[&str]) -> Result<(), ExecError> {
+        let io = |p: &Path, e: std::io::Error| ExecError::io(p, e);
+        match argv {
+            ["mount", "-t", "btrfs", "-o", options, _device, dir]
+                if options.split(',').any(|o| o == "subvolid=5") && Path::new(dir) != top =>
+            {
+                let dir = Path::new(dir);
+                let mut links = Vec::new();
+                for entry in fs::read_dir(top).map_err(|e| io(top, e))? {
+                    let name = entry.map_err(|e| io(top, e))?.file_name();
+                    let link = dir.join(&name);
+                    std::os::unix::fs::symlink(top.join(&name), &link).map_err(|e| io(&link, e))?;
+                    links.push(link);
+                }
+                self.top_mounts
+                    .borrow_mut()
+                    .push((dir.to_path_buf(), links));
+            }
+            ["umount", dir] => {
+                let mut mounts = self.top_mounts.borrow_mut();
+                if let Some(at) = mounts.iter().rposition(|(d, _)| d == Path::new(dir)) {
+                    for link in mounts.remove(at).1 {
+                        fs::remove_file(&link).map_err(|e| io(&link, e))?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 
@@ -424,6 +472,9 @@ impl CommandRunner for FakeRunner {
             .unwrap_or_default();
         if output.status == 0 && self.emulate_subvolumes {
             self.emulate(&argv)?;
+        }
+        if let (0, Some(top)) = (output.status, &self.top) {
+            self.emulate_top_mount(top, &argv)?;
         }
         Ok(output)
     }

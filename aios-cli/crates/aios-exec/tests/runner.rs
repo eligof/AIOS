@@ -94,13 +94,27 @@ fn run_ok_keeps_the_last_three_stderr_lines() {
 fn json_script_answers_and_logs_every_call() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("fake.json");
+    let top = dir.path().join("top");
+    fs::create_dir_all(top.join("@usr-gen-0001")).unwrap();
+    fs::create_dir_all(dir.path().join("ro")).unwrap();
     fs::write(
         &script,
-        r#"{"respond": [{"argv": ["findmnt", "-no", "UUID"], "stdout": "7A1B-2C3D\n"}],
-            "fail_on": [["bootctl"]]}"#,
+        format!(
+            r#"{{"respond": [{{"argv": ["findmnt", "-no", "UUID"], "stdout": "7A1B-2C3D\n"}}],
+                "fail_on": [["bootctl"]], "emulate_top": "{}"}}"#,
+            top.display()
+        ),
     )
     .unwrap();
     let fake = FakeRunner::from_json_file(&script).unwrap();
+    let ro = dir.path().join("ro");
+    fake.run(
+        &Cmd::new("mount")
+            .args(["-t", "btrfs", "-o", "subvolid=5,ro", "x"])
+            .arg_path(&ro),
+    )
+    .unwrap();
+    assert!(ro.join("@usr-gen-0001").is_dir());
     let uuid = fake
         .run(&Cmd::new("findmnt").args(["-no", "UUID", "/efi"]))
         .unwrap();
@@ -111,7 +125,10 @@ fn json_script_answers_and_logs_every_call() {
     assert_eq!(bootctl.status, 1);
     assert_eq!(
         fs::read_to_string(dir.path().join("fake.json.calls")).unwrap(),
-        "findmnt -no UUID /efi\nbootctl set-default ''\n"
+        format!(
+            "mount -t btrfs -o subvolid=5,ro x {}\nfindmnt -no UUID /efi\nbootctl set-default ''\n",
+            ro.display()
+        )
     );
 }
 
@@ -169,6 +186,31 @@ fn subvolume_emulation_uses_plain_directories() {
     assert!(
         !top.join("@etc-cand").exists(),
         "a failed command has no effect"
+    );
+}
+
+#[test]
+fn top_mount_emulation_links_the_top_level_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let (top, ro) = (dir.path().join("top"), dir.path().join("ro.1"));
+    fs::create_dir_all(top.join("@etc-gen-0007")).unwrap();
+    fs::create_dir_all(&ro).unwrap();
+    let mut fake = FakeRunner::new();
+    fake.emulate_top_mounts(&top);
+    let mount = |dst: &std::path::Path| {
+        Cmd::new("mount")
+            .args(["-t", "btrfs", "-o", "subvolid=5,ro", "/dev/mapper/aios"])
+            .arg_path(dst)
+    };
+    fake.run(&mount(&ro)).unwrap();
+    assert!(ro.join("@etc-gen-0007").is_dir());
+    fake.run(&Cmd::new("umount").arg_path(&ro)).unwrap();
+    assert_eq!(fs::read_dir(&ro).unwrap().count(), 0);
+    fake.run(&mount(&top)).unwrap();
+    fake.run(&Cmd::new("umount").arg_path(&top)).unwrap();
+    assert!(
+        top.join("@etc-gen-0007").is_dir(),
+        "mounting at top itself is a no-op"
     );
 }
 

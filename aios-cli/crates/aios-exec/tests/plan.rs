@@ -79,13 +79,13 @@ fn plan_mounts_read_only_and_asks_the_running_system() {
         fx.calls(),
         fx.expand(
             "
-            mount -t btrfs -o subvolid=5,ro /dev/mapper/aios {top}
+            mount -t btrfs -o subvolid=5,ro /dev/mapper/aios {ro}
             pacman -Qqe
             systemctl is-enabled -- NetworkManager.service
             systemctl is-enabled -- bluetooth.service
             systemctl is-enabled -- fwupd-refresh.timer
             systemctl is-enabled -- sshd.socket
-            umount {top}
+            umount {ro}
             "
         )
     );
@@ -122,5 +122,6 @@ fn a_missing_snapshot_still_unmounts() {
         err.to_string().ends_with("@etc-gen-0007 is missing"),
         "{err}"
     );
-    assert_eq!(fx.calls().last().unwrap(), "umount {top}");
+    assert_eq!(fx.calls().last().unwrap(), "umount {ro}");
+    assert!(!fx.layout.ro_top().exists());
 }

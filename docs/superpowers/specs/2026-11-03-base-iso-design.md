@@ -218,7 +218,7 @@ shell  = "/usr/bin/zsh"
 | `aios tpm enroll` | Requires Secure Boot enabled (`bootctl status`). Runs `systemd-cryptenroll --tpm2-device=auto --tpm2-with-pin=yes --tpm2-pcrs=7 /dev/disk/by-uuid/<LUKS-UUID>`. Passphrase and recovery slots are kept |
 | `aios bootstrap --target <top> --esp <esp> --manifest <path>` | Installer-only. Builds gen-1 inside an already created btrfs top level mounted at `<top>`. Same steps as apply, except step 2 creates empty candidates and step 4 uses `pacstrap` |
 
-All mutating commands require root (run via `run0`). They take an exclusive `flock` on `/run/aios.lock`, and each step logs to stderr and the journal (`SYSLOG_IDENTIFIER=aios`).
+All mutating commands require root (run via `run0`). They take an exclusive `flock` on `/run/aios.lock`, and each step logs to stderr and the journal (`SYSLOG_IDENTIFIER=aios`). The read-only commands (`plan`, `status`, `gen list`) take a shared lock, so several can run at once. Each mounts the top level read-only at its own `/run/aios/ro.<pid>`, which it removes again, even if it fails.
 
 ### 4.3 Apply algorithm
 

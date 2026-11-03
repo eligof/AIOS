@@ -221,6 +221,7 @@ impl Fixture {
         let explicit = format!("{}\nnano\n", manifest.package_set().join("\n"));
         runner
             .emulate_subvolumes()
+            .emulate_top_mounts(&l.top)
             .respond(
                 &["git", "-C", &l.config.display().to_string(), "rev-parse"],
                 Output::ok("3f9c2a1\n"),
@@ -283,9 +284,9 @@ impl Fixture {
         calls
     }
 
-    /// `{top}`, `{cand}`, `{config}`, `{persist}`, `{log}`, `{home}`, `{esp}` and `{run}`
-    /// (the tempdir root) replaced by their paths; `{set}` by the package set. One entry
-    /// per non-empty line.
+    /// `{top}`, `{cand}`, `{config}`, `{persist}`, `{log}`, `{home}`, `{esp}`, `{ro}`
+    /// (where readers mount the top level) and `{run}` (the tempdir root) replaced by
+    /// their paths; `{set}` by the package set. One entry per non-empty line.
     pub fn expand(&self, text: &str) -> Vec<String> {
         let set = self.manifest.package_set().join(" ");
         text.lines()
@@ -307,6 +308,7 @@ impl Fixture {
             ("{home}", l.home.display().to_string()),
             ("{esp}", l.esp.display().to_string()),
             ("{run}", self.dir.path().display().to_string()),
+            ("{ro}", l.ro_top().display().to_string()),
         ];
         pairs.sort_by_key(|(_, path)| std::cmp::Reverse(path.len()));
         pairs

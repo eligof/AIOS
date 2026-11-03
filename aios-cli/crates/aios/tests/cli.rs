@@ -1,10 +1,12 @@
 //! The `aios` binary end to end, with `AIOS_FAKE_RUNNER` and every path in a tempdir.
+//! Needs the `test-hooks` feature (the binary reads no `AIOS_*` variable without it).
 
 use rustix::fs::{flock, FlockOperation};
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use tempfile::TempDir;
 
 const LUKS_UUID: &str = "0b6c2e7f-5d0a-4c2e-9a71-3f1d2c4b5a69";
@@ -41,14 +43,12 @@ shell = "/usr/bin/zsh"
 "#;
 
 /// Answers for the commands `aios plan` and `aios passwd` run.
-const SCRIPT: &str = r#"{
-  "respond": [
+const RESPOND: &str = r#"[
     {"argv": ["findmnt"], "stdout": "7A1B-2C3D\n"},
     {"argv": ["pacman", "-Qqe"], "stdout": "zsh\n"},
     {"argv": ["systemctl", "is-enabled"], "stdout": "enabled\n"},
     {"argv": ["mkpasswd"], "stdout": "$y$j9T$abc$def\n"}
-  ]
-}"#;
+]"#;
 
 /// A booted gen-1 machine in a tempdir.
 struct Machine {
@@ -83,8 +83,19 @@ impl Machine {
         );
         fs::create_dir_all(m.path("top/@usr-gen-0001")).unwrap();
         fs::create_dir_all(m.path("esp/EFI/Linux")).unwrap();
-        m.write("fake.json", SCRIPT, 0o644);
+        m.script(RESPOND, "[]");
         m
+    }
+
+    /// Write the fake runner's script: these `respond` and `fail_on` lists, and the top
+    /// level emulated wherever a reader mounts it.
+    fn script(&self, respond: &str, fail_on: &str) {
+        let top = self.path("top");
+        let script = format!(
+            r#"{{"respond": {respond}, "fail_on": {fail_on}, "emulate_top": "{}"}}"#,
+            top.display()
+        );
+        self.write("fake.json", &script, 0o644);
     }
 
     fn path(&self, rel: &str) -> PathBuf {
@@ -99,6 +110,11 @@ impl Machine {
     }
 
     fn aios(&self, args: &[&str]) -> Output {
+        self.aios_with_stdin(args, "").0
+    }
+
+    /// Run `aios ARGS` with `stdin` as its standard input. Returns its pid too.
+    fn aios_with_stdin(&self, args: &[&str], stdin: &str) -> (Output, u32) {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_aios"));
         cmd.args(args)
             .env("AIOS_FAKE_RUNNER", self.path("fake.json"))
@@ -125,7 +141,19 @@ impl Machine {
         ] {
             cmd.env(var, self.path(rel));
         }
-        cmd.output().unwrap()
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let written = child.stdin.take().unwrap().write_all(stdin.as_bytes());
+        // A command that never reads its input may exit first.
+        if let Err(e) = written {
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+        }
+        (child.wait_with_output().unwrap(), pid)
     }
 
     fn calls(&self) -> String {
@@ -175,18 +203,27 @@ fn usage_errors_exit_1() {
 #[test]
 fn plan_prints_the_plan() {
     let m = Machine::new();
-    let out = m.aios(&["plan"]);
+    let (out, pid) = m.aios_with_stdin(&["plan"], "");
     assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));
     let stdout = text(&out.stdout);
     assert!(stdout.contains("/etc:\n"), "{stdout}");
     assert!(stdout.contains("  + /etc/hostname\n"), "{stdout}");
     assert!(stdout.contains("  ~ /etc/passwd\n"), "{stdout}");
+    let ro = m.path(&format!("ro.{pid}"));
     let calls = m.calls();
-    assert!(calls.starts_with(&format!(
-        "findmnt -no UUID {}\nmount -t btrfs -o subvolid=5,ro /dev/mapper/aios {}\n",
-        m.path("esp").display(),
-        m.path("top").display()
-    )));
+    assert!(
+        calls.starts_with(&format!(
+            "findmnt -no UUID {}\nmount -t btrfs -o subvolid=5,ro /dev/mapper/aios {}\n",
+            m.path("esp").display(),
+            ro.display()
+        )),
+        "{calls}"
+    );
+    assert!(
+        calls.ends_with(&format!("umount {}\n", ro.display())),
+        "{calls}"
+    );
+    assert!(!ro.exists(), "the reader's mount point is removed");
 }
 
 #[test]

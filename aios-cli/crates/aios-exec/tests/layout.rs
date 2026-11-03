@@ -113,3 +113,16 @@ fn persist_path_maps_onto_the_persist_field() {
         Path::new("/t/persist/var/lib/NetworkManager")
     );
 }
+
+#[test]
+fn readers_mount_at_ro_pid_next_to_top() {
+    let pid = std::process::id();
+    assert_eq!(
+        Layout::from_vars(|_| None).ro_top(),
+        PathBuf::from(format!("/run/aios/ro.{pid}"))
+    );
+    assert_eq!(
+        Layout::under(Path::new("/t")).ro_top(),
+        PathBuf::from(format!("/t/ro.{pid}"))
+    );
+}

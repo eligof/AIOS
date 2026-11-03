@@ -39,8 +39,8 @@ impl Drift {
 pub fn status(runner: &dyn CommandRunner, layout: &Layout) -> Result<Status, ExecError> {
     let state = BootState::read(layout)?;
     let drift = match state.booted {
-        Some(gen) => Some(with_top(runner, layout, true, || {
-            drift(&layout.live_etc, &layout.subvol(&gen.etc_subvol()))
+        Some(gen) => Some(with_top(runner, layout, true, |top| {
+            drift(&layout.live_etc, &top.subvol(&gen.etc_subvol()))
         })?),
         None => None,
     };

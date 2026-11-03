@@ -27,8 +27,8 @@ pub fn plan(
     })?;
     let ctx = facts.render_ctx(booted)?;
     let hashes = read_hashes(layout, manifest)?;
-    with_top(runner, layout, true, || {
-        let snapshot = layout.subvol(&booted.etc_subvol());
+    with_top(runner, layout, true, |top| {
+        let snapshot = top.subvol(&booted.etc_subvol());
         if !snapshot.is_dir() {
             return Err(ExecError(format!("{} is missing", snapshot.display())));
         }

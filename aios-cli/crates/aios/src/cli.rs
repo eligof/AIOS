@@ -82,12 +82,16 @@ pub enum Command {
 }
 
 impl Command {
-    /// Mounts the top level read-write or changes boot state, so it runs in a private mount
-    /// namespace (`Context::private_mounts`).
+    /// Mounts the top level, read-write or (plan, status, gen list, rollback's check) at
+    /// its own read-only `ro.<pid>`, so it runs in a private mount namespace
+    /// (`Context::private_mounts`): not even a SIGKILL leaves a mount in the host's.
     pub fn needs_private_mounts(&self) -> bool {
         matches!(
             self,
-            Command::Apply { .. }
+            Command::Plan
+                | Command::Status
+                | Command::Gen { .. }
+                | Command::Apply { .. }
                 | Command::Bootstrap { .. }
                 | Command::Gc { .. }
                 | Command::Rollback { .. }
@@ -105,4 +109,50 @@ pub enum GenCommand {
 pub enum EnrollCommand {
     /// Enroll (see `aios <command> enroll --help`)
     Enroll,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cli;
+    use clap::Parser;
+
+    fn needs_private_mounts(args: &[&str]) -> bool {
+        let cli = Cli::try_parse_from(std::iter::once("aios").chain(args.iter().copied()))
+            .unwrap_or_else(|e| panic!("{args:?}: {e}"));
+        cli.command.needs_private_mounts()
+    }
+
+    /// Every command that mounts anything, read-only ones included, so that even a
+    /// SIGKILL can't leave a mount behind in the host's namespace.
+    #[test]
+    fn every_command_that_mounts_runs_in_a_private_namespace() {
+        for args in [
+            &["plan"][..],
+            &["status"],
+            &["gen", "list"],
+            &["apply", "--yes"],
+            &["rollback", "7"],
+            &["gc"],
+            &[
+                "bootstrap",
+                "--target",
+                "/mnt",
+                "--esp",
+                "/mnt/efi",
+                "--manifest",
+                "/mnt/m.toml",
+                "--luks-uuid",
+                "u",
+            ],
+        ] {
+            assert!(needs_private_mounts(args), "{args:?}");
+        }
+        for args in [
+            &["passwd", "eli"][..],
+            &["secureboot", "enroll"],
+            &["tpm", "enroll"],
+        ] {
+            assert!(!needs_private_mounts(args), "{args:?}");
+        }
+    }
 }

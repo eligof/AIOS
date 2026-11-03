@@ -103,8 +103,9 @@ impl Context {
     /// recursively, a slave of the host's mounts. The mounts aios and its children make
     /// (the top level, the candidate tree and its binds) are then never seen outside this
     /// process and go away with it, even when it is killed, while mounts made outside (the
-    /// `/efi` automount) still propagate in. For the commands that mount read-write or
-    /// change boot state (apply, bootstrap, gc, rollback). Call it before any thread starts:
+    /// `/efi` automount) still propagate in. For every command that mounts the top level:
+    /// apply, bootstrap, gc, rollback, and the readers plan, status and gen list, whose
+    /// `ro.<pid>` mount a SIGKILL could otherwise leak. Call it before any thread starts:
     /// `unshare` moves only the calling thread, and children inherit its namespace. A no-op
     /// under `AIOS_FAKE_RUNNER`, which mounts nothing; it needs root, so only the e2e test
     /// covers it (spec §9).

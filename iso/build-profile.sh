@@ -2,7 +2,8 @@
 # build-profile.sh OUT REPO KEYS: assemble the archiso profile that mkarchiso builds (spec
 # §6.1), without root. Run by `make iso-build`.
 #   OUT   the profile to create (iso-build/). An existing OUT is replaced only if this
-#         script made it (it holds the .aios-iso-build marker).
+#         script made it: the .aios-iso-build marker, written right after mkdir, so a run
+#         that fails midway leaves an OUT the next run replaces.
 #   REPO  the local package repo (build/repo/ from `make repo`)
 #   KEYS  the pinned CachyOS keys (installer/lib/keys.sh from `make keys`)
 # OUT gets this profile (without pacman.conf.in and this script), pacman.conf with the
@@ -33,6 +34,7 @@ if [[ -e $out || -L $out ]]; then
 fi
 
 mkdir -p "$out"
+: >"$out/$marker"
 cp -a "$here/profiledef.sh" "$here/packages.x86_64" "$here/efiboot" "$here/airootfs" "$out/"
 sed "s|@AIOS_REPO@|$repo|" "$here/pacman.conf.in" >"$out/pacman.conf"
 lib=$out/airootfs/usr/local/lib/aios-install
@@ -42,5 +44,4 @@ install -m 0644 "$root"/installer/lib/*.sh "$lib/"
 install -m 0644 "$keys" "$lib/keys.sh"
 install -d -m 0755 "$out/airootfs/opt/aios-repo"
 cp -a "$repo/." "$out/airootfs/opt/aios-repo/"
-: >"$out/$marker"
 echo "build-profile.sh: profile ready in $out (repo $repo)"

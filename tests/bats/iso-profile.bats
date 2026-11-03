@@ -151,6 +151,21 @@ unit_key() {
     [ -f "$BATS_TEST_TMPDIR/mine/precious" ]
 }
 
+@test "build-profile.sh marks its output first, so a run that failed midway can be rerun" {
+    [ "$(id -u)" -ne 0 ] || skip "root can read a mode 000 file"
+    chmod 000 "$REPO/aios-base-0.1.0-1-any.pkg.tar.zst"
+    run "$ISO/build-profile.sh" "$OUT" "$REPO" "$KEYS"
+    [ "$status" -eq 1 ]
+    [ -d "$OUT" ]
+
+    chmod 644 "$REPO/aios-base-0.1.0-1-any.pkg.tar.zst"
+    run "$ISO/build-profile.sh" "$OUT" "$REPO" "$KEYS"
+
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ -f "$OUT/.aios-iso-build" ]
+    [ -f "$OUT/airootfs/opt/aios-repo/aios-base-0.1.0-1-any.pkg.tar.zst" ]
+}
+
 @test "build-profile.sh needs the local repo and a pinned key" {
     run "$ISO/build-profile.sh" "$OUT" "$BATS_TEST_TMPDIR/norepo" "$KEYS"
     [ "$status" -eq 1 ]

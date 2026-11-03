@@ -1,5 +1,6 @@
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 CARGO ?= cargo
+SUDO ?= sudo
 
 # Shell test tools: the system copies when installed, otherwise pinned copies that
 # `make tools` fetches into build/tools/ (no root needed).
@@ -19,14 +20,22 @@ INSTALLER_LIBS := installer/lib/common.sh installer/lib/config.sh installer/lib/
 INSTALLER_SCRIPTS := installer/aios-install installer/gen-keys.sh
 SH_SCRIPTS := initrd/aios-root.sh base/aios-health.sh
 BASH_SCRIPTS := initrd/install/aios tests/bats/fakes/btrfs tests/bats/fakes/record \
-	tests/bats/fakes/findmnt tests/bats/fakes/installer $(INSTALLER_LIBS)
+	tests/bats/fakes/findmnt tests/bats/fakes/installer iso/profiledef.sh iso/build-profile.sh \
+	$(INSTALLER_LIBS)
 BATS_FILES := tests/bats/aios-root.bats tests/bats/install-hook.bats tests/bats/aios-health.bats \
 	tests/bats/installer-config.bats tests/bats/installer-disk.bats \
 	tests/bats/installer-target.bats tests/bats/installer-keys.bats \
-	tests/bats/installer-dryrun.bats
-UNITS := initrd/aios-root.service initrd/sysroot-etc.mount base/aios-health.service
+	tests/bats/installer-dryrun.bats tests/bats/iso-profile.bats
+UNITS := initrd/aios-root.service initrd/sysroot-etc.mount base/aios-health.service \
+	iso/airootfs/etc/systemd/system/aios-install-auto.service
 
-.PHONY: check rust-check shell-check bats-check unit-check tools repo keys
+# The ISO (spec §6.1): iso/ is the profile, iso-build/ the generated copy mkarchiso builds.
+ISO_BUILD := iso-build
+ISO_WORK := build/iso-work
+ISO_OUT := out
+
+.PHONY: check rust-check shell-check bats-check unit-check tools repo keys iso-build iso \
+	iso-check clean-iso
 
 check: rust-check shell-check bats-check unit-check
 
@@ -93,3 +102,21 @@ repo:
 # The CachyOS signing keys this host's pacman keyring trusts, pinned for the installer.
 keys:
 	installer/gen-keys.sh installer/lib/keys.sh
+
+# The profile mkarchiso builds: iso/ plus pacman.conf, the installer and build/repo.
+iso-build: keys
+	iso/build-profile.sh $(ISO_BUILD) build/repo installer/lib/keys.sh
+
+# Needs root: run `make iso` yourself (not `sudo make iso`); it asks sudo for the two root
+# commands. archiso >= 89 can also build unprivileged: `make iso SUDO=`.
+iso: iso-build
+	$(SUDO) rm -rf --one-file-system $(ISO_WORK)
+	$(SUDO) mkarchiso -v -w $(ISO_WORK) -o $(ISO_OUT) $(ISO_BUILD)/
+
+# Static profile checks, no build and no root.
+iso-check: tools
+	$(BATS) tests/bats/iso-profile.bats
+
+clean-iso:
+	rm -rf $(ISO_BUILD)
+	if [ -e $(ISO_WORK) ]; then $(SUDO) rm -rf --one-file-system $(ISO_WORK); fi

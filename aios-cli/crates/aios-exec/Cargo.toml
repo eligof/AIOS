@@ -1,0 +1,20 @@
+[package]
+name = "aios-exec"
+description = "Run AIOS operations against the system: apply, bootstrap, rollback, gc, status"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aios-gen = { path = "../aios-gen" }
+aios-manifest = { path = "../aios-manifest" }
+aios-plan = { path = "../aios-plan" }
+aios-render = { path = "../aios-render" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

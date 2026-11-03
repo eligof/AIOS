@@ -1,0 +1,319 @@
+use crate::ExecError;
+use serde::Deserialize;
+use std::cell::RefCell;
+use std::fmt;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+/// One command line. `stdin`, when set, is written to the child's standard input. It is
+/// never part of `Display`, because it may hold a password.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cmd {
+    pub program: String,
+    pub args: Vec<String>,
+    pub stdin: Option<Vec<u8>>,
+}
+
+impl Cmd {
+    pub fn new(program: impl Into<String>) -> Cmd {
+        Cmd {
+            program: program.into(),
+            args: Vec::new(),
+            stdin: None,
+        }
+    }
+
+    pub fn arg(mut self, arg: impl Into<String>) -> Cmd {
+        self.args.push(arg.into());
+        self
+    }
+
+    pub fn args<I, S>(mut self, args: I) -> Cmd
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// A path argument (AIOS paths are ASCII; others are converted lossily).
+    pub fn arg_path(self, path: impl AsRef<Path>) -> Cmd {
+        self.arg(path.as_ref().display().to_string())
+    }
+
+    pub fn stdin(mut self, bytes: impl Into<Vec<u8>>) -> Cmd {
+        self.stdin = Some(bytes.into());
+        self
+    }
+
+    /// The program followed by its arguments.
+    pub fn argv(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.program.as_str()).chain(self.args.iter().map(String::as_str))
+    }
+}
+
+impl fmt::Display for Cmd {
+    /// Shell-like: words outside `[A-Za-z0-9@%+=:,./_-]` are single-quoted.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let words: Vec<String> = self.argv().map(quote).collect();
+        f.write_str(&words.join(" "))
+    }
+}
+
+fn quote(word: &str) -> String {
+    let safe = !word.is_empty()
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"@%+=:,./_-".contains(&b));
+    if safe {
+        word.to_string()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
+/// What a finished command produced.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Output {
+    pub status: i32,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+impl Output {
+    /// Exit status 0 with this standard output.
+    pub fn ok(stdout: impl Into<Vec<u8>>) -> Output {
+        Output {
+            status: 0,
+            stdout: stdout.into(),
+            stderr: Vec::new(),
+        }
+    }
+
+    /// A non-zero exit status with this standard error.
+    pub fn failed(status: i32, stderr: impl Into<Vec<u8>>) -> Output {
+        Output {
+            status,
+            stdout: Vec::new(),
+            stderr: stderr.into(),
+        }
+    }
+
+    pub fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout).into_owned()
+    }
+
+    pub fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr).into_owned()
+    }
+}
+
+/// Every system command aios runs goes through this trait.
+pub trait CommandRunner {
+    /// Run `cmd` to completion. `Err` only when it could not be started: a non-zero exit is
+    /// an `Ok` carrying that status.
+    fn run(&self, cmd: &Cmd) -> Result<Output, ExecError>;
+}
+
+/// Run `cmd` and turn a non-zero exit into an error naming the command and the last
+/// lines of its standard error.
+pub fn run_ok(runner: &dyn CommandRunner, cmd: &Cmd) -> Result<Output, ExecError> {
+    let out = runner.run(cmd)?;
+    if out.status == 0 {
+        Ok(out)
+    } else {
+        Err(status_error(cmd, &out))
+    }
+}
+
+/// The error `run_ok` reports for a command that exited with `out.status`.
+pub fn status_error(cmd: &Cmd, out: &Output) -> ExecError {
+    let text = out.stderr_text();
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let tail = lines[lines.len().saturating_sub(3)..].join("; ");
+    if tail.is_empty() {
+        ExecError(format!("`{cmd}` exited with status {}", out.status))
+    } else {
+        ExecError(format!("`{cmd}` exited with status {}: {tail}", out.status))
+    }
+}
+
+/// Runs commands with `std::process::Command`, capturing stdout and stderr. Standard input
+/// is inherited unless the command supplies bytes, so interactive tools such as
+/// `systemd-cryptenroll` can still prompt on the terminal.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct RealRunner;
+
+impl CommandRunner for RealRunner {
+    fn run(&self, cmd: &Cmd) -> Result<Output, ExecError> {
+        let fail = |e: std::io::Error| ExecError(format!("cannot run `{cmd}`: {e}"));
+        let mut child = Command::new(&cmd.program)
+            .args(&cmd.args)
+            .stdin(if cmd.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(fail)?;
+        if let (Some(bytes), Some(mut pipe)) = (&cmd.stdin, child.stdin.take()) {
+            // A child that exits without reading its input is reported by its status.
+            if let Err(e) = pipe.write_all(bytes) {
+                if e.kind() != ErrorKind::BrokenPipe {
+                    return Err(fail(e));
+                }
+            }
+        }
+        let out = child.wait_with_output().map_err(fail)?;
+        Ok(Output {
+            status: out.status.code().unwrap_or(-1),
+            stdout: out.stdout,
+            stderr: out.stderr,
+        })
+    }
+}
+
+/// Test double: records every command and answers from a script. Unscripted commands
+/// succeed with empty output.
+#[derive(Debug, Default)]
+pub struct FakeRunner {
+    calls: RefCell<Vec<Cmd>>,
+    script: Vec<(Vec<String>, Output)>,
+    call_log: Option<PathBuf>,
+    emulate_subvolumes: bool,
+}
+
+/// `AIOS_FAKE_RUNNER` file format.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Script {
+    #[serde(default)]
+    respond: Vec<Scripted>,
+    #[serde(default)]
+    fail_on: Vec<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Scripted {
+    argv: Vec<String>,
+    #[serde(default)]
+    status: i32,
+    #[serde(default)]
+    stdout: String,
+    #[serde(default)]
+    stderr: String,
+}
+
+impl FakeRunner {
+    pub fn new() -> FakeRunner {
+        FakeRunner::default()
+    }
+
+    /// Answer every command whose argv starts with `prefix` (whole words). The longest
+    /// matching prefix wins; between equal lengths, the later entry wins.
+    pub fn respond(&mut self, prefix: &[&str], output: Output) -> &mut FakeRunner {
+        let prefix = prefix.iter().map(|w| w.to_string()).collect();
+        self.script.push((prefix, output));
+        self
+    }
+
+    /// Commands starting with `prefix` exit 1 with `injected failure` on stderr.
+    pub fn fail_on(&mut self, prefix: &[&str]) -> &mut FakeRunner {
+        self.respond(prefix, Output::failed(1, "injected failure"))
+    }
+
+    /// Treat plain directories as subvolumes: a successful `btrfs subvolume create DST` or
+    /// `snapshot SRC DST` creates the directory DST (empty), and `delete --recursive PATH`
+    /// removes PATH.
+    pub fn emulate_subvolumes(&mut self) -> &mut FakeRunner {
+        self.emulate_subvolumes = true;
+        self
+    }
+
+    /// Every command run so far, in `Display` form.
+    pub fn calls(&self) -> Vec<String> {
+        self.calls.borrow().iter().map(Cmd::to_string).collect()
+    }
+
+    /// Every command run so far, including any stdin.
+    pub fn commands(&self) -> Vec<Cmd> {
+        self.calls.borrow().clone()
+    }
+
+    /// Load a script (`{"respond": [{"argv": [..], "status": 0, "stdout": "", "stderr": ""}],
+    /// "fail_on": [[..]]}`) and append each call to `<path>.calls`, one line per call.
+    pub fn from_json_file(path: &Path) -> Result<FakeRunner, ExecError> {
+        let text = fs::read_to_string(path).map_err(|e| ExecError::io(path, e))?;
+        let script: Script = serde_json::from_str(&text).map_err(|e| ExecError::io(path, e))?;
+        let mut fake = FakeRunner::new();
+        for entry in script.respond {
+            let argv: Vec<&str> = entry.argv.iter().map(String::as_str).collect();
+            fake.respond(
+                &argv,
+                Output {
+                    status: entry.status,
+                    stdout: entry.stdout.into_bytes(),
+                    stderr: entry.stderr.into_bytes(),
+                },
+            );
+        }
+        for prefix in &script.fail_on {
+            let argv: Vec<&str> = prefix.iter().map(String::as_str).collect();
+            fake.fail_on(&argv);
+        }
+        let mut log = path.as_os_str().to_owned();
+        log.push(".calls");
+        fake.call_log = Some(PathBuf::from(log));
+        Ok(fake)
+    }
+
+    fn emulate(&self, argv: &[&str]) -> Result<(), ExecError> {
+        match argv {
+            ["btrfs", "subvolume", "create", dst] | ["btrfs", "subvolume", "snapshot", _, dst] => {
+                fs::create_dir_all(dst).map_err(|e| ExecError::io(Path::new(dst), e))
+            }
+            ["btrfs", "subvolume", "delete", "--recursive", path] if Path::new(path).exists() => {
+                fs::remove_dir_all(path).map_err(|e| ExecError::io(Path::new(path), e))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+impl CommandRunner for FakeRunner {
+    fn run(&self, cmd: &Cmd) -> Result<Output, ExecError> {
+        self.calls.borrow_mut().push(cmd.clone());
+        if let Some(log) = &self.call_log {
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+                .map_err(|e| ExecError::io(log, e))?;
+            writeln!(file, "{cmd}").map_err(|e| ExecError::io(log, e))?;
+        }
+        let argv: Vec<&str> = cmd.argv().collect();
+        let output = self
+            .script
+            .iter()
+            .filter(|(prefix, _)| {
+                prefix.len() <= argv.len() && prefix.iter().zip(&argv).all(|(p, a)| p == a)
+            })
+            .max_by_key(|(prefix, _)| prefix.len())
+            .map(|(_, out)| out.clone())
+            .unwrap_or_default();
+        if output.status == 0 && self.emulate_subvolumes {
+            self.emulate(&argv)?;
+        }
+        Ok(output)
+    }
+}

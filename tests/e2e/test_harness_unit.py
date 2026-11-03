@@ -617,7 +617,7 @@ def test_boot_menu_luks_and_login_are_answered_in_order(sock_path: Path) -> None
     console.join()
 
 
-# --- test_e2e.py: the boot menu position and the manifest edits it relies on -------------
+# --- test_e2e.py: its helpers, the boot menu position and the manifest edits -------------
 
 from .serial import SerialFailure  # noqa: E402
 from .test_e2e import (  # noqa: E402
@@ -628,10 +628,20 @@ from .test_e2e import (  # noqa: E402
     MANIFEST,
     Machine,
     expect_install,
+    has_option,
     should_delete_vm,
 )
 
 GEN1_BUILT = r"gen-0001 built in /mnt/aios-top"
+
+
+def test_a_mount_option_is_matched_as_a_whole_element_of_findmnts_options() -> None:
+    assert has_option("ro,nosuid,nodev,relatime\n", "ro")
+    assert has_option("rw,relatime,ro", "ro")
+    assert not has_option("rw,relatime,errors=remount-ro", "ro")
+    assert not has_option("rw,nosuid,nodev,relatime", "ro")
+    # Two lines (stacked mounts) are not one bind.
+    assert not has_option("ro,relatime\nrw,relatime", "ro")
 
 
 def test_the_vm_disk_is_deleted_only_after_a_passing_run_without_keep_vm() -> None:

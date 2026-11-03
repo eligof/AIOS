@@ -98,10 +98,23 @@ class Machine:
         out = self.shell.check("tr ' ' '\\n' </proc/cmdline | sed -n 's/^aios\\.gen=//p'")
         return int(out)
 
+    def assert_ro_bind(self, path: str) -> None:
+        """`path` is a mount point, mounted read-only."""
+        assert self.shell is not None
+        options = self.shell.check(f"findmnt -no OPTIONS {path}")
+        assert has_option(options, "ro"), f"{path} is mounted {options!r}, not read-only"
+
     def as_user(self, cmd: str) -> str:
         """Run `cmd` as the test user. runuser keeps root's $HOME, so use absolute paths."""
         assert self.shell is not None
         return self.shell.check(f"runuser -u {USER} -- sh -c '{cmd}'")
+
+
+def has_option(options: str, name: str) -> bool:
+    """Whether findmnt's OPTIONS are those of one mount and hold `name` as an element: "ro"
+    is not in "rw,errors=remount-ro", and two lines are two mounts stacked on the target."""
+    lines = options.strip().splitlines()
+    return len(lines) == 1 and name in lines[0].split(",")
 
 
 def should_delete_vm(keep_vm: bool, failures: int) -> bool:
@@ -161,6 +174,8 @@ def test_03_runtime_state_is_ephemeral_and_declared_state_persists(machine: Mach
     erofs = shell.run("touch /usr/aios-e2e")
     assert erofs.rc != 0
     assert "Read-only file system" in erofs.output
+    # (g)'s positive control: the bind the symlink is about to dodge is in place.
+    machine.assert_ro_bind(f"/home/{USER}/.ssh/authorized_keys")
     machine.as_user(
         f"cd /home/{USER} && mv .ssh .ssh-moved && mkdir -m 0700 .ssh"
         " && ln -s /etc/nftables.conf .ssh/authorized_keys"
@@ -176,13 +191,21 @@ def test_03_runtime_state_is_ephemeral_and_declared_state_persists(machine: Mach
 
 
 def test_04_a_planted_symlink_does_not_redirect_the_home_bind(machine: Machine) -> None:
-    """(g) findmnt shows no mount on /etc/nftables.conf, nftables loaded the real ruleset,
-    and nothing is mounted at the symlink path."""
+    """(g) systemd refused to mount through the symlink: the bind's mount unit failed and the
+    journal says why. findmnt shows no mount on /etc/nftables.conf, and nftables loaded the
+    real ruleset. The other bind in the recreated ~/.ssh is in place, read-only."""
     shell = machine.shell
     assert shell is not None
+    keys = f"/home/{USER}/.ssh/authorized_keys"
 
     assert shell.run("findmnt -n /etc/nftables.conf").rc == 1
-    assert shell.run(f"findmnt -rno TARGET | grep -Fx /home/{USER}/.ssh/authorized_keys").rc == 1
+    # systemd-escape spells the unit name; is-failed prints the state of a failed unit (and
+    # exits 0), so the output is what counts.
+    unit = f'"$(systemd-escape -p --suffix=mount {keys})"'
+    assert shell.run(f"systemctl is-failed {unit}").output == "failed"
+    # "<unit>: Mount path <path> is not canonical (contains a symlink)."
+    assert "authorized_keys" in shell.check("journalctl -b --no-pager | grep -F 'not canonical'")
+    machine.assert_ro_bind(f"{keys}2")
     assert shell.check("systemctl is-active nftables.service") == "active"
     assert "policy drop" in shell.check("nft list chain inet filter input")
     # The managed file is intact (sha256sum: base has no cmp).

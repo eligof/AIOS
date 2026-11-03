@@ -183,3 +183,23 @@ fn offset_to_line_col_handles_non_char_boundary() {
     // offset 6 is inside the three-byte `中` (bytes 5..8): clamps back to byte 5.
     assert_eq!(offset_to_line_col(raw, 6), (2, 1));
 }
+
+#[test]
+fn locate_section_matches_header_with_trailing_comment_or_inner_spaces() {
+    assert_eq!(locate_section("[kernel] # x\n", &["kernel"]), (1, 1));
+    assert_eq!(locate_section("a = 1\n[ kernel ]\n", &["kernel"]), (2, 1));
+    assert_eq!(locate_section("[kernel]#x\n", &["kernel"]), (1, 1));
+    assert_eq!(locate_section("[kernelx]\n", &["kernel"]), (1, 1));
+}
+
+#[test]
+fn locate_key_finds_key_under_commented_header() {
+    let raw = "[kernel] # c\ndefault = 1\n";
+    assert_eq!(locate_key(raw, "kernel", "default"), (2, 1));
+}
+
+#[test]
+fn locate_value_skips_comment_lines() {
+    let raw = "[kernel]\n# default = \"x\"\n  # more \"x\"\ndefault = \"x\"\n";
+    assert_eq!(locate_value(raw, "kernel", "\"x\""), (4, 11));
+}

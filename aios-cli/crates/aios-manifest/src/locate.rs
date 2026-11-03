@@ -8,10 +8,19 @@ pub fn locate(raw: &str, needle: &str) -> (usize, usize) {
     (1, 1)
 }
 
-/// Index of the line whose trimmed text is exactly `[section]`.
+/// Index of the line that is the `[section]` header. A trailing `# comment` and spaces
+/// inside the brackets are ignored.
 fn header_index(lines: &[&str], section: &str) -> Option<usize> {
-    let header = format!("[{section}]");
-    lines.iter().position(|l| l.trim() == header)
+    lines.iter().position(|l| {
+        let t = l.trim();
+        if t.starts_with("[[") {
+            return false;
+        }
+        let t = t.split('#').next().unwrap_or("").trim_end();
+        t.strip_prefix('[')
+            .and_then(|r| r.strip_suffix(']'))
+            .is_some_and(|name| name.trim() == section)
+    })
 }
 
 /// 1-based `(line, col)` of the header line for `section` (col of the `[`).
@@ -61,6 +70,9 @@ pub fn locate_value(raw: &str, section: &str, needle: &str) -> (usize, usize) {
         return (1, 1);
     };
     for i in section_body(&lines, h) {
+        if lines[i].trim_start().starts_with('#') {
+            continue;
+        }
         if let Some(col) = lines[i].find(needle) {
             return (i + 1, col + 1);
         }

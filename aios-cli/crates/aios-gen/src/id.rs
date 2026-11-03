@@ -36,6 +36,11 @@ impl GenId {
 
 impl fmt::Display for GenId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        debug_assert!(
+            self.0 >= 1 && self.0 <= MAX_GEN,
+            "GenId out of range: {}",
+            self.0
+        );
         write!(f, "{:04}", self.0)
     }
 }

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Multi-call fake for the installer tests, linked under the name of the command it fakes.
+# Every call is appended to $CALLS as "<name> <args>". Answers come from $FAKE_SYS:
+#   lsblk      -o COLUMN ... DEV   prints $FAKE_SYS/blk/<DEV without /dev/>/<COLUMN>
+#                                  (exit 32 "not a block device" if that dir is missing)
+#   findmnt    ... MOUNTPOINT      prints $FAKE_SYS/mnt<MOUNTPOINT> (the SOURCE), else exit 1
+#   gpg        ...                 prints $FAKE_SYS/gpg.out (a --with-colons listing)
+#   mkpasswd   ...                 reads the password from stdin, appends it to
+#                                  $FAKE_SYS/mkpasswd.stdin, prints a fixed yescrypt hash
+#   cryptsetup luksUUID DEV        prints $FAKE_SYS/luks-uuid
+#   sbctl      status --json       prints $FAKE_SYS/sbctl-status.json
+#   usbguard   generate-policy     prints $FAKE_SYS/usbguard-policy
+#   curl, modprobe                 exit with $FAKE_SYS/<name>.rc (default 0)
+set -euo pipefail
+
+name=${0##*/}
+echo "$name $*" >>"$CALLS"
+
+case "$name" in
+    lsblk)
+        column=""
+        prev=""
+        for arg in "$@"; do
+            case "$prev" in -o | -*o) column=$arg ;; esac
+            prev=$arg
+        done
+        dev=${!#}
+        dir="$FAKE_SYS/blk/${dev#/dev/}"
+        if [ ! -d "$dir" ]; then
+            echo "lsblk: $dev: not a block device" >&2
+            exit 32
+        fi
+        cat "$dir/$column"
+        ;;
+    findmnt)
+        file="$FAKE_SYS/mnt${!#}"
+        [ -f "$file" ] || exit 1
+        cat "$file"
+        ;;
+    gpg)
+        [ -f "$FAKE_SYS/gpg.out" ] || exit 2
+        cat "$FAKE_SYS/gpg.out"
+        ;;
+    mkpasswd)
+        cat >>"$FAKE_SYS/mkpasswd.stdin"
+        echo "\$y\$j9T\$fakesalt\$fakehashfakehashfakehashfakehashfake0"
+        ;;
+    cryptsetup)
+        [ "$1" = luksUUID ] || { echo "fake cryptsetup: unsupported: $*" >&2; exit 2; }
+        cat "$FAKE_SYS/luks-uuid"
+        ;;
+    sbctl)
+        [ "$*" = "status --json" ] || { echo "fake sbctl: unsupported: $*" >&2; exit 2; }
+        cat "$FAKE_SYS/sbctl-status.json"
+        ;;
+    usbguard)
+        [ "$*" = generate-policy ] || { echo "fake usbguard: unsupported: $*" >&2; exit 2; }
+        cat "$FAKE_SYS/usbguard-policy"
+        ;;
+    curl | modprobe)
+        exit "$(cat "$FAKE_SYS/$name.rc" 2>/dev/null || echo 0)"
+        ;;
+    *)
+        echo "fake installer tool: unknown name $name" >&2
+        exit 2
+        ;;
+esac

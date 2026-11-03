@@ -91,12 +91,13 @@ impl Machine {
         m
     }
 
-    /// Write the fake runner's script: these `respond` and `fail_on` lists, and the top
-    /// level emulated wherever a reader mounts it.
+    /// Write the fake runner's script: these `respond` and `fail_on` lists, the top level
+    /// emulated wherever a reader mounts it, and its directories counted as subvolumes.
     fn script(&self, respond: &str, fail_on: &str) {
         let top = self.path("top");
         let script = format!(
-            r#"{{"respond": {respond}, "fail_on": {fail_on}, "emulate_top": "{}"}}"#,
+            r#"{{"respond": {respond}, "fail_on": {fail_on}, "emulate_top": "{}",
+                "emulate_subvolumes": true}}"#,
             top.display()
         );
         self.write("fake.json", &script, 0o644);

@@ -90,6 +90,13 @@ mkdir -p "$TOP"
 mount -t btrfs -o subvolid=5 "$DEVICE" "$TOP"
 trap unmount_top EXIT
 
+# A symlink at a generation's name or at @blank (even a dangling one) stops the boot:
+# btrfs resolves the path, so it would boot or copy another subvolume's content.
+for name in "@usr-gen-$gen" "@etc-gen-$gen" @blank; do
+    if [ -L "$TOP/$name" ]; then
+        die "$name is a symlink, not a subvolume"
+    fi
+done
 if [ ! -d "$TOP/@usr-gen-$gen" ] || [ ! -d "$TOP/@etc-gen-$gen" ]; then
     die "generation $gen missing — pick another boot entry"
 fi

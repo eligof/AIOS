@@ -352,8 +352,8 @@ pub struct FakeRunner {
     emulate_subvolumes: bool,
     /// See `emulate_top_mounts`.
     top: Option<PathBuf>,
-    /// Emulated top-level mounts: each mount point with the symlinks made in it.
-    top_mounts: RefCell<Vec<(PathBuf, Vec<PathBuf>)>>,
+    /// Emulated top-level mounts: each mount point, now a symlink to `top`.
+    top_mounts: RefCell<Vec<PathBuf>>,
 }
 
 /// `AIOS_FAKE_RUNNER` file format.
@@ -425,8 +425,9 @@ impl FakeRunner {
 
     /// Emulate mounting the btrfs top level elsewhere than `top` (where readers mount it):
     /// a successful `mount -t btrfs -o subvolid=5[,...] DEVICE DIR` with DIR other than
-    /// `top` puts a symlink to each entry of `top` into DIR, and `umount DIR` removes them.
-    /// Mounting at `top` itself changes nothing.
+    /// `top` replaces the empty directory DIR with a symlink to `top`, so `DIR/NAME` is
+    /// `top`'s entry itself, as on a mount (not a symlink to it). `umount DIR` puts the
+    /// empty directory back. Mounting at `top` itself changes nothing.
     pub fn emulate_top_mounts(&mut self, top: impl Into<PathBuf>) -> &mut FakeRunner {
         self.top = Some(top.into());
         self
@@ -500,23 +501,16 @@ impl FakeRunner {
                 if options.split(',').any(|o| o == "subvolid=5") && Path::new(dir) != top =>
             {
                 let dir = Path::new(dir);
-                let mut links = Vec::new();
-                for entry in fs::read_dir(top).map_err(|e| io(top, e))? {
-                    let name = entry.map_err(|e| io(top, e))?.file_name();
-                    let link = dir.join(&name);
-                    std::os::unix::fs::symlink(top.join(&name), &link).map_err(|e| io(&link, e))?;
-                    links.push(link);
-                }
-                self.top_mounts
-                    .borrow_mut()
-                    .push((dir.to_path_buf(), links));
+                fs::remove_dir(dir).map_err(|e| io(dir, e))?;
+                std::os::unix::fs::symlink(top, dir).map_err(|e| io(dir, e))?;
+                self.top_mounts.borrow_mut().push(dir.to_path_buf());
             }
             ["umount", dir] => {
                 let mut mounts = self.top_mounts.borrow_mut();
-                if let Some(at) = mounts.iter().rposition(|(d, _)| d == Path::new(dir)) {
-                    for link in mounts.remove(at).1 {
-                        fs::remove_file(&link).map_err(|e| io(&link, e))?;
-                    }
+                if let Some(at) = mounts.iter().rposition(|d| d == Path::new(dir)) {
+                    let dir = mounts.remove(at);
+                    fs::remove_file(&dir).map_err(|e| io(&dir, e))?;
+                    fs::create_dir(&dir).map_err(|e| io(&dir, e))?;
                 }
             }
             _ => {}

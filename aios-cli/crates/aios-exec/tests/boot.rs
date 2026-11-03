@@ -144,6 +144,38 @@ fn rollback_needs_both_subvolumes() {
     );
 }
 
+/// A symlink at a generation's name could point at another generation's subvolume, and a
+/// plain directory is no subvolume at all: neither can boot.
+#[test]
+fn rollback_refuses_a_symlinked_or_plain_generation_directory() {
+    let fx = many_gens();
+    let l = &fx.layout;
+    fs::remove_dir(l.subvol("@usr-gen-0003")).unwrap();
+    std::os::unix::fs::symlink(l.subvol("@usr-gen-0004"), l.subvol("@usr-gen-0003")).unwrap();
+    let err = rollback(&fx.runner, l, GenId(3), true).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "gen-0003 is not installed: @usr-gen-0003 is a symlink, not a subvolume"
+    );
+    fs::remove_dir(l.subvol("@etc-gen-0004")).unwrap();
+    std::os::unix::fs::symlink("@etc-gen-0005", l.subvol("@etc-gen-0004")).unwrap();
+    let err = rollback(&fx.runner, l, GenId(4), true).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "gen-0004 is not installed: @etc-gen-0004 is a symlink, not a subvolume"
+    );
+    // Without subvolume emulation a plain directory has the wrong inode.
+    let mut plain = aios_exec::FakeRunner::new();
+    plain.emulate_top_mounts(&l.top);
+    let err = rollback(&plain, l, GenId(5), true).unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "gen-0005 is not installed: @usr-gen-0005 is not a subvolume"
+    );
+    assert!(!fx.calls().iter().any(|c| c.starts_with("bootctl")));
+    assert!(!plain.calls().iter().any(|c| c.starts_with("bootctl")));
+}
+
 #[test]
 fn rollback_refuses_a_bad_generation_unless_forced() {
     let fx = many_gens();

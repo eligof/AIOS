@@ -283,8 +283,10 @@ fn on_success_runs_an_effect_after_matching_successful_commands() {
     assert_eq!(fs::read_to_string(&marker).unwrap(), "ran");
 }
 
+/// The top level appears at the mount point: its entries are the real directories (no
+/// symlinks), as a mount would show them.
 #[test]
-fn top_mount_emulation_links_the_top_level_entries() {
+fn top_mount_emulation_shows_the_top_level_at_the_mount_point() {
     let dir = tempfile::tempdir().unwrap();
     let (top, ro) = (dir.path().join("top"), dir.path().join("ro.1"));
     fs::create_dir_all(top.join("@etc-gen-0007")).unwrap();
@@ -297,9 +299,18 @@ fn top_mount_emulation_links_the_top_level_entries() {
             .arg_path(dst)
     };
     fake.run(&mount(&ro)).unwrap();
-    assert!(ro.join("@etc-gen-0007").is_dir());
+    let entry = fs::symlink_metadata(ro.join("@etc-gen-0007")).unwrap();
+    assert!(entry.is_dir(), "a directory, not a symlink: {entry:?}");
     fake.run(&Cmd::new("umount").arg_path(&ro)).unwrap();
+    assert!(
+        fs::symlink_metadata(&ro).unwrap().is_dir(),
+        "the mount point is back"
+    );
     assert_eq!(fs::read_dir(&ro).unwrap().count(), 0);
+    assert!(
+        top.join("@etc-gen-0007").is_dir(),
+        "the top level is untouched"
+    );
     fake.run(&mount(&top)).unwrap();
     fake.run(&Cmd::new("umount").arg_path(&top)).unwrap();
     assert!(

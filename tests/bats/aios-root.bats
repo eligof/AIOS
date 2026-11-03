@@ -194,6 +194,57 @@ call_index() {
     [ -L "$AIOS_TOP/@etc-cand" ]
 }
 
+# A symlink at a generation's name or at @blank would boot another subvolume's content
+# (btrfs resolves the path), so it stops the boot before anything is deleted.
+@test "a symlinked @usr-gen-N or @etc-gen-N fails before anything is deleted" {
+    for name in @usr-gen-0008 @etc-gen-0008; do
+        rm -rf "$AIOS_TOP/@usr-gen-0008" "$AIOS_TOP/@etc-gen-0008"
+        subvol @usr-gen-0008
+        subvol @etc-gen-0008
+        rm -r "${AIOS_TOP:?}/$name"
+        ln -s "${name%-0008}-0007" "$AIOS_TOP/$name"
+        subvol @root-live
+        cmdline "aios.gen=0008"
+        : >"$CALLS"
+
+        run "$SCRIPT"
+
+        [ "$status" -eq 1 ]
+        [[ "$output" == *"aios: $name is a symlink, not a subvolume"* ]]
+        [ "$(grep -c ' delete ' "$CALLS")" -eq 0 ]
+        [ "$(grep -c ' snapshot ' "$CALLS")" -eq 0 ]
+        [ -f "$AIOS_TOP/@root-live/.subvol" ]
+        [ "$(tail -n 1 "$CALLS")" = "umount $AIOS_TOP" ]
+    done
+}
+
+@test "a dangling symlink at a generation name fails as a symlink, not as missing" {
+    ln -s /nonexistent "$AIOS_TOP/@etc-gen-0008"
+    subvol @usr-gen-0008
+    cmdline "aios.gen=0008"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"aios: @etc-gen-0008 is a symlink, not a subvolume"* ]]
+    [ "$(grep -c ' snapshot ' "$CALLS")" -eq 0 ]
+}
+
+@test "a symlinked @blank fails before anything is deleted" {
+    mv "$AIOS_TOP/@blank" "$AIOS_TOP/@other"
+    ln -s @other "$AIOS_TOP/@blank"
+    subvol @root-live
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"aios: @blank is a symlink, not a subvolume"* ]]
+    [ "$(grep -c ' delete ' "$CALLS")" -eq 0 ]
+    [ "$(grep -c ' snapshot ' "$CALLS")" -eq 0 ]
+    [ -f "$AIOS_TOP/@root-live/.subvol" ]
+    [ "$(tail -n 1 "$CALLS")" = "umount $AIOS_TOP" ]
+}
+
 @test "missing @blank fails before deleting anything" {
     rm -r "$AIOS_TOP/@blank"
     subvol @root-live

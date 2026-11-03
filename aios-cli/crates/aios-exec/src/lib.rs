@@ -1,6 +1,7 @@
 //! Everything `aios` does to the running system, behind [`CommandRunner`], so every test
 //! runs without root against a [`FakeRunner`] and tempdirs.
 
+pub mod btrfs;
 mod error;
 mod layout;
 mod runner;

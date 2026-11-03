@@ -201,6 +201,45 @@ impl Machine {
         self.script(&respond, fail_on);
     }
 
+    /// Make a full build possible: `@blank`, the candidate tree the package manager would
+    /// leave (accounts, kernel modules, the UKI ukify builds for gen-2), and a script that
+    /// emulates subvolumes and answers the build's queries, with `fail_on` as in `script`.
+    fn buildable(&self, fail_on: &str) {
+        fs::create_dir_all(self.path("top/@blank")).unwrap();
+        self.write(
+            "cand/etc/passwd",
+            "root:x:0:0::/root:/usr/bin/bash\n",
+            0o644,
+        );
+        self.write("cand/etc/group", "root:x:0:root\nwheel:x:998:\n", 0o644);
+        self.write("cand/etc/shadow", "root:*:20000::::::\n", 0o600);
+        self.write("cand/etc/gshadow", "root:::root\nwheel:!*::\n", 0o600);
+        self.write(
+            "cand/usr/lib/modules/7.3.0-4-cachyos/pkgbase",
+            "linux-cachyos\n",
+            0o644,
+        );
+        self.write("cand/var/tmp/aios/aios-gen-0002-cachyos.efi", "UKI", 0o644);
+        let config = self.path("config").display().to_string();
+        let script = format!(
+            r#"{{"respond": [
+                    {{"argv": ["findmnt"], "stdout": "7A1B-2C3D\n"}},
+                    {{"argv": ["pacman", "-Qqe"], "stdout": "zsh\n"}},
+                    {{"argv": ["systemctl", "is-enabled"], "stdout": "enabled\n"}},
+                    {{"argv": ["git", "-C", "{config}", "-c", "core.hooksPath=/dev/null",
+                               "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false",
+                               "rev-parse"], "stdout": "3f9c2a1\n"}},
+                    {{"argv": ["mountpoint"], "status": 32}},
+                    {{"argv": ["df"], "stdout": "Avail\n2000000000\n"}}
+                ],
+                "fail_on": {fail_on},
+                "emulate_top": "{}",
+                "emulate_subvolumes": true}}"#,
+            self.path("top").display()
+        );
+        self.write("fake.json", &script, 0o644);
+    }
+
     /// Hold the lock the way another aios command would. Released on drop.
     fn hold_lock(&self, operation: FlockOperation) -> fs::File {
         let held = fs::File::create(self.path("aios.lock")).unwrap();
@@ -434,6 +473,28 @@ fn apply_builds_after_yes_or_with_dash_dash_yes() {
         );
         assert_eq!(out.status.code(), Some(1));
     }
+}
+
+#[test]
+fn apply_builds_gen_2_and_reports_post_commit_failures_as_warnings() {
+    let m = Machine::new();
+    m.buildable(r#"[["bootctl"]]"#);
+    let out = m.aios(&["apply", "--yes"]);
+    let stderr = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stderr.contains(
+            "\naios: warning: `bootctl set-default ''` exited with status 1: injected \
+             failure; `bootctl set-default ''` makes gen-0002 the default\n"
+        ),
+        "{stderr}"
+    );
+    assert!(text(&out.stdout).ends_with("reboot to activate gen-0002\n"));
+    assert!(m.path("top/@usr-gen-0002").is_dir() && m.path("top/@etc-gen-0002").is_dir());
+    assert!(m
+        .path("esp/EFI/Linux/aios-gen-0002-cachyos+3.efi")
+        .is_file());
+    assert!(!m.path("top/@root-cand").exists());
 }
 
 #[test]

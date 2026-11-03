@@ -377,6 +377,107 @@ fn a_full_esp_runs_gc_then_fails() {
 }
 
 #[test]
+fn a_clean_apply_has_no_warnings() {
+    let fx = Fixture::booted();
+    assert_eq!(fx.run().unwrap().warnings, Vec::<String>::new());
+}
+
+#[test]
+fn failures_after_the_main_uki_is_installed_are_warnings() {
+    let mut fx = Fixture::booted();
+    let top = fx.layout.top.display().to_string();
+    fx.runner
+        .fail_on(&["bootctl"])
+        .fail_on(&["btrfs", "subvolume", "delete"])
+        .fail_on(&["umount", &top]);
+    let outcome = fx.run().unwrap();
+    let root_cand = fx.layout.subvol("@root-cand");
+    assert_eq!(
+        outcome.warnings,
+        [
+            "`bootctl set-default ''` exited with status 1: injected failure; \
+             `bootctl set-default ''` makes gen-0008 the default"
+                .to_string(),
+            format!(
+                "`btrfs subvolume delete --recursive {}` exited with status 1: injected \
+                 failure; the next boot deletes @root-cand",
+                root_cand.display()
+            ),
+            format!("`umount {top}` exited with status 1: injected failure"),
+        ]
+    );
+    assert_eq!(
+        fx.calls_after("fsync"),
+        fx.expand(
+            "
+            bootctl set-default ''
+            btrfs subvolume show {top}/@root-cand
+            btrfs subvolume delete --recursive {top}/@root-cand
+            umount {top}
+            "
+        ),
+        "no cleanup: gen-8 is installed"
+    );
+    assert!(fx.layout.subvol("@usr-gen-0008").is_dir());
+    assert!(esp(&fx).contains(&"aios-gen-0008-cachyos+3.efi".to_string()));
+}
+
+#[test]
+fn a_failed_esp_fsync_leaves_the_boot_default_alone() {
+    let mut fx = Fixture::booted();
+    fx.runner.fail_on(&["fsync"]);
+    let outcome = fx.run().unwrap();
+    assert_eq!(
+        outcome.warnings,
+        [format!(
+            "{}: fsync: injected failure; the boot default is unchanged",
+            fx.layout.uki_dir().display()
+        )]
+    );
+    assert!(!fx.calls().iter().any(|c| c.starts_with("bootctl")));
+}
+
+/// At `btrfs filesystem sync TOP`, put a directory where the fallback UKI goes.
+fn block_the_fallback_uki(argv: &[&str]) {
+    let esp = Path::new(argv[3]).with_file_name("esp/EFI/Linux");
+    fs::create_dir_all(esp.join("aios-gen-0008-lts+3.efi/x")).unwrap();
+}
+
+/// At `btrfs filesystem sync TOP`, put a directory where the main UKI goes.
+fn block_the_main_uki(argv: &[&str]) {
+    let esp = Path::new(argv[3]).with_file_name("esp/EFI/Linux");
+    fs::create_dir_all(esp.join("aios-gen-0008-cachyos+3.efi/x")).unwrap();
+}
+
+#[test]
+fn a_fallback_uki_that_cannot_be_installed_is_a_warning() {
+    let mut fx = Fixture::booted();
+    fx.runner
+        .on_success(&["btrfs", "filesystem", "sync"], block_the_fallback_uki);
+    let outcome = fx.run().unwrap();
+    assert_eq!(outcome.warnings.len(), 1, "{:?}", outcome.warnings);
+    assert!(
+        outcome.warnings[0].ends_with("; gen-0008 is installed without this UKI"),
+        "{:?}",
+        outcome.warnings
+    );
+    assert!(fx.calls().contains(&"bootctl set-default ''".to_string()));
+    assert!(esp(&fx).contains(&"aios-gen-0008-cachyos+3.efi".to_string()));
+}
+
+#[test]
+fn a_main_uki_that_cannot_be_installed_fails_finalize() {
+    let mut fx = Fixture::booted();
+    fx.runner
+        .on_success(&["btrfs", "filesystem", "sync"], block_the_main_uki);
+    let err = fx.run().unwrap_err();
+    assert_eq!(err.step, Step::Finalize);
+    assert!(err.detail.starts_with("rename "), "{}", err.detail);
+    assert!(!esp(&fx).iter().any(|name| name.ends_with(".tmp")));
+    assert!(!fx.calls().iter().any(|c| c.starts_with("bootctl")));
+}
+
+#[test]
 fn a_failed_finalize_deletes_the_candidates_and_esp_copies() {
     let mut fx = Fixture::booted();
     fx.runner.fail_on(&["btrfs", "property"]);

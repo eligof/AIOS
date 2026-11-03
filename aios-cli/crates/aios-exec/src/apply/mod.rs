@@ -52,6 +52,9 @@ pub struct ApplyOutcome {
     pub manifest_commit: String,
     /// The UKI file names now on the ESP.
     pub ukis: Vec<String>,
+    /// What failed after the new generation was installed (spec §7): the apply still
+    /// succeeded, so these are for the user to see, not an error.
+    pub warnings: Vec<String>,
 }
 
 /// Build the next generation. On error or panic, the candidate tree is unmounted, every
@@ -67,6 +70,7 @@ pub fn apply(ctx: &ApplyCtx) -> Result<ApplyOutcome, StepError> {
         candidates: false,
         ukis: Vec::new(),
         esp_tmp: Vec::new(),
+        warnings: Vec::new(),
         done: false,
     };
     // A failed step returns here and drops `run`, which cleans up; so does a panic.
@@ -76,6 +80,7 @@ pub fn apply(ctx: &ApplyCtx) -> Result<ApplyOutcome, StepError> {
         gen: run.gen,
         manifest_commit: std::mem::take(&mut run.manifest_commit),
         ukis: run.ukis.iter().map(UkiName::file_name).collect(),
+        warnings: std::mem::take(&mut run.warnings),
     })
 }
 
@@ -97,6 +102,8 @@ struct Run<'a> {
     ukis: Vec<UkiName>,
     /// UKI copies on the ESP not yet renamed into place.
     esp_tmp: Vec<PathBuf>,
+    /// See `ApplyOutcome::warnings`.
+    warnings: Vec<String>,
     /// Every step succeeded: nothing to clean up.
     done: bool,
 }

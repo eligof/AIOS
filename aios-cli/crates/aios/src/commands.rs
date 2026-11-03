@@ -91,8 +91,16 @@ fn apply_cmd(cx: &Context, yes: bool, upgrade: bool) -> Result<(), Failure> {
         mode: Mode::Apply { booted },
         trusted_uid: cx.trusted_uid(),
     })?;
+    warn(&outcome.warnings);
     println!("reboot to activate gen-{}", outcome.gen);
     Ok(())
+}
+
+/// Problems after the new generation was installed: the command still succeeds.
+fn warn(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("aios: warning: {warning}");
+    }
 }
 
 /// `Proceed? [y/N]` on stdout; anything but y/yes declines.
@@ -206,6 +214,7 @@ fn bootstrap(
         mode: Mode::Bootstrap,
         trusted_uid: cx.trusted_uid(),
     })?;
+    warn(&outcome.warnings);
     println!("gen-{} built in {}", outcome.gen, target.display());
     Ok(())
 }

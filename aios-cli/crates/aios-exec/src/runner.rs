@@ -349,6 +349,9 @@ struct Script {
     /// `emulate_top_mounts` with this top level.
     #[serde(default)]
     emulate_top: Option<PathBuf>,
+    /// `emulate_subvolumes`.
+    #[serde(default)]
+    emulate_subvolumes: bool,
 }
 
 #[cfg(feature = "test-hooks")]
@@ -421,7 +424,8 @@ impl FakeRunner {
     }
 
     /// Load a script (`{"respond": [{"argv": [..], "status": 0, "stdout": "", "stderr": ""}],
-    /// "fail_on": [[..]], "emulate_top": "<top>"}`, every key optional) and append each call to `<path>.calls`, one line per call
+    /// "fail_on": [[..]], "emulate_top": "<top>", "emulate_subvolumes": false}`, every key
+    /// optional) and append each call to `<path>.calls`, one line per call
     /// (never through a symlink). Only with the `test-hooks` feature: the `aios` CLI tests
     /// drive the binary with it.
     #[cfg(feature = "test-hooks")]
@@ -447,6 +451,9 @@ impl FakeRunner {
         }
         if let Some(top) = script.emulate_top {
             fake.emulate_top_mounts(top);
+        }
+        if script.emulate_subvolumes {
+            fake.emulate_subvolumes();
         }
         let mut log = path.as_os_str().to_owned();
         log.push(".calls");

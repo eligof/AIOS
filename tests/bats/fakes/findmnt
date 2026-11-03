@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Fake findmnt for tests/bats/aios-health.bats.
+# Mount point M counts as mounted when the file $FAKE_MOUNTS/M exists (e.g. $FAKE_MOUNTS/var/log).
+# The file holds M's OPTIONS column. Supported forms:
+#   findmnt -no OPTIONS M   prints the options
+#   findmnt -n M            prints a findmnt-style row
+# Both exit 1 when M is not mounted, like the real findmnt.
+set -euo pipefail
+
+target=""
+for target in "$@"; do :; done
+file="$FAKE_MOUNTS$target"
+[ -f "$file" ] || exit 1
+
+if [ "$#" -eq 3 ] && [ "$1" = -no ] && [ "$2" = OPTIONS ]; then
+    cat "$file"
+elif [ "$#" -eq 2 ] && [ "$1" = -n ]; then
+    printf '%s /dev/mapper/aios btrfs %s\n' "$target" "$(cat "$file")"
+else
+    echo "fake findmnt: unsupported: $*" >&2
+    exit 2
+fi

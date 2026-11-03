@@ -4,7 +4,7 @@ mod locate;
 mod model;
 mod validate;
 
-pub use locate::{locate, offset_to_line_col};
+pub use locate::{locate, locate_key, locate_section, locate_value, offset_to_line_col};
 pub use model::*;
 pub use validate::{validate, ValidationEnv};
 

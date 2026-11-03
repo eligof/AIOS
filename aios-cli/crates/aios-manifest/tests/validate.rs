@@ -251,3 +251,112 @@ fn collects_multiple_errors() {
         .replace("Asia/Jerusalem", "Nope/Nope");
     assert!(errors(&raw).len() >= 2);
 }
+
+#[test]
+fn unknown_kernel_location_ignores_earlier_comment() {
+    let raw = format!(
+        "# default settings\n{}",
+        VALID.replace("default = \"linux-cachyos\"", "default = \"linux-zen\"")
+    );
+    let line = raw
+        .lines()
+        .position(|l| l.starts_with("default ="))
+        .unwrap()
+        + 1;
+    let errs = errors(&raw);
+    assert!(
+        errs.iter()
+            .any(|e| e.starts_with(&format!("manifest.toml:{line}:1:"))
+                && e.contains("unknown kernel")),
+        "got {errs:?}"
+    );
+}
+
+#[test]
+fn user_declared_only_via_home_table_reports_at_that_header() {
+    // bob has no `[users.bob]` header (dotted keys) and no password hash.
+    let raw = VALID.replace(
+        "[users.eli]\nuid = 1000\ngroups = [\"wheel\"]\nshell = \"/usr/bin/zsh\"\n\n[users.eli.home]",
+        "[users]\nbob.uid = 1001\nbob.shell = \"/usr/bin/zsh\"\n\n[users.bob.home]",
+    );
+    let raw = raw.replace("\".zshrc\" = \"home/eli/zshrc\"\n", "");
+    let raw = raw.replace("\".config/autostart/\" = \"home/eli/autostart/\"\n", "");
+    let line = raw.lines().position(|l| l == "[users.bob.home]").unwrap() + 1;
+    let errs = errors(&raw);
+    assert!(
+        errs.iter()
+            .any(|e| e.starts_with(&format!("manifest.toml:{line}:1:"))
+                && e.contains("missing password hash")),
+        "got {errs:?}"
+    );
+}
+
+#[test]
+fn files_path_etc_slash_rejected() {
+    let raw = VALID.replace("\"/etc/nftables.conf\"", "\"/etc/\"");
+    assert_error(&raw, "only paths under /etc are allowed");
+}
+
+#[test]
+fn files_path_trailing_slash_rejected() {
+    let raw = VALID.replace("\"/etc/nftables.conf\"", "\"/etc/foo/\"");
+    assert_error(&raw, "only paths under /etc are allowed");
+}
+
+#[test]
+fn persist_root_rejected() {
+    let raw = VALID.replace("\"/var/lib/NetworkManager\"", "\"/\"");
+    assert_error(&raw, "persist path \"/\" may not be the root directory");
+}
+
+#[test]
+fn file_source_symlink_escaping_repo_rejected() {
+    let (_tmp, env) = env();
+    let outside = _tmp.path().join("outside");
+    fs::write(&outside, "secret").unwrap();
+    std::os::unix::fs::symlink(&outside, env.repo_root.join("files/evil")).unwrap();
+    let raw = VALID.replace("files/nftables.conf", "files/evil");
+    let m = parse(&raw).unwrap();
+    let errs: Vec<String> = validate(&m, &raw, &env)
+        .into_iter()
+        .map(|e| e.to_string())
+        .collect();
+    assert!(
+        errs.iter().any(|e| e.contains(
+            "file \"/etc/nftables.conf\": source \"files/evil\" resolves outside the manifest repo"
+        )),
+        "got {errs:#?}"
+    );
+}
+
+#[test]
+fn home_source_symlink_escaping_repo_rejected() {
+    let (_tmp, env) = env();
+    let outside = _tmp.path().join("outside");
+    fs::write(&outside, "secret").unwrap();
+    std::os::unix::fs::symlink(&outside, env.repo_root.join("home/eli/x")).unwrap();
+    let raw = VALID.replace("home/eli/zshrc", "home/eli/x");
+    let m = parse(&raw).unwrap();
+    let errs: Vec<String> = validate(&m, &raw, &env)
+        .into_iter()
+        .map(|e| e.to_string())
+        .collect();
+    assert!(
+        errs.iter().any(|e| e
+            .contains("user \"eli\": home entry \".zshrc\" resolves outside the manifest repo")),
+        "got {errs:#?}"
+    );
+}
+
+#[test]
+fn symlink_inside_repo_is_allowed() {
+    let (_tmp, env) = env();
+    std::os::unix::fs::symlink(
+        env.repo_root.join("files/nftables.conf"),
+        env.repo_root.join("files/alias"),
+    )
+    .unwrap();
+    let raw = VALID.replace("files/nftables.conf", "files/alias");
+    let m = parse(&raw).unwrap();
+    assert!(validate(&m, &raw, &env).is_empty());
+}

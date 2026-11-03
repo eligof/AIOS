@@ -1,6 +1,8 @@
 mod common;
 
-use aios_manifest::{locate, offset_to_line_col, parse, Lockdown};
+use aios_manifest::{
+    locate, locate_key, locate_section, locate_value, offset_to_line_col, parse, Lockdown,
+};
 use common::VALID;
 
 #[test]
@@ -122,4 +124,62 @@ fn offset_to_line_col_is_one_based() {
     assert_eq!(offset_to_line_col(raw, 3), (2, 1));
     assert_eq!(offset_to_line_col(raw, 4), (2, 2));
     assert_eq!(offset_to_line_col(raw, 999), (3, 1));
+}
+
+const SCOPED: &str = "# default settings\n[system]\nhostname = \"default\"\n\n[kernel]\n  default = \"x\"\nfallback = \"y\"\n\n[files]\n\"/etc/a\" = { symlink = \"/dev/null\" }\n\n[[extra]]\nkey = 1\n";
+
+#[test]
+fn locate_key_skips_comments_and_other_sections() {
+    assert_eq!(locate_key(SCOPED, "kernel", "default"), (6, 3));
+    assert_eq!(locate_key(SCOPED, "kernel", "fallback"), (7, 1));
+    assert_eq!(locate_key(SCOPED, "system", "hostname"), (3, 1));
+}
+
+#[test]
+fn locate_key_does_not_match_key_prefix_without_equals() {
+    let raw = "[kernel]\ndefault_x = 1\ndefault = 2\n";
+    assert_eq!(locate_key(raw, "kernel", "default"), (3, 1));
+}
+
+#[test]
+fn locate_key_falls_back_to_header_when_key_missing() {
+    assert_eq!(locate_key(SCOPED, "kernel", "nope"), (5, 1));
+}
+
+#[test]
+fn locate_key_missing_section_is_one_one() {
+    assert_eq!(locate_key(SCOPED, "nosuch", "default"), (1, 1));
+}
+
+#[test]
+fn locate_key_stops_at_next_section() {
+    // `fallback` lives in [kernel], so it is not found in [system]: header position.
+    assert_eq!(locate_key(SCOPED, "system", "fallback"), (2, 1));
+}
+
+#[test]
+fn locate_value_scoped_to_section() {
+    let raw = "# \"/var/x\" note\n[other]\nk = \"/var/x\"\n[persist]\ndirectories = [\"/var/x\"]\n";
+    assert_eq!(locate_value(raw, "persist", "\"/var/x\""), (5, 16));
+    assert_eq!(locate_value(raw, "persist", "zzz"), (4, 1));
+    assert_eq!(locate_value(raw, "nosuch", "zzz"), (1, 1));
+}
+
+#[test]
+fn locate_section_picks_first_existing_header() {
+    let raw = "[system]\n[users.bob.home]\n\"a\" = \"b\"\n";
+    assert_eq!(
+        locate_section(raw, &["users.bob", "users.bob.home"]),
+        (2, 1)
+    );
+    assert_eq!(locate_section(raw, &["users.zed"]), (1, 1));
+}
+
+#[test]
+fn offset_to_line_col_handles_non_char_boundary() {
+    let raw = "a\u{e9}b\n\u{4e2d}x";
+    // offset 2 is inside the two-byte `é` (bytes 1..3).
+    assert_eq!(offset_to_line_col(raw, 2), (1, 2));
+    // offset 6 is inside the three-byte `中` (bytes 5..8): clamps back to byte 5.
+    assert_eq!(offset_to_line_col(raw, 6), (2, 1));
 }

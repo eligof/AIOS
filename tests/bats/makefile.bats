@@ -87,3 +87,53 @@ has_hint() {
     [ "$status" -eq 0 ]
     [ "$(wc -l <"$LOG")" -eq 1 ]
 }
+
+@test "the pytest venv is rebuilt from scratch when the Python minor version changes, only then" {
+    # python: the version from $FAKE_VERSION; -m venv DIR makes DIR/bin/pip, which logs.
+    cat >"$FAKES/python" <<'EOF'
+#!/bin/sh
+if [ "$1" = -c ] && [ "$2" = 'import sys;print(sys.version_info[:2])' ]; then
+    cat "$FAKE_VERSION"
+elif [ "$1" = -m ] && [ "$2" = venv ] && [ $# -eq 3 ]; then
+    echo "venv $3" >>"$FAKE_LOG"
+    mkdir -p "$3/bin"
+    printf '#!/bin/sh\necho "pip $*" >>"$FAKE_LOG"\n' >"$3/bin/pip"
+    chmod +x "$3/bin/pip"
+else
+    exit 1
+fi
+EOF
+    chmod +x "$FAKES/python"
+    export FAKE_LOG=$LOG FAKE_VERSION=$BATS_TEST_TMPDIR/version
+    mkdir -p "$W/tests/e2e"
+    : >"$W/tests/e2e/requirements.txt"
+    pip='pip install -q --require-hashes --only-binary=:all: -r tests/e2e/requirements.txt'
+    # Backdate everything make wrote, so the checks do not hang on timestamp granularity.
+    backdate() { find "$W" -exec touch -h -d 2001-01-01 {} +; }
+
+    echo '(3, 14)' >"$FAKE_VERSION"
+    run mk build/venv/bin/pytest PYTHON="$FAKES/python"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(cat "$LOG")" = "$(printf '%s\n' 'venv build/venv' "$pip")" ]
+    [ -f "$W/build/venv/bin/pytest" ]
+
+    backdate
+    run mk build/venv/bin/pytest PYTHON="$FAKES/python"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(wc -l <"$LOG")" -eq 2 ]
+
+    # A new minor version: a fresh venv, without the old one's lib/python3.14.
+    mkdir -p "$W/build/venv/lib/python3.14"
+    backdate
+    echo '(3, 15)' >"$FAKE_VERSION"
+    run mk build/venv/bin/pytest PYTHON="$FAKES/python"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(sed -n '3,$p' "$LOG")" = "$(printf '%s\n' 'venv build/venv' "$pip")" ]
+    [ ! -e "$W/build/venv/lib/python3.14" ]
+    [ -f "$W/build/venv/bin/pytest" ]
+
+    backdate
+    run mk build/venv/bin/pytest PYTHON="$FAKES/python"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l <"$LOG")" -eq 4 ]
+}

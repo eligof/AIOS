@@ -47,7 +47,7 @@ ISO_RM_WORK = $(if $(SUDO),$(SUDO),unshare --map-auto --map-root-user) rm -rf --
 	exit 1; } >&2
 
 .PHONY: check rust-check shell-check bats-check unit-check e2e-unit tools repo keys iso-build \
-	iso iso-check clean-iso e2e
+	iso iso-check clean-iso e2e FORCE
 
 check: rust-check shell-check bats-check unit-check e2e-unit
 
@@ -103,10 +103,20 @@ build/tools/bats-core/bin/bats:
 	git clone --depth 1 --branch $(BATS_VERSION) https://github.com/bats-core/bats-core build/tools/bats-core
 	test "$$(git -C build/tools/bats-core rev-parse HEAD)" = $(BATS_COMMIT)
 
-build/venv/bin/pytest: tests/e2e/requirements.txt
+# The venv is keyed on the Python minor version: build/venv.python holds it and changes only
+# when the version does, so a Python upgrade rebuilds the venv from scratch.
+build/venv.python: FORCE
+	+@mkdir -p $(@D)
+	+@v=$$($(PYTHON) -c 'import sys;print(sys.version_info[:2])') && \
+		{ [ "$$v" = "$$(cat $@ 2>/dev/null)" ] || echo "$$v" >$@; }
+
+build/venv/bin/pytest: build/venv.python tests/e2e/requirements.txt
+	rm -rf build/venv
 	$(PYTHON) -m venv build/venv
 	build/venv/bin/pip install -q --require-hashes --only-binary=:all: -r tests/e2e/requirements.txt
 	touch $@
+
+FORCE:
 
 # Local pacman repo with aios-base and aios-cli (spec §4.6). No root: makepkg -d skips
 # the dependency check, so the build host needs cargo but not the runtime depends.

@@ -53,10 +53,9 @@ pub enum SubvolKind {
 pub fn parse_subvol(name: &str) -> Option<(SubvolKind, GenId)> {
     let (kind, rest) = if let Some(rest) = name.strip_prefix("@usr-gen-") {
         (SubvolKind::Usr, rest)
-    } else if let Some(rest) = name.strip_prefix("@etc-gen-") {
-        (SubvolKind::Etc, rest)
     } else {
-        return None;
+        let rest = name.strip_prefix("@etc-gen-")?;
+        (SubvolKind::Etc, rest)
     };
     rest.parse().ok().map(|id| (kind, id))
 }
@@ -121,8 +120,14 @@ mod tests {
 
     #[test]
     fn parse_subvol_names() {
-        assert_eq!(parse_subvol("@usr-gen-0003"), Some((SubvolKind::Usr, GenId(3))));
-        assert_eq!(parse_subvol("@etc-gen-0012"), Some((SubvolKind::Etc, GenId(12))));
+        assert_eq!(
+            parse_subvol("@usr-gen-0003"),
+            Some((SubvolKind::Usr, GenId(3)))
+        );
+        assert_eq!(
+            parse_subvol("@etc-gen-0012"),
+            Some((SubvolKind::Etc, GenId(12)))
+        );
         assert_eq!(parse_subvol("@usr-cand"), None);
         assert_eq!(parse_subvol("@home"), None);
         assert_eq!(parse_subvol("@usr-gen-12"), None);

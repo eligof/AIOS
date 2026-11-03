@@ -25,6 +25,7 @@ A bootable Arch-based ISO that installs AIOS onto a disk, giving a hardened host
   - (d) After adding a package (`tree`) to the manifest, `aios apply --yes` + reboot boots gen-2, where `tree` exists.
   - (e) `aios rollback 1` + reboot boots gen-1, where `tree` does not exist.
   - (f) A gen-3 built with the test-only cmdline flag `aios.test.fail_health=1` fails its health check. After 3 boots the machine is back on the previous good gen.
+  - (g) After the test user replaces `~/.ssh/authorized_keys` with a symlink to `/etc/nftables.conf` and reboots: `findmnt /etc/nftables.conf` shows no bind, nftables loads, and the symlinked path is not mounted over its target. This guards the §4.4 symlink-redirect limit.
 
 **Out of scope:** Sentinel, Cockpit, agent runtime, ops engine (sub-projects 2–5). Graphical installer. Offline install. Desktop environment beyond a TTY (see §8).
 
@@ -268,7 +269,7 @@ Each step aborts on failure. Abort deletes the candidate subvolumes and candidat
 ### 4.4 Managed home paths
 
 - Each `[users.<u>.home]` entry becomes an `fstab` line `/etc/aios/home/<u>/<path> /home/<u>/<path> none bind,ro,nofail,x-systemd.requires-mounts-for=/home 0 0`. `nofail`: a user who deletes or replaces a target can't drop the next boot into emergency mode.
-- systemd creates directory targets as mount points, and the executor creates file targets at apply time; either may leave root-owned parents. `tmpfiles.d` then fixes the owner and mode of the home and of every parent directory of a target (`d /home/<u>/<dir> 0755 <u> <u> -`; `0700` for the home and under `~/.ssh`). It never names a target: after the first boot each is a read-only bind, and a `d` or `f` line on it would fail with EROFS.
+- systemd creates missing mount points itself: a directory for a directory source, an empty file for a file source (`apply` never touches `/home`; only `bootstrap` creates `@home/<u>`, 0700, owned by the user). Either may leave root-owned parents. `tmpfiles.d` then fixes the owner and mode of the home and of every parent directory of a target (`d /home/<u>/<dir> 0755 <u> <u> -`; `0700` for the home and under `~/.ssh`). It never names a target: after the first boot each is a read-only bind, and a `d` or `f` line on it would fail with EROFS.
 - **Default set** (the §4.1 example), each closing one vector:
   - Shell startup: `.zshenv`, `.zprofile`, `.zshrc`, `.zlogin` (zsh), and `.profile`, `.bash_profile`, `.bashrc` (sh and bash). The defaults are minimal; `.bash_profile` sources `.profile` and `.bashrc`.
   - SSH: `.ssh/authorized_keys`, `.ssh/authorized_keys2` (both empty) and `.ssh/rc` (comment only; sshd runs it at every login).
@@ -277,7 +278,8 @@ Each step aborts on failure. Abort deletes the candidate subvolumes and candidat
   - User session environment: `.config/environment.d/`.
   - PATH shims: `.local/bin/`.
 - **Effect:** a user-level RAT can't add autostart entries, user units, shell startup hooks, `~/.local/bin` shims or SSH keys. To change these, edit the manifest.
-- **Known limit:** other autostart vectors exist, such as compositor configs, `.desktop` overrides, editor plugins, and `~/.config/systemd/user.conf`, whose `DefaultEnvironment=` reaches every user unit. They're added to the manifest defaults when the Cockpit picks the compositor (follow-up #5). Sentinel watches the rest of `/home`.
+- **Known limit, nested targets can be bypassed at runtime:** a target below a user-owned directory, such as `.ssh/authorized_keys` or `.config/autostart/`, can be dodged until the next reboot. The user can rename the parent directory, which moves the mount with it, and recreate it unprotected (`mv ~/.ssh ~/.x && mkdir ~/.ssh`). Direct children of the home, like `.zshrc`, can't be dodged this way, because a mount point can't be renamed or removed. A user-planted symlink at a target path could also redirect the bind at boot, and `nofail` would hide that failure. v0.1 mitigation: e2e test (g) checks that a planted symlink target doesn't redirect the bind. Fix: follow-up #7.
+- **Known limit, other autostart vectors:** these also exist, such as compositor configs, `.desktop` overrides, editor plugins, and `~/.config/systemd/user.conf`, whose `DefaultEnvironment=` reaches every user unit. They're added to the manifest defaults when the Cockpit picks the compositor (follow-up #5). Sentinel watches the rest of `/home`.
 
 ### 4.5 Code structure (Rust workspace `aios-cli/`)
 
@@ -471,7 +473,7 @@ The Base ISO includes no desktop. The Cockpit sub-project picks the compositor. 
 | Shell | `shellcheck`, `bats` | `aios-root.sh` with a fake `btrfs`/`mount`/`umount` on PATH (with failure injection) and a fake `/proc/cmdline` (env override): normal boot, missing gen, missing `@blank`, no or invalid gen on cmdline, stale candidates, nested subvolumes (including one named like a top-level subvolume), a non-subvolume at a live name, and mount/snapshot/unmount failures. `aios-health.sh` with fake `findmnt` (including stacked mounts) and cmdline. Installer `lib/` helpers: config parser (rejects unknown keys and shell metacharacters), disk validation, v3 detection parsing |
 | Units | `systemd-analyze verify` | `aios-root.service`, `sysroot-etc.mount`, `aios-health.service` |
 | Packaging | `makepkg` in `make repo`, `namcap` if available | PKGBUILDs build |
-| E2E | `make e2e`: pytest harness in `tests/e2e/`, QEMU (`-enable-kvm -cpu host -m 4G`), OVMF `OVMF_CODE.secboot.4m.fd` + a copy of the vars, `swtpm` socket TPM 2.0, a 20 GiB qcow2 | Boots the ISO with the fw_cfg install config, drives the serial console via a unix socket: install → reboot → LUKS passphrase → log in as the test user → assertions (a)–(f) from §1. Needs `out/aios-*.iso` |
+| E2E | `make e2e`: pytest harness in `tests/e2e/`, QEMU (`-enable-kvm -cpu host -m 4G`), OVMF `OVMF_CODE.secboot.4m.fd` + a copy of the vars, `swtpm` socket TPM 2.0, a 20 GiB qcow2 | Boots the ISO with the fw_cfg install config, drives the serial console via a unix socket: install → reboot → LUKS passphrase → log in as the test user → assertions (a)–(g) from §1. Needs `out/aios-*.iso` |
 
 `make check` = `cargo test` + `cargo clippy -D warnings` + shellcheck + bats + `systemd-analyze verify`. It needs no root and no VM.
 
@@ -499,3 +501,10 @@ AIOS/
 4. Offline install from the ISO's local repo.
 5. Managed home paths for the compositor chosen by the Cockpit, plus `~/.config/systemd/user.conf` (§4.4).
 6. Network trade-offs (§5.5): a manifest switch for loose `rp_filter` on multi-homed/VPN hosts, a captive-portal flow under strict DoT, IPv6 DoT resolvers, and opt-in forward rules for rootful container/VM NAT.
+7. Replace the fstab home binds with a root oneshot run before `user@.service`. For each target it:
+   - resolves the path with `openat2(RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH)`;
+   - re-creates a missing or replaced parent directory;
+   - bind-mounts through the file descriptor (`move_mount`);
+   - reports any failure to the journal and to `aios status`;
+   - re-checks at every user login, closing the rename bypass (§4.4).
+8. Read manifest sources from the git objects at `manifest_commit` instead of the working tree. This closes the check-then-read race, and guarantees that `apply` builds exactly what `plan` showed.

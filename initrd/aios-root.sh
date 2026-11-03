@@ -65,7 +65,7 @@ generation_from_cmdline() {
 delete_subvol() (
     target="$TOP/$1"
     [ -e "$target" ] || exit 0
-    btrfs subvolume show "$target" >/dev/null 2>&1 || die "$1 exists but is not a subvolume"
+    btrfs subvolume show "$target" >/dev/null || die "$1 exists but is not a subvolume"
     log "deleting $1"
     btrfs subvolume delete --recursive "$target" >/dev/null
 )

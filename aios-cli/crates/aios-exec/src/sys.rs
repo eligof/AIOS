@@ -80,6 +80,8 @@ pub fn parse_efivar_utf16(bytes: &[u8]) -> Option<String> {
     if data.len() % 2 != 0 {
         return None;
     }
+    // `chunks_exact`, not `as_chunks`: the latter needs Rust 1.88.
+    #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
     let units: Vec<u16> = data
         .chunks_exact(2)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))

@@ -12,12 +12,14 @@ BATS ?= $(shell command -v bats || echo build/tools/bats-core/bin/bats)
 
 # What the shell and unit checks cover. installer/lib/keys.sh is generated (make keys).
 INSTALLER_LIBS := installer/lib/common.sh installer/lib/config.sh installer/lib/disk.sh \
-	installer/lib/cpu.sh
+	installer/lib/cpu.sh installer/lib/manifest.sh installer/lib/skeleton.sh \
+	installer/lib/secrets.sh installer/lib/usbguard.sh installer/lib/boot.sh
 SH_SCRIPTS := initrd/aios-root.sh base/aios-health.sh
 BASH_SCRIPTS := initrd/install/aios tests/bats/fakes/btrfs tests/bats/fakes/record \
 	tests/bats/fakes/findmnt tests/bats/fakes/installer $(INSTALLER_LIBS)
 BATS_FILES := tests/bats/aios-root.bats tests/bats/install-hook.bats tests/bats/aios-health.bats \
-	tests/bats/installer-config.bats tests/bats/installer-disk.bats
+	tests/bats/installer-config.bats tests/bats/installer-disk.bats \
+	tests/bats/installer-target.bats
 UNITS := initrd/aios-root.service initrd/sysroot-etc.mount base/aios-health.service
 
 .PHONY: check rust-check shell-check bats-check unit-check tools repo

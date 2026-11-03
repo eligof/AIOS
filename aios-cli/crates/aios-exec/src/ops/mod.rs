@@ -41,15 +41,16 @@ fn with_top<T>(
     }
     let mount = TopMount::mount(runner, &layout.device, &view.top, read_only)?;
     let result = f(&view);
-    let unmounted = mount.unmount();
-    let value = result?;
-    unmounted?;
-    Ok(value)
+    match (result, mount.unmount()) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(e), Ok(())) | (Ok(_), Err(e)) => Err(e),
+        (Err(e), Err(unmount)) => Err(ExecError(format!("{e}; also, {unmount}"))),
+    }
 }
 
 /// The top level mounted at `path`. `unmount` reports a failure; if it never runs (an
-/// early return or a panic), dropping the guard unmounts anyway, ignoring errors. A
-/// private (reader) mount point is removed once unmounted.
+/// early return or a panic), dropping the guard unmounts anyway and logs a failure to
+/// stderr. A private (reader) mount point is removed once unmounted.
 struct TopMount<'a> {
     runner: &'a dyn CommandRunner,
     path: PathBuf,
@@ -64,7 +65,8 @@ impl<'a> TopMount<'a> {
         path: &Path,
         read_only: bool,
     ) -> Result<TopMount<'a>, ExecError> {
-        // Created before mounting, so a failed mount still removes a private directory.
+        // Built before mounting (`mount_top` creates the directory), so a failed mount
+        // still removes a private directory.
         let mut guard = TopMount {
             runner,
             path: path.to_path_buf(),
@@ -102,7 +104,9 @@ impl<'a> TopMount<'a> {
 
 impl Drop for TopMount<'_> {
     fn drop(&mut self) {
-        let _ = self.release();
+        if let Err(e) = self.release() {
+            eprintln!("aios: cleanup: {e}");
+        }
     }
 }
 
@@ -137,6 +141,25 @@ mod tests {
             ]
         );
         assert!(!ro.exists(), "mount point left behind");
+    }
+
+    #[test]
+    fn a_failed_unmount_is_reported_even_when_the_reader_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::under(dir.path());
+        let mut runner = FakeRunner::new();
+        runner.fail_on(&["umount"]);
+        let err = with_top(&runner, &layout, true, |_| -> Result<(), ExecError> {
+            Err(ExecError::new("reader failed"))
+        })
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "reader failed; also, `umount {}` exited with status 1: injected failure",
+                layout.ro_top().display()
+            )
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ rust-check:
 	cd aios-cli && $(CARGO) test --workspace --all-features
 	cd aios-cli && $(CARGO) build --release --locked -p aios
 	test -s aios-cli/target/release/aios
-	! grep -q AIOS_FAKE_RUNNER aios-cli/target/release/aios
+	! grep -qE 'AIOS_(FAKE_RUNNER|TEST_PASSWORD)' aios-cli/target/release/aios
 
 shell-check: tools
 	$(SHELLCHECK) -s sh $(SH_SCRIPTS)

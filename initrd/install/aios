@@ -2,6 +2,8 @@
 # mkinitcpio install hook "aios" (spec §3 steps 4-8). Needs the systemd hook before it.
 # The units live on the host under /usr/lib/aios/initrd/, outside the host's unit path,
 # so only the initrd ever loads them.
+# aios-root.sh relies on the base hook's busybox for sh, cat and mkdir, and on the
+# util-linux mount and umount that the base and systemd hooks add; this hook adds btrfs.
 
 build() {
     add_binary btrfs
@@ -12,7 +14,7 @@ build() {
 
     add_symlink /usr/lib/systemd/system/sysroot.mount.requires/aios-root.service \
         /usr/lib/systemd/system/aios-root.service
-    add_symlink /usr/lib/systemd/system/initrd-fs.target.wants/sysroot-etc.mount \
+    add_symlink /usr/lib/systemd/system/initrd-fs.target.requires/sysroot-etc.mount \
         /usr/lib/systemd/system/sysroot-etc.mount
 }
 

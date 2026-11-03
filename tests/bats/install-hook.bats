@@ -3,6 +3,7 @@
 
 setup() {
     HOOK="$BATS_TEST_DIRNAME/../../initrd/install/aios"
+    INITRD="$BATS_TEST_DIRNAME/../../initrd"
 }
 
 # Source the hook with mkinitcpio's add_* functions replaced by recorders, then call $1.
@@ -26,7 +27,14 @@ hook() {
     [ "${lines[2]}" = "add_file /usr/lib/aios/initrd/aios-root.service /usr/lib/systemd/system/aios-root.service" ]
     [ "${lines[3]}" = "add_file /usr/lib/aios/initrd/sysroot-etc.mount /usr/lib/systemd/system/sysroot-etc.mount" ]
     [ "${lines[4]}" = "add_symlink /usr/lib/systemd/system/sysroot.mount.requires/aios-root.service /usr/lib/systemd/system/aios-root.service" ]
-    [ "${lines[5]}" = "add_symlink /usr/lib/systemd/system/initrd-fs.target.wants/sysroot-etc.mount /usr/lib/systemd/system/sysroot-etc.mount" ]
+    [ "${lines[5]}" = "add_symlink /usr/lib/systemd/system/initrd-fs.target.requires/sysroot-etc.mount /usr/lib/systemd/system/sysroot-etc.mount" ]
+}
+
+@test "aios-root.service fails loudly outside the initrd instead of being skipped" {
+    run grep -x 'AssertPathExists=/etc/initrd-release' "$INITRD/aios-root.service"
+    [ "$status" -eq 0 ]
+    run grep '^ConditionPathExists=' "$INITRD/aios-root.service"
+    [ "$status" -eq 1 ]
 }
 
 @test "help explains the hook" {

@@ -166,3 +166,146 @@ fn real_runner_reports_a_program_it_cannot_start() {
         "got {err}"
     );
 }
+
+#[test]
+fn real_runner_passes_only_path_lc_all_and_term() {
+    let out = run_ok(&RealRunner, &Cmd::new("env")).unwrap();
+    let mut vars: Vec<String> = out.stdout_text().lines().map(str::to_string).collect();
+    vars.sort();
+    let mut expected = vec!["LC_ALL=C".to_string(), "PATH=/usr/bin".to_string()];
+    if let Some(term) = std::env::var_os("TERM") {
+        expected.push(format!("TERM={}", term.to_string_lossy()));
+    }
+    assert_eq!(vars, expected);
+}
+
+#[test]
+fn real_runner_children_read_dev_null_by_default() {
+    let cmd = Cmd::new("sh").args(["-c", "readlink /proc/self/fd/0"]);
+    assert_eq!(
+        run_ok(&RealRunner, &cmd).unwrap().stdout_text(),
+        "/dev/null\n"
+    );
+}
+
+#[test]
+fn interactive_commands_inherit_all_three_streams() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("fds");
+    let script = format!(
+        "for fd in 0 1 2; do readlink /proc/$$/fd/$fd >> '{}'; done",
+        log.display()
+    );
+    let cmd = Cmd::new("sh").args(["-c", &script]).interactive();
+    assert!(cmd.interactive);
+    let out = RealRunner.run(&cmd).unwrap();
+    assert_eq!(out, Output::default(), "nothing is captured");
+    let ours: Vec<String> = (0..3)
+        .map(|fd| {
+            let link = fs::read_link(format!("/proc/self/fd/{fd}")).unwrap();
+            format!("{}\n", link.display())
+        })
+        .collect();
+    assert_eq!(fs::read_to_string(&log).unwrap(), ours.concat());
+}
+
+#[test]
+fn large_stdin_does_not_deadlock() {
+    let input: Vec<u8> = (0..4 << 20).map(|i: u32| b'a' + (i % 26) as u8).collect();
+    let out = run_ok(&RealRunner, &Cmd::new("cat").stdin(input.clone())).unwrap();
+    assert!(out.stdout == input, "cat echoed {} bytes", out.stdout.len());
+}
+
+#[test]
+fn a_child_that_ignores_its_stdin_is_judged_by_its_status() {
+    let cmd = Cmd::new("true").stdin(vec![b'x'; 1 << 20]);
+    assert_eq!(RealRunner.run(&cmd).unwrap().status, 0);
+}
+
+#[test]
+fn a_signal_death_is_reported_as_such() {
+    let cmd = Cmd::new("sh").args(["-c", "kill -9 $$"]);
+    let out = RealRunner.run(&cmd).unwrap();
+    assert_eq!(out.signal, Some(9));
+    assert_ne!(out.status, 0);
+    assert_eq!(
+        run_ok(&RealRunner, &cmd).unwrap_err().to_string(),
+        "`sh -c 'kill -9 $$'` killed by signal 9"
+    );
+}
+
+#[test]
+fn status_error_names_the_signal() {
+    let out = Output {
+        status: -1,
+        signal: Some(15),
+        stderr: b"Terminated\n".to_vec(),
+        ..Output::default()
+    };
+    assert_eq!(
+        aios_exec::status_error(&Cmd::new("pacman"), &out).to_string(),
+        "`pacman` killed by signal 15: Terminated"
+    );
+}
+
+#[test]
+fn stderr_tail_lines_are_capped_and_escaped() {
+    let long = "x".repeat(1000);
+    let stderr = format!("first\n\x1b[31mred\x1b[0m\rfake: ok\n{long}\n");
+    let mut fake = FakeRunner::new();
+    fake.respond(&["pacman"], Output::failed(1, stderr));
+    let err = run_ok(&fake, &Cmd::new("pacman")).unwrap_err().to_string();
+    let expected = format!(
+        "`pacman` exited with status 1: first; \\u{{1b}}[31mred\\u{{1b}}[0m\\rfake: ok; {}…",
+        "x".repeat(300)
+    );
+    assert_eq!(err, expected);
+}
+
+#[test]
+fn the_stdout_tail_stands_in_for_an_empty_stderr() {
+    let mut fake = FakeRunner::new();
+    fake.respond(
+        &["pacman"],
+        Output {
+            status: 1,
+            stdout: b"resolving dependencies...\nerror: target not found: tree\n".to_vec(),
+            ..Output::default()
+        },
+    );
+    assert_eq!(
+        run_ok(&fake, &Cmd::new("pacman")).unwrap_err().to_string(),
+        "`pacman` exited with status 1: resolving dependencies...; error: target not found: tree"
+    );
+}
+
+#[test]
+fn debug_redacts_stdin() {
+    let cmd = Cmd::new("mkpasswd").arg("-s").stdin("hunter2\n");
+    let debug = format!("{cmd:?}");
+    assert!(!debug.contains("hunter2"), "{debug}");
+    assert_eq!(
+        debug,
+        "Cmd { program: \"mkpasswd\", args: [\"-s\"], stdin: Some(<8 bytes redacted>), \
+         interactive: false }"
+    );
+}
+
+#[test]
+fn display_escapes_control_characters() {
+    assert_eq!(Cmd::new("echo").arg("a\nb").to_string(), "echo \"a\\nb\"");
+    assert_eq!(
+        Cmd::new("git")
+            .args(["commit", "-m", "x\r\x1b[2Jaios: ok"])
+            .to_string(),
+        "git commit -m \"x\\r\\u{1b}[2Jaios: ok\""
+    );
+    assert_eq!(
+        Cmd::new("echo").arg("it's\t").to_string(),
+        "echo \"it's\\t\""
+    );
+    assert!(!Cmd::new("x")
+        .arg("\u{202e}gpj")
+        .to_string()
+        .contains('\u{202e}'));
+}

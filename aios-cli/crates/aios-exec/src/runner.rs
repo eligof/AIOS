@@ -4,16 +4,20 @@ use std::cell::RefCell;
 use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Write};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 /// One command line. `stdin`, when set, is written to the child's standard input. It is
-/// never part of `Display`, because it may hold a password.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// never part of `Display` or `Debug`, because it may hold a password.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Cmd {
     pub program: String,
     pub args: Vec<String>,
     pub stdin: Option<Vec<u8>>,
+    /// The child talks to the user: it inherits all three standard streams (nothing is
+    /// captured), except that `stdin` bytes, if any, still go through a pipe.
+    pub interactive: bool,
 }
 
 impl Cmd {
@@ -22,6 +26,7 @@ impl Cmd {
             program: program.into(),
             args: Vec::new(),
             stdin: None,
+            interactive: false,
         }
     }
 
@@ -49,6 +54,13 @@ impl Cmd {
         self
     }
 
+    /// For a tool that must prompt the user (`systemd-cryptenroll` asking for the PIN):
+    /// see [`Cmd::interactive`](Cmd#structfield.interactive).
+    pub fn interactive(mut self) -> Cmd {
+        self.interactive = true;
+        self
+    }
+
     /// The program followed by its arguments.
     pub fn argv(&self) -> impl Iterator<Item = &str> {
         std::iter::once(self.program.as_str()).chain(self.args.iter().map(String::as_str))
@@ -56,11 +68,35 @@ impl Cmd {
 }
 
 impl fmt::Display for Cmd {
-    /// Shell-like: words outside `[A-Za-z0-9@%+=:,./_-]` are single-quoted.
+    /// Shell-like: words outside `[A-Za-z0-9@%+=:,./_-]` are single-quoted. Words with a
+    /// control or other unprintable character are written escaped in double quotes
+    /// (`"a\nb"`), so a command can never forge a second log line.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let words: Vec<String> = self.argv().map(quote).collect();
         f.write_str(&words.join(" "))
     }
+}
+
+impl fmt::Debug for Cmd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct Redacted(usize);
+        impl fmt::Debug for Redacted {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                write!(f, "<{} bytes redacted>", self.0)
+            }
+        }
+        f.debug_struct("Cmd")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("stdin", &self.stdin.as_ref().map(|b| Redacted(b.len())))
+            .field("interactive", &self.interactive)
+            .finish()
+    }
+}
+
+/// `c` is shown escaped by `escape_debug` for a reason other than quoting.
+fn unprintable(c: char) -> bool {
+    !matches!(c, '\'' | '"' | '\\') && c.escape_debug().nth(1).is_some()
 }
 
 fn quote(word: &str) -> String {
@@ -70,6 +106,8 @@ fn quote(word: &str) -> String {
             .all(|b| b.is_ascii_alphanumeric() || b"@%+=:,./_-".contains(&b));
     if safe {
         word.to_string()
+    } else if word.chars().any(unprintable) {
+        format!("{word:?}")
     } else {
         format!("'{}'", word.replace('\'', "'\\''"))
     }
@@ -78,7 +116,10 @@ fn quote(word: &str) -> String {
 /// What a finished command produced.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Output {
+    /// The exit status; -1 when the child was killed by a signal.
     pub status: i32,
+    /// The signal that killed the child, if one did.
+    pub signal: Option<i32>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
 }
@@ -87,9 +128,8 @@ impl Output {
     /// Exit status 0 with this standard output.
     pub fn ok(stdout: impl Into<Vec<u8>>) -> Output {
         Output {
-            status: 0,
             stdout: stdout.into(),
-            stderr: Vec::new(),
+            ..Output::default()
         }
     }
 
@@ -97,8 +137,8 @@ impl Output {
     pub fn failed(status: i32, stderr: impl Into<Vec<u8>>) -> Output {
         Output {
             status,
-            stdout: Vec::new(),
             stderr: stderr.into(),
+            ..Output::default()
         }
     }
 
@@ -119,63 +159,123 @@ pub trait CommandRunner {
 }
 
 /// Run `cmd` and turn a non-zero exit into an error naming the command and the last
-/// lines of its standard error.
+/// lines of its output (see [`status_error`]).
 pub fn run_ok(runner: &dyn CommandRunner, cmd: &Cmd) -> Result<Output, ExecError> {
     let out = runner.run(cmd)?;
-    if out.status == 0 {
+    if out.status == 0 && out.signal.is_none() {
         Ok(out)
     } else {
         Err(status_error(cmd, &out))
     }
 }
 
-/// The error `run_ok` reports for a command that exited with `out.status`.
+/// Longest line of command output an error message quotes, in characters.
+const TAIL_LINE_MAX: usize = 300;
+
+/// The error `run_ok` reports for a command that failed with `out`: how it ended, then
+/// the last three non-empty lines of standard error (of standard output when standard
+/// error is empty), each escaped and cut to `TAIL_LINE_MAX` characters.
 pub fn status_error(cmd: &Cmd, out: &Output) -> ExecError {
-    let text = out.stderr_text();
-    let lines: Vec<&str> = text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
-    let tail = lines[lines.len().saturating_sub(3)..].join("; ");
+    let how = match out.signal {
+        Some(signal) => format!("killed by signal {signal}"),
+        None => format!("exited with status {}", out.status),
+    };
+    let tail = Some(tail(&out.stderr))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| tail(&out.stdout));
     if tail.is_empty() {
-        ExecError(format!("`{cmd}` exited with status {}", out.status))
+        ExecError(format!("`{cmd}` {how}"))
     } else {
-        ExecError(format!("`{cmd}` exited with status {}: {tail}", out.status))
+        ExecError(format!("`{cmd}` {how}: {tail}"))
     }
 }
 
-/// Runs commands with `std::process::Command`, capturing stdout and stderr. Standard input
-/// is inherited unless the command supplies bytes, so interactive tools such as
-/// `systemd-cryptenroll` can still prompt on the terminal.
+fn tail(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<String> = text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(escape_line)
+        .collect();
+    lines[lines.len().saturating_sub(3)..].join("; ")
+}
+
+fn escape_line(line: &str) -> String {
+    let mut escaped = String::new();
+    for c in line.chars() {
+        if unprintable(c) {
+            escaped.extend(c.escape_debug());
+        } else {
+            escaped.push(c);
+        }
+    }
+    match escaped.char_indices().nth(TAIL_LINE_MAX) {
+        Some((cut, _)) => format!("{}…", &escaped[..cut]),
+        None => escaped,
+    }
+}
+
+/// Runs commands with `std::process::Command`. The child gets a clean environment
+/// (`PATH=/usr/bin`, `LC_ALL=C`, and `TERM` if set) and `/dev/null` as standard input
+/// unless the command supplies bytes; stdout and stderr are captured. An
+/// [`interactive`](Cmd::interactive) command instead inherits all three streams.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RealRunner;
 
 impl CommandRunner for RealRunner {
     fn run(&self, cmd: &Cmd) -> Result<Output, ExecError> {
         let fail = |e: std::io::Error| ExecError(format!("cannot run `{cmd}`: {e}"));
-        let mut child = Command::new(&cmd.program)
+        let mut command = Command::new(&cmd.program);
+        command
             .args(&cmd.args)
-            .stdin(if cmd.stdin.is_some() {
-                Stdio::piped()
-            } else {
+            .env_clear()
+            .env("PATH", "/usr/bin")
+            .env("LC_ALL", "C");
+        if let Some(term) = std::env::var_os("TERM") {
+            command.env("TERM", term);
+        }
+        let stream = || {
+            if cmd.interactive {
                 Stdio::inherit()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            } else {
+                Stdio::piped()
+            }
+        };
+        let stdin = match (&cmd.stdin, cmd.interactive) {
+            (Some(_), _) => Stdio::piped(),
+            (None, true) => Stdio::inherit(),
+            (None, false) => Stdio::null(),
+        };
+        let mut child = command
+            .stdin(stdin)
+            .stdout(stream())
+            .stderr(stream())
             .spawn()
             .map_err(fail)?;
-        if let (Some(bytes), Some(mut pipe)) = (&cmd.stdin, child.stdin.take()) {
-            // A child that exits without reading its input is reported by its status.
-            if let Err(e) = pipe.write_all(bytes) {
-                if e.kind() != ErrorKind::BrokenPipe {
-                    return Err(fail(e));
-                }
-            }
-        }
-        let out = child.wait_with_output().map_err(fail)?;
+        let pipe = child.stdin.take();
+        // Feed stdin from its own thread while this one drains stdout and stderr, so a
+        // child that writes before it has read all of its input cannot deadlock us.
+        let (out, fed) = std::thread::scope(|scope| {
+            let feeder = pipe.zip(cmd.stdin.as_deref()).map(|(mut pipe, bytes)| {
+                scope.spawn(move || match pipe.write_all(bytes) {
+                    // A child that exits without reading its input is judged by its status.
+                    Err(e) if e.kind() == ErrorKind::BrokenPipe => Ok(()),
+                    result => result,
+                })
+            });
+            let out = child.wait_with_output();
+            let fed = feeder.map_or(Ok(()), |f| {
+                f.join()
+                    .unwrap_or_else(|_| Err(std::io::Error::other("stdin writer panicked")))
+            });
+            (out, fed)
+        });
+        let out = out.map_err(fail)?;
+        fed.map_err(fail)?;
         Ok(Output {
             status: out.status.code().unwrap_or(-1),
+            signal: out.status.signal(),
             stdout: out.stdout,
             stderr: out.stderr,
         })
@@ -264,6 +364,7 @@ impl FakeRunner {
                     status: entry.status,
                     stdout: entry.stdout.into_bytes(),
                     stderr: entry.stderr.into_bytes(),
+                    ..Output::default()
                 },
             );
         }

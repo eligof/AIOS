@@ -44,6 +44,7 @@ fn synced() -> Fixture {
                 status: 1,
                 stdout: b"disabled\n".to_vec(),
                 stderr: Vec::new(),
+                signal: None,
             },
         )
         .respond(
@@ -52,6 +53,7 @@ fn synced() -> Fixture {
                 status: 1,
                 stdout: b"masked\n".to_vec(),
                 stderr: Vec::new(),
+                signal: None,
             },
         );
     fx

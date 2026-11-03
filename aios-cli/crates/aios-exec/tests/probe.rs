@@ -160,6 +160,7 @@ fn systemctl_answers_map_onto_unit_states() {
             status,
             stdout: stdout.into(),
             stderr: stderr.into(),
+            signal: None,
         };
         assert_eq!(parse_unit_state("x.service", &out), Ok(want), "{stdout:?}");
     }
@@ -171,6 +172,7 @@ fn bad_or_unknown_answers_are_errors() {
         status: 1,
         stdout: b"bad\n".to_vec(),
         stderr: Vec::new(),
+        signal: None,
     };
     assert_eq!(
         parse_unit_state("x.service", &out),

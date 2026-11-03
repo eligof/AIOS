@@ -20,7 +20,10 @@ pub use home::{home_binds, HomeBind};
 pub use managed::{managed_list, parse_managed_list, ManagedListError};
 pub use merge::{merge_users, MANAGED_IDS};
 pub use simple::{hostname, loader_conf, locale_conf, locale_gen, localtime_target, vconsole_conf};
-pub use tmpfiles::{home_tmpfiles, persist_dirs, persist_tmpfiles, tmpfiles_escape};
+pub use tmpfiles::{
+    home_tmpfiles, parse_pkgdirs_tmpfiles, persist_dirs, persist_tmpfiles, pkgdirs_tmpfiles,
+    tmpfiles_escape, PackagePath,
+};
 pub use users::{
     GroupEntry, GshadowEntry, PasswdEntry, ShadowEntry, UserDb, UserDbError, UserFiles,
 };

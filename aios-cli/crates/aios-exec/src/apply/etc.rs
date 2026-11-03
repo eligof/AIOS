@@ -16,7 +16,8 @@ const SETID: u32 = 0o6000;
 impl Run<'_> {
     /// Spec §4.3 steps 5–6: write the desired `/etc` (files, generated config, merged
     /// accounts, home bind sources) into `@etc-cand`, drop paths the previous generation
-    /// managed and this one doesn't, write `generation.toml`, run `locale-gen`, apply
+    /// managed and this one doesn't, write `generation.toml` and `aios-pkgdirs.conf` (both
+    /// from the installed packages), run `locale-gen`, apply
     /// `[files]` owners, and create the persist directories the binds need (plus, for
     /// bootstrap, the home directories). A file that gets an owner is written without its
     /// setuid and setgid bits, which it gets only after the `chown` (that would clear them,
@@ -71,6 +72,7 @@ impl Run<'_> {
             etcfs::create_dirs(&etc, &bind.bind_source)?;
         }
         self.write_generation_toml(&etc)?;
+        self.write_pkgdirs(&etc)?;
 
         if desired.contains_key("/etc/locale.gen") {
             self.chroot(&["locale-gen"], &[])?;

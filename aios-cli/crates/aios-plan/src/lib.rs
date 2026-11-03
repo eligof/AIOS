@@ -6,6 +6,6 @@ mod desired;
 mod plan;
 mod probe;
 
-pub use desired::{desired_etc, Inputs, PlanError, GENERATION_TOML, MANAGED_FILES};
+pub use desired::{desired_etc, Inputs, PlanError, GENERATION_TOML, MANAGED_FILES, PKGDIRS_CONF};
 pub use plan::{build_plan, ChangeKind, EtcChange, Plan, UnitChange, LOCKDOWN_NONE_WARNING};
 pub use probe::{EtcEntry, ProbeError, SystemProbe, UnitState};

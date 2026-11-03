@@ -1,4 +1,5 @@
-use crate::{desired_etc, EtcEntry, Inputs, PlanError, SystemProbe, UnitState, MANAGED_FILES};
+use crate::{desired_etc, EtcEntry, Inputs, PlanError, SystemProbe, UnitState};
+use crate::{MANAGED_FILES, PKGDIRS_CONF};
 use aios_manifest::Lockdown;
 use aios_render::parse_managed_list;
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,7 +63,8 @@ impl Plan {
 ///
 /// - Packages: the manifest's package set against `pacman -Qqe`.
 /// - `/etc`: [`desired_etc`] against the booted snapshot; paths listed in its
-///   `managed-files` that are no longer desired are removals.
+///   `managed-files` that are no longer desired are removals. [`PKGDIRS_CONF`] is never
+///   compared: its content follows the packages, which only an apply's candidate has.
 /// - Units: `enable`/`disable`/`mask`, with `mask` beating `disable` beating `enable` for a
 ///   unit listed twice. `static` satisfies `enable`; `static` and `not-found` satisfy `disable`.
 pub fn build_plan(inputs: &Inputs, probe: &dyn SystemProbe) -> Result<Plan, PlanError> {
@@ -98,7 +100,7 @@ pub fn build_plan(inputs: &Inputs, probe: &dyn SystemProbe) -> Result<Plan, Plan
             message: e.to_string(),
         })?;
         for path in listed {
-            if !desired.contains_key(&path) {
+            if !desired.contains_key(&path) && path != PKGDIRS_CONF {
                 etc_changes.push(EtcChange {
                     path,
                     kind: ChangeKind::Remove,

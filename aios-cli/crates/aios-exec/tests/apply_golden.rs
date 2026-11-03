@@ -29,6 +29,7 @@ arch-chroot {cand} pacman -Qdtq
 arch-chroot {cand} pacman -Rns --noconfirm -- libnano
 arch-chroot {cand} pacman -Q -- linux-cachyos linux-cachyos-lts
 arch-chroot {cand} pacman -Qq
+arch-chroot {cand} pacman -Qlq
 arch-chroot {cand} locale-gen
 arch-chroot {cand} chown -h -- root:wheel /etc/usbguard/usbguard-daemon.conf
 systemctl --root={cand} enable -- NetworkManager.service aios-health.service fwupd-refresh.timer
@@ -71,6 +72,7 @@ arch-chroot {cand} pacman-key --init
 arch-chroot {cand} pacman-key --populate archlinux cachyos
 arch-chroot {cand} pacman -Q -- linux-cachyos linux-cachyos-lts
 arch-chroot {cand} pacman -Qq
+arch-chroot {cand} pacman -Qlq
 arch-chroot {cand} locale-gen
 arch-chroot {cand} chown -h -- root:wheel /etc/usbguard/usbguard-daemon.conf
 chown -- 1000:1000 {home}/eli

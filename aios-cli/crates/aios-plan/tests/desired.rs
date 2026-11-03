@@ -1,6 +1,6 @@
 mod common;
 
-use aios_plan::{desired_etc, EtcEntry, PlanError, MANAGED_FILES};
+use aios_plan::{desired_etc, EtcEntry, PlanError, MANAGED_FILES, PKGDIRS_CONF};
 use aios_render::{cmdline, fstab, managed_list, UserDbError};
 use common::{fixture, fixture_with, text_file, write, FakeProbe, ELI_HASH, MANIFEST};
 use std::ffi::OsStr;
@@ -155,12 +155,31 @@ fn home_sources_copy_files_and_walk_directories() {
 }
 
 #[test]
-fn managed_files_lists_every_path_including_itself() {
+fn managed_files_lists_every_path_including_itself_and_pkgdirs_conf() {
     let fx = fixture();
     let d = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap();
-    let paths: Vec<String> = d.keys().cloned().collect();
+    let mut paths: Vec<String> = d.keys().cloned().collect();
     assert!(paths.iter().any(|p| p == MANAGED_FILES));
+    paths.push(PKGDIRS_CONF.to_string());
     assert_eq!(d[MANAGED_FILES], text_file(&managed_list(&paths), 0o644));
+}
+
+/// The executor renders `aios-pkgdirs.conf` from the candidate's packages (spec §4.3
+/// step 5), so it is managed but never part of the desired state, even when `[files]`
+/// names it.
+#[test]
+fn pkgdirs_conf_is_managed_but_never_desired() {
+    let fx = fixture_with(&MANIFEST.replace(
+        "[files]\n",
+        "[files]\n\"/etc/tmpfiles.d/aios-pkgdirs.conf\" = { source = \"files/nftables.conf\" }\n",
+    ));
+    let d = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap();
+    assert!(!d.contains_key(PKGDIRS_CONF));
+    let EtcEntry::File { content, .. } = &d[MANAGED_FILES] else {
+        panic!("managed-files is a file")
+    };
+    let listed = String::from_utf8(content.clone()).unwrap();
+    assert!(listed.lines().any(|l| l == PKGDIRS_CONF), "{listed}");
 }
 
 #[test]

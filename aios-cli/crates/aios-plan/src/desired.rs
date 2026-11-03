@@ -14,6 +14,11 @@ use std::path::{Path, PathBuf};
 pub const MANAGED_FILES: &str = "/etc/aios/managed-files";
 /// Written by the executor for each generation; never part of the desired state.
 pub const GENERATION_TOML: &str = "/etc/aios/generation.toml";
+/// Recreates the package-owned paths outside `/usr` and `/etc` at every boot. The executor
+/// renders it from the candidate's packages once they are installed (spec §4.3 step 5), so
+/// it is listed in [`MANAGED_FILES`] but never part of the desired state: `aios plan`
+/// can't know package contents, and never compares this file.
+pub const PKGDIRS_CONF: &str = "/etc/tmpfiles.d/aios-pkgdirs.conf";
 
 /// Everything the planner needs besides the probe.
 pub struct Inputs<'a> {
@@ -103,7 +108,8 @@ impl From<ProbeError> for PlanError {
 /// Every `/etc` entry aios writes into a generation built from `inputs`.
 ///
 /// Later sources win on a path clash: `[files]`, then generated files, then account files,
-/// then home bind sources, then `managed-files`. The account files merge the declared users
+/// then home bind sources, then `managed-files`, which also lists [`PKGDIRS_CONF`] (never
+/// desired itself, whatever `[files]` says). The account files merge the declared users
 /// into the probe's current `passwd`/`group`/`shadow`/`gshadow` (absent = empty, though a
 /// passwd without root fails).
 ///
@@ -184,11 +190,13 @@ pub fn desired_etc(
         }
     }
 
+    out.remove(PKGDIRS_CONF);
     let mut paths: Vec<String> = out
         .keys()
         .filter(|p| p.as_str() != GENERATION_TOML)
         .cloned()
         .collect();
+    paths.push(PKGDIRS_CONF.to_string());
     paths.push(MANAGED_FILES.to_string());
     out.insert(
         MANAGED_FILES.to_string(),

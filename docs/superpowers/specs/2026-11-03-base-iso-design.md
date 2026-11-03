@@ -102,7 +102,7 @@ package_set_sha256 = "…"            # sha256 of sorted `pacman -Qq` output
    - `/efi` with `noauto,x-systemd.automount,umask=0077`.
    - A bind mount `/persist<path> → <path>` for every declared persistent directory (`bind,x-systemd.requires-mounts-for=/persist`).
    - Read-only bind mounts for managed home paths (§4.4).
-10. Declared persistent **files** become symlinks via `tmpfiles.d` (`L+ <path> - - - - /persist<path>`). Bind-mounting files is fragile.
+10. Declared persistent **files** become symlinks via `tmpfiles.d` (`L+ <path> - - - - /persist<path>`). Bind-mounting files is fragile. `tmpfiles.d/aios-pkgdirs.conf` recreates the directories and symlinks that packages own outside `/usr` and `/etc` (§4.3 step 5).
 11. `aios-health.service` (`Type=oneshot`, `RequiredBy=boot-complete.target`, `Before=boot-complete.target`) runs `/usr/lib/aios/aios-health.sh`, which checks:
     - `/usr` is mounted read-only from subvolume `@usr-gen-<aios.gen>`.
     - `/etc` is mounted from `@etc-live`.
@@ -114,6 +114,8 @@ package_set_sha256 = "…"            # sha256 of sorted `pacman -Qq` output
     On success `systemd-bless-boot.service` removes the counter. On failure the entry stays counted, and after 3 tries systemd-boot boots the next entry.
 
 **Effect:** any runtime write outside `/persist`, `/home` and `/var/log` disappears at reboot. That covers `/etc/systemd`, `/etc/ld.so.preload`, cron, `/root`, `/var/tmp` and `/var/lib/*` (except declared paths). `/usr` is read-only.
+
+The same goes for what packages install outside `/usr`, `/etc` and the persistent trees: the root is a fresh copy of `@blank`, not the candidate root pacman wrote into. Directories and symlinks there (`/opt`, `/mnt`, `/srv/http`, `/var/empty`, `/var/spool/mail`, `/var/mail`, ...) come back at every boot through `aios-pkgdirs.conf`. A package's regular file there can't, so `aios apply` warns about each one when it installs it.
 
 ## 4. Manifest and the `aios` CLI
 
@@ -211,7 +213,7 @@ shell  = "/usr/bin/zsh"
 
 | Command | Behavior |
 |---|---|
-| `aios plan` | Validate the manifest. Compare it with the booted generation and print a diff: packages added/removed (against `pacman -Qqe`), files changed (sha256 of the manifest source vs `@etc-gen-N` content), services, users, persist entries, home-managed entries, cmdline. Prints "no changes" and exits 0 when clean |
+| `aios plan` | Validate the manifest. Compare it with the booted generation and print a diff: packages added/removed (against `pacman -Qqe`), files changed (sha256 of the manifest source vs `@etc-gen-N` content), services, users, persist entries, home-managed entries, cmdline. Prints "no changes" and exits 0 when clean. Like `generation.toml`, `tmpfiles.d/aios-pkgdirs.conf` is never compared: its content follows the installed packages, which only an apply's candidate holds (§4.3 step 5). The package changes plan does show are what changes it |
 | `aios apply [--yes] [--upgrade]` | Show the plan and ask for confirmation unless `--yes`. Build gen N+1 (§4.3). This is also a full system upgrade (`-Syu`), because Arch doesn't support partial upgrades. Never modifies the running system except the ESP and the manifest repo commit. Prints "reboot to activate gen-N+1". When the plan shows no changes, it exits 0 without building. With `--upgrade` it builds anyway, printing `upgrading: no manifest changes` first: a full `pacman -Syu` with the same manifest |
 | `aios status` | Show booted gen, default gen and gens that failed to boot. Show runtime drift, which a reboot will discard: entries of `/etc` (directories and `/etc` itself included) that were added, removed or changed compared with `@etc-gen-<booted>`, with what changed: type, mode, owner (uid:gid), a symlink's target, a device node's number, a file's size or, at equal sizes, its bytes (xattrs, ACLs and hard links are not compared). A file is read through one descriptor opened with `O_NOFOLLOW \| O_NONBLOCK` and checked with `fstat` to be a regular file; FIFOs, sockets and devices are never opened. Files over 16 MiB are compared by size only (equal sizes get a note). An entry that can't be compared gets a note, and then no drift reads `none found in what could be compared`, not `none`. Control characters in printed paths are escaped |
 | `aios gen list` | List generations: id, created, manifest commit, kernels, boot state (booted / default / bad) |
@@ -251,6 +253,12 @@ Each step aborts on failure (or panic). Abort unmounts and deletes the candidate
    - Home-managed sources copied to `/etc/aios/home/<user>/…`, the bind sources.
    - `kernel/cmdline`.
    - `aios/generation.toml`.
+   - `tmpfiles.d/aios-pkgdirs.conf`, from the installed packages. Every boot starts from `@blank`, so what packages put outside `/usr` and `/etc` would be gone. It covers each path `pacman -Qlq` lists in the chroot that:
+     - lies outside `/usr`, `/etc`, `/boot`, `/persist`, `/home` and `/var/log` (the generation, and trees that persist or are only read during the build; `/var/log` is the `@log` bind while packages install) and outside the API and tmpfs mounts `/proc`, `/sys`, `/dev`, `/run`, `/tmp` and `/efi`, which start out empty on any system;
+     - `@blank` doesn't provide: it isn't in `@blank`, nor below one of its symlinks (`/bin`, `/lib`, `var/lib/pacman`, ...);
+     - isn't a declared persistent file.
+
+     Each is looked up in the candidate one component at a time, never following a symlink. A directory gets `d <path> <mode> <uid> <gid> -`, with its mode and numeric owner in the candidate, and a symlink `L <path> - - - - <target>`. A regular file can't be recreated: it becomes a warning, `package file <path> lives outside /usr and /etc and is lost at every boot`, and the apply still succeeds. Paths are tmpfiles-escaped. Apply's candidate root is a fresh snapshot of `@blank` and holds only what this transaction installed, so a path the candidate lacks keeps the booted generation's line, as long as a package still owns it. A package's file is therefore reported when that package is installed or upgraded. The file is listed in `managed-files` but never part of plan's comparison (§4.2). Its name sorts before most packages' `tmpfiles.d` files, so where both name a path its line is the one systemd-tmpfiles applies, and since it copies the candidate after pacman's tmpfiles hook ran, the two normally agree.
 6. Users: merge declared users into the candidate's `passwd`/`group`/`shadow`/`gshadow`.
    - Entries with uid < 1000 or ≥ 60000 (system and `nobody`) are kept as packages created them.
    - Declared users are created or updated with uid, primary group (same name, gid = uid), supplementary groups and shell. Their shadow hash comes from `secrets/passwd/<user>`.

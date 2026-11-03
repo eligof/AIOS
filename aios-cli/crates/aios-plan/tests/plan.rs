@@ -2,7 +2,7 @@ mod common;
 
 use aios_plan::{
     build_plan, ChangeKind, EtcChange, EtcEntry, Plan, PlanError, ProbeError, UnitChange,
-    UnitState, MANAGED_FILES,
+    UnitState, MANAGED_FILES, PKGDIRS_CONF,
 };
 use common::{fixture, fixture_with, text_file, FakeProbe, MANIFEST};
 use std::collections::BTreeMap;
@@ -121,6 +121,20 @@ fn dropped_file_is_removed_via_managed_files() {
             ),
         ]
     );
+}
+
+/// Its content follows the package set, which only the candidate has: plan never compares
+/// it (spec §4.2), and the managed-files entry is no removal.
+#[test]
+fn pkgdirs_conf_is_never_compared() {
+    let fx = fixture();
+    let mut probe = FakeProbe::synced(&fx);
+    probe.etc.insert(
+        PKGDIRS_CONF.to_string(),
+        text_file("d /opt 0755 0 0 -\n", 0o644),
+    );
+    let plan = build_plan(&fx.inputs(), &probe).unwrap();
+    assert!(plan.is_empty(), "unexpected plan:\n{plan}");
 }
 
 #[test]

@@ -5,6 +5,7 @@
 mod etc;
 mod finalize;
 mod packages;
+mod pkgdirs;
 mod prepare;
 mod services;
 mod uki;
@@ -52,8 +53,9 @@ pub struct ApplyOutcome {
     pub manifest_commit: String,
     /// The UKI file names now on the ESP.
     pub ukis: Vec<String>,
-    /// What failed after the new generation was installed (spec §7): the apply still
-    /// succeeded, so these are for the user to see, not an error.
+    /// For the user to see, not errors: package files outside `/usr` and `/etc`, which
+    /// every boot loses (spec §4.3 step 5), and what failed after the new generation was
+    /// installed (spec §7). The apply still succeeded.
     pub warnings: Vec<String>,
 }
 

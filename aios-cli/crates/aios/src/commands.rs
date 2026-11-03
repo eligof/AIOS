@@ -106,7 +106,7 @@ fn apply_cmd(cx: &Context, yes: bool, upgrade: bool) -> Result<(), Failure> {
     Ok(())
 }
 
-/// Problems after the new generation was installed: the command still succeeds.
+/// Warnings of a build that succeeded (spec §4.3 step 5, §7).
 fn warn(warnings: &[String]) {
     for warning in warnings {
         eprintln!("aios: warning: {warning}");

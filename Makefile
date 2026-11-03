@@ -153,7 +153,7 @@ clean-iso:
 	if [ -e $(ISO_WORK) ]; then $(ISO_RM_WORK); fi
 
 # Install the newest out/aios-*.iso into a VM and run spec §1 (a)-(g). No root, about an
-# hour. E2E_ARGS=--keep-vm keeps the VM disk in build/e2e/ afterwards.
+# hour. A failed run keeps the VM disk in build/e2e/; E2E_ARGS=--keep-vm keeps it after a pass too.
 E2E_ARGS ?=
 e2e: tools
 	cd tests && $(PYTHON) -m e2e.vm

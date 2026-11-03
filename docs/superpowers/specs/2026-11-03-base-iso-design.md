@@ -25,7 +25,7 @@ A bootable Arch-based ISO that installs AIOS onto a disk, giving a hardened host
   - (d) After adding a package (`tree`) to the manifest, `aios apply --yes` + reboot boots gen-2, where `tree` exists.
   - (e) `aios rollback 1` + reboot boots gen-1, where `tree` does not exist.
   - (f) A gen-3 built with the test-only cmdline flag `aios.test.fail_health=1` fails its health check. After 3 boots the machine is back on the previous good gen.
-  - (g) After the test user replaces `~/.ssh/authorized_keys` with a symlink to `/etc/nftables.conf` and reboots: `findmnt /etc/nftables.conf` shows no bind, nftables loads, and the symlinked path is not mounted over its target. This guards the §4.4 symlink-redirect limit.
+  - (g) `~/.ssh/authorized_keys` starts out as a read-only bind. The test user then replaces it with a symlink to `/etc/nftables.conf` and reboots. Afterwards `findmnt /etc/nftables.conf` shows no bind and nftables loads. The bind's mount unit has failed, because systemd refuses the path (`not canonical` in the journal), and `~/.ssh/authorized_keys2` is still a read-only bind. This guards the §4.4 symlink-redirect limit.
 
 **Out of scope:** Sentinel, Cockpit, agent runtime, ops engine (sub-projects 2–5). Graphical installer. Offline install. Desktop environment beyond a TTY (see §8).
 
@@ -414,45 +414,86 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
 
 ### 6.1 archiso profile (`iso/`)
 - Copied from `/usr/share/archiso/configs/releng/` and modified.
-- `profiledef.sh`: `iso_name="aios"`, `iso_label="AIOS_<YYYYMM>"`, `bootmodes=('uefi.systemd-boot.esp' 'uefi.systemd-boot.eltorito')`. UEFI only.
-- `pacman.conf`: `core`, `extra`, the CachyOS repos, and `[aios-local]` → `file://<repo>/build/repo`. `make iso` generates it from a template with the absolute path.
-- `packages.x86_64`: the releng list plus `arch-install-scripts sbctl btrfs-progs cryptsetup gptfdisk tpm2-tools git usbguard whois aios-cli aios-base`.
+- `profiledef.sh`: `iso_name="aios"`, `iso_label="AIOS_<YYYYMM>"`, `bootmodes=('uefi.systemd-boot')` (archiso 86 merged the ESP and El Torito modes into one). UEFI only.
+- `pacman.conf`: `core`, `extra`, the CachyOS repos, and `[aios-local]` → `file://<repo>/build/repo`. `make iso-build` generates it from `iso/pacman.conf.in` with the absolute path. `[cachyos]` only provides the keyring and the mirrorlists.
+- `packages.x86_64`: the releng list plus `arch-install-scripts sbctl btrfs-progs cryptsetup gptfdisk tpm2-tools git usbguard whois aios-cli aios-base cachyos-keyring cachyos-mirrorlist cachyos-v3-mirrorlist`. Bootstrap needs the CachyOS keyring and mirrorlists on the live system.
 - `airootfs/usr/local/bin/aios-install` and `airootfs/usr/local/lib/aios-install/*.sh`.
-- `efiboot/loader/entries/03-aios-serial.conf`: same as the default entry plus `console=ttyS0,115200`.
+- `efiboot/loader/entries/`: `01-aios-linux.conf` (default), `03-aios-serial.conf` (the same plus `console=ttyS0,115200`; the second menu entry) and `04-aios-memtest86+x64.conf`. releng's speech entry is dropped.
+- `airootfs/etc/systemd/system/aios-install-auto.service` runs `aios-install --auto`:
+  - `ConditionVirtualization=vm`, so it never starts on real hardware.
+  - `After=… pacman-init.service`, so the keyring check (§6.2 step 1) sees the populated keyring.
+  - stdout and stderr go to `journal+console`, with `LogRateLimitIntervalSec=0` so journald drops no installer line.
 - `airootfs/etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf`: root autologin on the live ISO only.
 - The build repo is copied into the ISO at `airootfs/opt/aios-repo/`, so the installer can seed `/persist/aios/repo` without network.
-- `make iso` runs `sudo mkarchiso -v -w work/ -o out/ iso/`. The developer runs it.
+- `iso/build-profile.sh` assembles `iso-build/` without root:
+  - It writes its `.aios-iso-build` marker right after creating the directory, and only ever replaces a directory that has the marker. A run that failed half way can be repeated.
+  - It accepts the keys file only as `make keys` writes it: comment lines plus exactly one `AIOS_CACHYOS_KEYS="<fingerprints>"` line, since the installer sources it as root.
+- `make iso` writes `iso-build/` without root (the profile, `pacman.conf`, the installer, `/opt/aios-repo`, `keys.sh`), clears `build/iso-work`, then runs `sudo mkarchiso -v -w build/iso-work -o out iso-build/`. The developer runs it.
+  - `make iso SUDO=` builds unprivileged (archiso ≥ 89). mkarchiso then leaves files owned by the user's subordinate IDs, so the work directory is cleared with `unshare --map-auto --map-root-user rm -rf --one-file-system`. This needs `/etc/subuid` and `/etc/subgid` ranges for the user.
+  - If clearing fails, make prints a hint and stops: "Device or resource busy" means an interrupted build left mounts under `build/iso-work`, to be unmounted with `umount -R`. `make clean-iso` clears the work directory the same way.
 
 ### 6.2 `aios-install` (bash, `set -euo pipefail`, shellcheck-clean, helpers in `lib/` unit-tested with bats)
 
 **Modes:**
 - **Interactive:** prompts for disk, hostname, username, user password, LUKS passphrase and timezone.
-- **Unattended:** `--config <file>`, or automatically when `/sys/firmware/qemu_fw_cfg/by_name/opt/aios/install.conf/raw` exists.
+- **Unattended:** `--config <file>`, or automatically when `/sys/firmware/qemu_fw_cfg/by_name/opt/aios/install.conf/raw` exists. `--auto` (the ISO's `aios-install-auto.service`) installs from that fw_cfg file, and exits 0 when there is none.
   - `KEY=value` lines: `DISK HOSTNAME USERNAME USER_PASSWORD LUKS_PASSPHRASE TIMEZONE WIPE EXTRA_CMDLINE`.
-  - Values are parsed by a whitelist parser, never `source`d.
+  - Values are parsed by a whitelist parser, never `source`d. `EXTRA_CMDLINE` words may only hold letters, digits and `. _ , : = / + -`. There's no `@`, so no word can carry a manifest placeholder.
+  - A `--config` file that group or others can read gets a warning. The summary says to delete the file.
+- **`--dry-run`:** prints the commands that would change the system and runs only the read-only queries. Queries about what those commands would have created are skipped: the new partitions aren't checked, and the LUKS UUID is the placeholder `00000000-0000-0000-0000-000000000000`. So a dry run also works on a real machine.
+- **Secrets:**
+  - They reach programs only on stdin, never in argv, the log or the dry-run output.
+  - The installer refuses to run under xtrace (`bash -x`, `SHELLOPTS=xtrace`).
+  - It unsets the user password once it is hashed (step 1), and the LUKS passphrase after step 4.
 
 **Steps:**
-1. Preflight:
-   - `/sys/firmware/efi` exists.
-   - `DISK` is a whole block device and isn't the live medium (`/run/archiso/bootmnt` source).
-   - Network: `curl -sI https://geo.mirror.pkgbuild.com`.
+1. Preflight. Everything that can fail without touching the disk fails here:
+   - `/sys/firmware/efi` exists and `/dev/mapper/aios` doesn't. `/mnt/aios-top`, `/efi` and `/var/lib/sbctl` aren't mount points yet.
+   - `DISK` is a whole, writable block device of at least 16 GiB with no mounted filesystem.
+   - `DISK` isn't the live medium. The `/run/archiso/bootmnt` source's device stack is walked down with `lsblk -nrso NAME,TYPE`, so a medium on a partition or a device-mapper target (Ventoy) still protects the disk below it.
+   - Nothing holds `DISK`: `lsblk` lists no child other than partitions, and `/sys/class/block/<dev>/holders` is empty for the disk and every partition. Otherwise it stops with `<disk> is in use by <holder> (LVM/MD/dm); deactivate it first`.
+   - The disk's `diskseq` (`/sys/class/block/<dev>/diskseq`), model, serial and size are recorded.
+   - Network: `curl -fsI` (HTTP errors fail too) to `https://geo.mirror.pkgbuild.com`, and to `cachyos.db` on the first `https` `Server` of `/etc/pacman.d/cachyos-mirrorlist`.
    - x86-64-v3 detection (`/lib/ld-linux-x86-64.so.2 --help` lists "x86-64-v3 (supported, searched)"). If v3 isn't supported, the v3 CachyOS repos are dropped from the generated `pacman.conf`.
-2. Confirm the wipe. Interactive mode requires typing the disk path; unattended mode requires `WIPE=yes`.
-3. Partition: `sgdisk --zap-all`, then `-n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309`. Then `mkfs.fat -F32 -n EFI`.
-4. `cryptsetup luksFormat --type luks2 --pbkdf argon2id` (passphrase from stdin), then `cryptsetup open … aios`. `systemd-cryptenroll --recovery-key`, with the key printed and saved nowhere.
+   - The live keyring trusts exactly the pinned CachyOS keys (step 9).
+   - The filled-in manifest (and, without v3, the stripped `pacman.conf`), the yescrypt hash of `USER_PASSWORD` (`mkpasswd`) and the `usbguard generate-policy` output are made now and kept in memory. Steps 6 and 12 write them.
+2. Confirm the wipe:
+   - It shows the recorded model, serial, size and diskseq, and `lsblk -o NAME,SIZE,FSTYPE,LABEL,MODEL <disk>`.
+   - Interactive mode requires typing the disk path; unattended mode requires `WIPE=yes`.
+3. Partition:
+   - Re-read the diskseq. If another disk now has the name, stop with `disk changed since validation`, before anything is written.
+   - `wipefs -a`, `sgdisk --zap-all`, then `-n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309`.
+   - `udevadm settle`, then `blockdev --rereadpt`. While udev still has a new partition open the re-read fails with EBUSY, so it is tried up to five times; after that the failure is fatal.
+   - `udevadm settle` again. Then exactly partitions 1 and 2 must exist.
+   - `wipefs -a` on both new partitions, so an old signature inside them (a LUKS header, a btrfs superblock) can't confuse blkid.
+   - `mkfs.fat -F32 -n EFI`.
+4. Encrypt:
+   - `cryptsetup luksFormat --type luks2 --pbkdf argon2id` (passphrase from stdin), then `cryptsetup open … aios`.
+   - `systemd-cryptenroll --recovery-key`, with the key printed and saved nowhere.
+   - On a terminal (but not with `--auto`), wait for Enter: `Press Enter after writing down the recovery key`.
 5. `mkfs.btrfs -L aios /dev/mapper/aios`. Mount the top level and create `@blank` (skeleton §2, then `btrfs property set -ts … ro true`), `@persist`, `@home` and `@log`.
-6. Copy `/usr/share/aios/defaults/manifest` to `@persist/aios/config`, substituting hostname, username, timezone and `EXTRA_CMDLINE`. Then `git init`, commit "aios: initial manifest". Write the yescrypt hash of `USER_PASSWORD` to `@persist/aios/secrets/passwd/<user>` (0600). Copy `/opt/aios-repo` to `@persist/aios/repo`.
-7. Mount the ESP at `/mnt/aios-esp`.
+6. Copy `/usr/share/aios/defaults/manifest` to `@persist/aios/config`, substituting hostname, username, timezone and `EXTRA_CMDLINE`. Then `git init`, commit "aios: initial manifest". Write the yescrypt hash from step 1 to `@persist/aios/secrets/passwd/<user>` (0600). Copy `/opt/aios-repo` to `@persist/aios/repo`.
+7. Mount the ESP at `/efi` on the live system, where the installed system mounts it too.
 8. Secure Boot keys:
    - Bind `@persist/var/lib/sbctl` to the live system's `/var/lib/sbctl`.
    - `sbctl create-keys`.
    - Then `aios bootstrap` (step 9) can sign.
-9. `aios bootstrap --target /mnt/aios-top --esp /mnt/aios-esp --manifest /mnt/aios-top/@persist/aios/config/manifest.toml`.
-   - Before pacstrap, it imports and locally signs the CachyOS key into the candidate keyring. The fingerprint is pinned in `installer/lib/keys.sh`, taken from the build host at ISO build time by `make iso`.
-10. `bootctl install --esp-path=/mnt/aios-esp`. Write `loader.conf` (`default aios-gen-*-cachyos*`, `timeout 3`, `editor no`). Sign `systemd-bootx64.efi` and `BOOTX64.EFI` with `sbctl sign -s`.
-11. If `sbctl status` reports Setup Mode, run `sbctl enroll-keys --microsoft`.
-12. Write the USBGuard rules to `@persist/var/lib/usbguard/rules.conf` (§5.5).
-13. Unmount everything, `cryptsetup close aios`, and print the summary: the recovery key reminder, `aios secureboot enroll` (if not enrolled) and `aios tpm enroll`. Exit 0, then reboot when unattended.
+9. `aios bootstrap --target /mnt/aios-top --esp /efi --manifest /mnt/aios-top/@persist/aios/config/manifest.toml --luks-uuid <uuid>`.
+   - It takes `--luks-uuid` (from `cryptsetup luksUUID`). Its pacstrap verifies with, and copies, the live keyring. So step 1 checks that this keyring trusts exactly the CachyOS keys pinned in `installer/lib/keys.sh`, which `make keys` (part of `make iso`) generates from the build host's keyring.
+10. `bootctl install --esp-path=/efi`. Write `loader.conf` (`default aios-gen-*-cachyos*`, `timeout 3`, `editor no`). Sign `systemd-bootx64.efi` and `BOOTX64.EFI` with `sbctl sign -s`. With the ESP at `/efi`, the paths sbctl saves in its database (`/efi/EFI/...`, kept in `@persist`) are the ones the installed system re-signs.
+11. If `sbctl status` reports Setup Mode, run `sbctl enroll-keys --microsoft`. If that fails, the install still completes, and the summary points to `aios secureboot enroll`.
+12. Write the USBGuard rules from step 1 to `@persist/var/lib/usbguard/rules.conf` (§5.5).
+13. Finish:
+   - Unmount everything and `cryptsetup close aios`.
+   - Print the summary: the recovery key reminder, `aios secureboot enroll` (if not enrolled), `aios tpm enroll`, and for `--config`, deleting the config file.
+   - Exit 0. Only `--auto` reboots. Otherwise the summary says to remove the install medium and reboot.
+
+**Failure cleanup** (the EXIT trap, §7):
+- Each mount, and the LUKS open, is tracked before its command runs.
+- The trap runs without errexit and ignores further INT, TERM and SIGPIPE. A closed, read-only or broken-pipe stderr doesn't stop it.
+- It unmounts the tracked mounts newest first with `umount -R` (lazily if busy), each only if `mountpoint -q` says it's mounted. The step 1 mount point check makes sure the trap never unmounts something this run didn't mount.
+- Then, if `/dev/mapper/aios` exists, it unmounts everything else mounted from it, deepest first (`findmnt -rno TARGET -S /dev/mapper/aios`), and closes it.
+- It names the failed step, and says whether the disk was changed yet (it is from step 3 on). A failure after step 13 has unmounted everything (the reboot, say) leaves AIOS installed, and the trap says so.
 
 ## 7. Error handling summary
 
@@ -471,7 +512,7 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
 | `@etc-live` fails to mount in the initrd | `sysroot-etc.mount` is required by `initrd-fs.target`, so the boot stops, with the same recovery |
 | Concurrent `aios` commands | The second exits 1: "another aios operation is running" |
 | Runtime edits to `/etc` | Allowed, but discarded at reboot. `aios status` lists them |
-| Installer step fails | Stop with the step name. Leave LUKS closed if it was opened, unmount everything (trap). The disk is left in an undefined state and the user re-runs the installer |
+| Installer step fails | Stop with the step name. The trap unmounts what the run mounted and anything else on `/dev/mapper/aios`, then closes LUKS (§6.2). Before step 3 nothing on the disk has changed. From step 3 on, the disk is left in an undefined state and the user re-runs the installer |
 
 ## 8. Session for v0.1
 
@@ -482,12 +523,27 @@ The Base ISO includes no desktop. The Cockpit sub-project picks the compositor. 
 | Layer | Tooling | What |
 |---|---|---|
 | Rust unit/golden | `cargo test --workspace` | Manifest validation (each rule), gen naming/counter/GC, renderers (golden files), planner diff, argv sequences for apply/bootstrap/rollback/gc/secureboot/tpm with the fake runner, cleanup on a failure injected at every step |
-| Shell | `shellcheck`, `bats` | `aios-root.sh` with a fake `btrfs`/`mount`/`umount` on PATH (with failure injection) and a fake `/proc/cmdline` (env override): normal boot, missing gen, missing `@blank`, no or invalid gen on cmdline, stale candidates, nested subvolumes (including one named like a top-level subvolume), a non-subvolume or a symlink (also dangling) at a live or candidate name, and mount/snapshot/unmount failures. The fake `btrfs` resolves symlinks the way btrfs-progs does, so a missing check would delete the link's target. `aios-health.sh` with fake `findmnt` (including stacked mounts) and cmdline. Installer `lib/` helpers: config parser (rejects unknown keys and shell metacharacters), disk validation, v3 detection parsing |
-| Units | `systemd-analyze verify` | `aios-root.service`, `sysroot-etc.mount`, `aios-health.service` |
+| Shell | `shellcheck`, `bats` | `aios-root.sh` with a fake `btrfs`/`mount`/`umount` on PATH (with failure injection) and a fake `/proc/cmdline` (env override): normal boot, missing gen, missing `@blank`, no or invalid gen on cmdline, stale candidates, nested subvolumes (including one named like a top-level subvolume), a non-subvolume or a symlink (also dangling) at a live or candidate name, and mount/snapshot/unmount failures. The fake `btrfs` resolves symlinks the way btrfs-progs does, so a missing check would delete the link's target. `aios-health.sh` with fake `findmnt` (including stacked mounts) and cmdline. The installer's tests are listed below the table |
+| Units | `systemd-analyze verify` | `aios-root.service`, `sysroot-etc.mount`, `aios-health.service`, the ISO's `aios-install-auto.service` |
 | Packaging | `makepkg` in `make repo`, `namcap` if available | PKGBUILDs build |
-| E2E | `make e2e`: pytest harness in `tests/e2e/`, QEMU (`-enable-kvm -cpu host -m 4G`), OVMF `OVMF_CODE.secboot.4m.fd` + a copy of the vars, `swtpm` socket TPM 2.0, a 20 GiB qcow2 | Boots the ISO with the fw_cfg install config, drives the serial console via a unix socket: install → reboot → LUKS passphrase → log in as the test user → assertions (a)–(g) from §1. Also, since only a real root run exercises it, the private mount namespace (§4.2): during and after an `aios apply` (and after one killed with SIGKILL mid-build), `findmnt` in the host namespace shows nothing under `/run/aios`; the apply still reaches the ESP through the `/efi` automount; a second apply after the killed one succeeds. Needs `out/aios-*.iso` |
+| E2E | `make e2e`: pytest harness in `tests/e2e/`, QEMU (`-enable-kvm -cpu host -m 4G`), OVMF `OVMF_CODE.secboot.4m.fd` + a copy of the vars, `swtpm` socket TPM 2.0, a 20 GiB qcow2 | Boots the ISO once, with the fw_cfg install config and `-no-reboot`, so QEMU exits when the installer reboots. Then it powers on from the disk alone, without the CD-ROM, fw_cfg or `-no-reboot` (the ISO's `--auto` would install again), and keeps the vars copy, the swtpm state, the disk and `-cpu host`. Later reboots are guest reboots. It drives the serial console via a unix socket: install → reboot → LUKS passphrase → log in as the test user → assertions (a)–(g) from §1. An install wait fails at once on `aios-install: error: …` or the trap's `step N (name) failed`, quoting the line. A failed run keeps the disk and TPM state in `build/e2e/`, and `--keep-vm` keeps them after a pass too. Also, since only a real root run exercises it, the private mount namespace (§4.2): during and after an `aios apply` (and after one killed with SIGKILL mid-build), `findmnt` in the host namespace shows nothing under `/run/aios`; the apply still reaches the ESP through the `/efi` automount; a second apply after the killed one succeeds. Needs `out/aios-*.iso` |
 
-`make check` = `cargo test --all-features` + `cargo clippy -D warnings` (with and without features) + the release-binary check for test hooks (§4.5) + shellcheck + bats + `systemd-analyze verify`. It needs no root and no VM.
+The installer's bats tests use fake `lsblk`, `findmnt`, `mountpoint` and `curl`, and a fake sysfs:
+- **`lib/` helpers:**
+  - the config parser (rejects unknown keys, shell metacharacters and `@` in `EXTRA_CMDLINE`);
+  - disk validation (holders, the live medium's device stack, diskseq, exactly two new partitions);
+  - the network probes and v3 detection parsing;
+  - the partition table re-read, retried while busy;
+  - the cleanup: newest first, then the mapping's other mounts deepest first, with a closed, read-only or broken-pipe stderr, and through a second interrupt.
+- **`aios-install` itself, in dry-run mode:**
+  - golden command lists (virtio and NVMe disks, a path with spaces) and the exact read-only queries;
+  - a failure injected at a step;
+  - a disk that changes before the wipe;
+  - the reboot rule, and the Enter prompt on a terminal (under `script`);
+  - the passwords unset once used.
+- **The ISO and the Makefile:** `make iso-check` checks the profile without building it. `tests/bats/makefile.bats` runs the `make iso` cleanup and the venv rule with fake tools.
+
+`make check` = `cargo test --all-features` + `cargo clippy -D warnings` (with and without features) + the release-binary check for test hooks (§4.5) + shellcheck + bats + `systemd-analyze verify` + the e2e harness's unit tests (`make e2e-unit`). It needs no root and no VM. Without a system pytest, `make tools` installs a hash-pinned one into `build/venv/`. The venv is keyed on the Python minor version (`build/venv.python`), so a Python upgrade rebuilds it.
 
 ## 10. Repository layout
 

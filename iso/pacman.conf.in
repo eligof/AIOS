@@ -1,0 +1,31 @@
+# pacman.conf for building the AIOS ISO (spec §6.1). `make iso-build` writes it to
+# iso-build/pacman.conf, with the absolute path of build/repo in the aios-local Server line.
+# The build host's keyring must trust the Arch and CachyOS keys (a CachyOS host does).
+#
+# Arch's core and extra come first, so the live system gets Arch's packages. [cachyos] is
+# only there for cachyos-keyring and the mirrorlists, and its packages are generic x86_64,
+# so the ISO boots on any x86_64 CPU. [aios-local] is last and unsigned (spec §4.6).
+
+[options]
+# A private cache (build/iso-pkgcache/, written by make iso-build): a CachyOS host's
+# /var/cache/pacman/pkg holds CachyOS builds under the same file names as Arch's, and those
+# fail Arch's signature check when the ISO installs from [core] and [extra].
+CacheDir = @AIOS_CACHE@
+HoldPkg      = pacman glibc
+Architecture = x86_64
+ParallelDownloads = 5
+SigLevel          = Required DatabaseOptional
+LocalFileSigLevel = Optional
+
+[core]
+Include = /etc/pacman.d/mirrorlist
+
+[extra]
+Include = /etc/pacman.d/mirrorlist
+
+[cachyos]
+Include = /etc/pacman.d/cachyos-mirrorlist
+
+[aios-local]
+SigLevel = Optional TrustAll
+Server = file://@AIOS_REPO@

@@ -25,6 +25,7 @@ A bootable Arch-based ISO that installs AIOS onto a disk, giving a hardened host
   - (d) After adding a package (`tree`) to the manifest, `aios apply --yes` + reboot boots gen-2, where `tree` exists.
   - (e) `aios rollback 1` + reboot boots gen-1, where `tree` does not exist.
   - (f) A gen-3 built with the test-only cmdline flag `aios.test.fail_health=1` fails its health check. After 3 boots the machine is back on the previous good gen.
+  - (g) `~/.ssh/authorized_keys` starts out as a read-only bind. The test user then replaces it with a symlink to `/etc/nftables.conf` and reboots. Afterwards `findmnt /etc/nftables.conf` shows no bind and nftables loads. The bind's mount unit has failed, because systemd refuses the path (`not canonical` in the journal), and `~/.ssh/authorized_keys2` is still a read-only bind. This guards the §4.4 symlink-redirect limit.
 
 **Out of scope:** Sentinel, Cockpit, agent runtime, ops engine (sub-projects 2–5). Graphical installer. Offline install. Desktop environment beyond a TTY (see §8).
 
@@ -75,29 +76,38 @@ package_set_sha256 = "…"            # sha256 of sorted `pacman -Qq` output
    - `loader.conf` has `default aios-gen-*-cachyos*`. systemd-boot sorts matching entries so the highest version comes first, which means the newest gen boots by default.
    - Boot counting comes from the `+3` filename suffix. Entries whose counter has reached 0 are sorted last as "bad".
    - `aios rollback N` overrides the default via the `LoaderEntryDefault` EFI variable (`bootctl set-default`). `aios apply` clears that override (`bootctl set-default ""`) so the newest gen wins again.
-   - The fallback behavior is validated by e2e (f).
+   - **Fallback after a rollback:** after `aios rollback N` and then an apply, a new generation that fails falls back to the newest blessed generation, not to N. The apply cleared the override, so systemd-boot takes the entries newest first and skips the bad one, whatever N was. Example: gen-2 is blessed, `aios rollback 1`, then gen-3 is applied (built from the booted gen-1) and fails: the machine comes back on gen-2, not gen-1. To return to N, run `aios rollback N` again.
+   - The fallback behavior is validated by e2e (f), which runs right after that example's rollback.
 3. The UKI cmdline (baked in and signed) is:
    `rd.luks.name=<LUKS-UUID>=aios root=/dev/mapper/aios rootflags=subvol=@root-live,compress=zstd rw mount.usr=/dev/mapper/aios mount.usrflags=subvol=@usr-gen-NNNN,ro,compress=zstd aios.gen=NNNN <hardening cmdline §5.3> <manifest kernel.extra_cmdline>`
 4. The initrd is mkinitcpio, systemd-based: `HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems aios)`.
 5. `systemd-cryptsetup@aios` unlocks LUKS: TPM2 + PIN, or passphrase, or recovery key.
 6. `aios-root.service` runs in the initrd (`After=cryptsetup.target`, `Before=sysroot.mount`, `DefaultDependencies=no`) and executes `/usr/lib/aios/initrd/aios-root.sh`:
-   - Parses `aios.gen=` from `/proc/cmdline`. If it's absent or not 4 digits, it fails with "aios: no generation on cmdline".
+   - Parses `aios.gen=` from `/proc/cmdline`. If it's absent, or any `aios.gen=` value isn't a 4-digit generation (empty and `0000` included, even next to a valid one), it fails with "aios: no generation on cmdline". Conflicting values fail too.
    - Mounts the btrfs top level (`subvolid=5`) at `/run/aios/top`.
-   - If `@usr-gen-N` or `@etc-gen-N` is missing, it fails with "aios: generation N missing — pick another boot entry". The unit fails and the emergency shell opens.
+   - If `@usr-gen-N`, `@etc-gen-N` or `@blank` is a symlink, even a dangling one, it fails with "aios: <name> is a symlink, not a subvolume" before deleting anything: btrfs resolves the path, so the boot would use another subvolume's content.
+   - If `@usr-gen-N` or `@etc-gen-N` is missing, it fails with "aios: generation N missing — pick another boot entry".
+   - If `@blank` is missing, it fails with "aios: @blank missing — reinstall required" before deleting anything.
    - Deletes `@root-live` and `@etc-live` if present, plus stale `@usr-cand`, `@etc-cand` and `@root-cand` left by a power loss mid-apply.
+     - A symlink there, even a dangling one, fails with "aios: <name> is a symlink, not a subvolume": btrfs resolves the path, so deleting through the link would delete its target.
+     - Each must be a subvolume (`btrfs subvolume show`). Otherwise it fails with "aios: <name> exists but is not a subvolume".
+     - Deletion is `btrfs subvolume delete --recursive`, which also removes nested subvolumes (systemd creates `/var/lib/machines` and `/var/lib/portables` as subvolumes). Subvolume names are never parsed.
    - Snapshots `@blank → @root-live` (rw) and `@etc-gen-N → @etc-live` (rw).
-   - Unmounts the top level.
+   - Unmounts the top level. If that fails, it retries with `umount -l`, because `/run` survives switch-root.
+
+   If the unit fails, `sysroot.mount` and `initrd-root-fs.target` fail, and `emergency.target` starts. The initrd's root account is locked, so no emergency shell opens and the boot stops there. Recovery is choosing another boot entry or booting the ISO (with Secure Boot disabled once the own keys are enrolled, §11 item 15).
 7. `sysroot.mount` mounts `@root-live`. The systemd fstab-generator mounts `/sysroot/usr` from `mount.usr=` (ro).
-8. `sysroot-etc.mount` (initrd unit, `WantedBy=initrd-fs.target`, `After=sysroot.mount`) mounts `@etc-live` at `/sysroot/etc`.
+8. `sysroot-etc.mount` (initrd unit, `After=sysroot.mount`) mounts `@etc-live` at `/sysroot/etc`. The mount is Required: the hook links it into `initrd-fs.target.requires/`, so a failed mount fails `initrd-fs.target` and the boot stops (as in step 6) rather than continuing with the empty `/etc` from `@blank`.
 9. switch-root. Real systemd mounts the rest from `/etc/fstab`, which `aios apply` generates:
    - `/persist`, `/home`, `/var/log` as subvolumes.
    - `/efi` with `noauto,x-systemd.automount,umask=0077`.
    - A bind mount `/persist<path> → <path>` for every declared persistent directory (`bind,x-systemd.requires-mounts-for=/persist`).
    - Read-only bind mounts for managed home paths (§4.4).
-10. Declared persistent **files** become symlinks via `tmpfiles.d` (`L+ <path> - - - - /persist<path>`). Bind-mounting files is fragile.
+10. Declared persistent **files** become symlinks via `tmpfiles.d` (`L+ <path> - - - - /persist<path>`). Bind-mounting files is fragile. `tmpfiles.d/zz-aios-pkgdirs.conf` recreates the directories and symlinks that packages own outside `/usr` and `/etc` (§4.3 step 5).
 11. `aios-health.service` (`Type=oneshot`, `RequiredBy=boot-complete.target`, `Before=boot-complete.target`) runs `/usr/lib/aios/aios-health.sh`, which checks:
     - `/usr` is mounted read-only from subvolume `@usr-gen-<aios.gen>`.
     - `/etc` is mounted from `@etc-live`.
+    - Both are read with `findmnt -fno OPTIONS -M`, which matches the exact mount point and takes its first mount, so a mount stacked on top can't break the match.
     - `/persist`, `/home` and `/var/log` are mounted.
     - The `/etc/aios/generation.toml` id equals `aios.gen`.
     - `aios.test.fail_health=1` is absent from the cmdline. This test-only flag forces failure.
@@ -105,6 +115,8 @@ package_set_sha256 = "…"            # sha256 of sorted `pacman -Qq` output
     On success `systemd-bless-boot.service` removes the counter. On failure the entry stays counted, and after 3 tries systemd-boot boots the next entry.
 
 **Effect:** any runtime write outside `/persist`, `/home` and `/var/log` disappears at reboot. That covers `/etc/systemd`, `/etc/ld.so.preload`, cron, `/root`, `/var/tmp` and `/var/lib/*` (except declared paths). `/usr` is read-only.
+
+The same goes for what packages install outside `/usr`, `/etc` and the persistent trees: the root is a fresh copy of `@blank`, not the candidate root pacman wrote into. Directories and symlinks there (`/opt`, `/mnt`, `/srv/http`, `/var/empty`, `/var/spool/mail`, `/var/mail`, ...) come back at every boot through `zz-aios-pkgdirs.conf`. A package's regular file there can't, so `aios apply` prints a note about each one when it installs it.
 
 ## 4. Manifest and the `aios` CLI
 
@@ -141,6 +153,7 @@ mask    = []
 # A `symlink` value instead of `source` creates a symlink.
 "/etc/nftables.conf" = { source = "files/nftables.conf", mode = "0600" }
 "/etc/pacman.d/hooks/90-mkinitcpio-install.hook" = { symlink = "/dev/null" }
+"/etc/pacman.d/hooks/zz-sbctl.hook"              = { symlink = "/dev/null" }
 
 [persist]
 directories = [
@@ -158,14 +171,26 @@ shell  = "/usr/bin/zsh"
 
 [users.eli.home]
 # Read-only bind mounts into /home/eli. Sources are relative to the manifest repo.
-# A trailing "/" marks a directory.
-".zshrc"                 = "home/eli/zshrc"
-".profile"               = "home/eli/profile"
-".config/autostart/"     = "home/eli/autostart/"
-".config/systemd/user/"  = "home/eli/systemd-user/"
-".config/environment.d/" = "home/eli/environment.d/"
-".local/bin/"            = "home/eli/bin/"
-".ssh/authorized_keys"   = "home/eli/authorized_keys"
+# A trailing "/" marks a directory. This is the default set (§4.4).
+".zshrc"                         = "home/eli/zshrc"
+".zshenv"                        = "home/eli/zshenv"
+".zprofile"                      = "home/eli/zprofile"
+".zlogin"                        = "home/eli/zlogin"
+".zlogout"                       = "home/eli/zlogout"
+".profile"                       = "home/eli/profile"
+".bashrc"                        = "home/eli/bashrc"
+".bash_profile"                  = "home/eli/bash_profile"
+".bash_logout"                   = "home/eli/bash_logout"
+".ssh/authorized_keys"           = "home/eli/authorized_keys"
+".ssh/authorized_keys2"          = "home/eli/authorized_keys2"
+".ssh/rc"                        = "home/eli/ssh-rc"
+".config/autostart/"             = "home/eli/autostart/"
+".config/systemd/user/"          = "home/eli/systemd-user/"
+".config/systemd/user.control/"  = "home/eli/systemd-user-control/"
+".local/share/systemd/user/"     = "home/eli/local-share-systemd-user/"
+".config/environment.d/"         = "home/eli/environment.d/"
+".local/bin/"                    = "home/eli/bin/"
+".local/share/dbus-1/services/"  = "home/eli/local-share-dbus-services/"
 ```
 
 **Validation:** `aios plan` and `aios apply` refuse to run, citing `manifest.toml:line:col`, if any of these hold:
@@ -173,84 +198,113 @@ shell  = "/usr/bin/zsh"
 - `[files]` paths outside `/etc`, or an entry with both or neither of `source`/`symlink`.
 - `mode` that isn't 3–4 octal digits.
 - Persist paths that aren't absolute, contain `..`, overlap each other, or sit under `/usr`, `/persist` or `/home`.
-- A home-managed path that's absolute or contains `..`.
+- Persist paths that equal `/etc`; equal, contain or sit under a file aios generates, `/etc/aios` or a `[files]` path; or equal or sit under `/efi`, `/proc`, `/sys`, `/dev`, `/run`, `/tmp` or `/var/log`.
+- Persist paths or home-managed paths containing whitespace, a control character, `%`, `\`, `"` or `'`.
+- A home-managed path that's absolute or has an empty, `.` or `..` component, or two of a user's paths that differ only by the trailing `/`.
 - A missing source file, or a directory/file kind mismatch.
 - A duplicate UID, or a UID outside 1000–59999.
 - A user with no `secrets/passwd/<user>`.
 - `kernel.default` not in the known kernel set (`linux-cachyos`, `linux-cachyos-lts`, `linux`, `linux-lts`).
 - `timezone` not present under `/usr/share/zoneinfo`.
+- A shell that isn't absolute or contains `:`, whitespace or a control character.
+- `locale` outside `[A-Za-z0-9_.@-]+`, or `keymap` outside `[A-Za-z0-9_.-]+`.
+- An `extra_cmdline` entry that isn't a single word (empty, whitespace, control character or `"`), or that sets one of the 16 parameters AIOS sets itself or reserves: `root`, `rootflags`, `rw`, `ro`, `mount.usr`, `mount.usrflags`, `rd.luks.name`, `aios.gen`, `lockdown`, `lsm`, `init`, `rdinit`, `systemd.debug_shell`, `rd.systemd.debug_shell`, `apparmor`, `security`.
 
 ### 4.2 Commands
 
 | Command | Behavior |
 |---|---|
-| `aios plan` | Validate the manifest. Compare it with the booted generation and print a diff: packages added/removed (against `pacman -Qqe`), files changed (sha256 of the manifest source vs `@etc-gen-N` content), services, users, persist entries, home-managed entries, cmdline. Prints "no changes" and exits 0 when clean |
-| `aios apply [--yes]` | Show the plan and ask for confirmation unless `--yes`. Build gen N+1 (§4.3). This is also a full system upgrade (`-Syu`), because Arch doesn't support partial upgrades. Never modifies the running system except the ESP and the manifest repo commit. Prints "reboot to activate gen-N+1" |
-| `aios status` | Show booted gen, default gen and gens that failed to boot. Show runtime drift: files in `/etc` that differ from `@etc-gen-<booted>` (a reboot will discard them) |
+| `aios plan` | Validate the manifest. Compare it with the booted generation and print a diff: packages added/removed (against `pacman -Qqe`), files changed (sha256 of the manifest source vs `@etc-gen-N` content), services, users, persist entries, home-managed entries, cmdline. Prints "no changes" and exits 0 when clean. Like `generation.toml`, `tmpfiles.d/zz-aios-pkgdirs.conf` is never compared: its content follows the installed packages, which only an apply's candidate holds (§4.3 step 5). The package changes plan does show are what changes it |
+| `aios apply [--yes] [--upgrade]` | Show the plan and ask for confirmation unless `--yes`. Build gen N+1 (§4.3). This is also a full system upgrade (`-Syu`), because Arch doesn't support partial upgrades. Never modifies the running system except the ESP and the manifest repo commit. Prints "reboot to activate gen-N+1". When the plan shows no changes, it exits 0 without building. With `--upgrade` it builds anyway, printing `upgrading: no manifest changes` first: a full `pacman -Syu` with the same manifest |
+| `aios status` | Show booted gen, default gen and gens that failed to boot. Show runtime drift, which a reboot will discard: entries of `/etc` (directories and `/etc` itself included) that were added, removed or changed compared with `@etc-gen-<booted>`, with what changed: type, mode, owner (uid:gid), a symlink's target, a device node's number, a file's size or, at equal sizes, its bytes (xattrs, ACLs and hard links are not compared). A file is read through one descriptor opened with `O_NOFOLLOW \| O_NONBLOCK` and checked with `fstat` to be a regular file; FIFOs, sockets and devices are never opened. Files over 16 MiB are compared by size only (equal sizes get a note). An entry that can't be compared gets a note, and then no drift reads `none found in what could be compared`, not `none`. Control characters in printed paths are escaped |
 | `aios gen list` | List generations: id, created, manifest commit, kernels, boot state (booted / default / bad) |
-| `aios rollback <N>` | `bootctl set-default aios-gen-NNNN-cachyos.efi` (with the counter suffix stripped from the match). Next reboot boots N. No snapshots are touched |
-| `aios gc [--keep K]` | Delete old generations, default K = 5. Never deletes the booted gen, the default/rollback target or gen-1. Removes `@usr-gen-N`, `@etc-gen-N` and the gen's UKIs |
+| `aios rollback <N> [--force]` | `bootctl set-default aios-gen-NNNN-cachyos.efi` (with the counter suffix stripped from the match). Next reboot boots N, until the next `aios apply` clears the override: if that new generation then fails its health check, the fallback is the newest blessed generation, not N (§3 step 2). Refuses when N's main UKI is marked bad (no boot tries left) unless `--force`, and when `@usr-gen-N` or `@etc-gen-N` is missing or isn't a subvolume itself (a symlink, or a directory without the subvolume root inode), checked with the top level mounted read-only. No snapshots are touched |
+| `aios gc [--keep K]` | Delete old generations, default K = 5. Never deletes the booted gen, the default/rollback target or gen-1. Refuses (`cannot determine the booted generation; refusing to garbage-collect`) when the cmdline names no booted gen, and fails when `LoaderEntryDefault` exists but can't be read or decoded (a missing or empty one, or one naming no aios UKI, means no aios override). Removes `@usr-gen-N`, `@etc-gen-N` and the gen's UKIs: the UKIs first, then an fsync of `EFI/Linux`, then the subvolumes, then `btrfs filesystem sync`. Also removes every incomplete gen except the booted one (an `@usr-gen-N` without `@etc-gen-N` or the other way round, and UKIs without both); a UKI of one never counts as the newest good gen |
 | `aios passwd <user>` | Prompt twice for a password. Write a yescrypt hash (via `mkpasswd -m yescrypt` or the `crypt` API) to `secrets/passwd/<user>`. Takes effect from the next `aios apply` |
-| `aios secureboot enroll` | If `sbctl status` reports Setup Mode, run `sbctl enroll-keys --microsoft`. Otherwise print how to enter Setup Mode in firmware. Exits non-zero if not enrolled |
-| `aios tpm enroll` | Requires Secure Boot enabled (`bootctl status`). Runs `systemd-cryptenroll --tpm2-device=auto --tpm2-with-pin=yes --tpm2-pcrs=7 /dev/disk/by-uuid/<LUKS-UUID>`. Passphrase and recovery slots are kept |
-| `aios bootstrap --target <top> --esp <esp> --manifest <path>` | Installer-only. Builds gen-1 inside an already created btrfs top level mounted at `<top>`. Same steps as apply, except step 2 creates empty candidates and step 4 uses `pacstrap` |
+| `aios secureboot enroll` | If `sbctl status` reports Secure Boot already enabled, print "Secure Boot is already enabled" and exit 0. If it reports Setup Mode, run `sbctl enroll-keys --microsoft`. Otherwise print how to enter Setup Mode in firmware. Exits non-zero if not enrolled |
+| `aios tpm enroll` | Requires Secure Boot enabled and out of Setup Mode (`sbctl status`), and a canonical LUKS UUID in `rd.luks.name=`. Runs `systemd-cryptenroll --tpm2-device=auto --tpm2-with-pin=yes --tpm2-pcrs=7 --wipe-slot=tpm2 /dev/disk/by-uuid/<LUKS-UUID>` on the terminal, where it prompts for the passphrase and the PIN. A re-run replaces the TPM2 slot (systemd enrolls the new slot first and never wipes it). Passphrase and recovery slots are kept |
+| `aios bootstrap --target <top> --esp <esp> --manifest <path> --luks-uuid <uuid>` | Installer-only. Builds gen-1 inside an already created btrfs top level mounted at `<top>`. Same steps as apply, except that step 2 creates three empty candidates, step 4 uses `pacstrap` and is followed by the keyring step, and step 11 leaves the boot default alone. Loads the manifest file `<path>` (any file name); its directory is the manifest repo. A bare file name without a directory is refused |
 
-All mutating commands require root (run via `run0`). They take an exclusive `flock` on `/run/aios.lock`, and each step logs to stderr and the journal (`SYSLOG_IDENTIFIER=aios`).
+`aios` sets its umask to `022` at startup, so nothing it creates (the candidate tree, directories under `/persist`, `/etc` files) inherits a looser umask from its caller. All mutating commands require root (run via `run0`). They take an exclusive `flock` on `/run/aios.lock`, and each step logs to stderr and the journal (`SYSLOG_IDENTIFIER=aios`). Every command that mounts the top level (`apply`, `bootstrap`, `gc`, `rollback`, and the read-only `plan`, `status` and `gen list`) first moves into a private mount namespace (`unshare(CLONE_NEWNS)`, then `/` made a recursive slave): what it mounts never appears in the host's namespace and goes away with the process, even if it is killed, while host mounts such as the `/efi` automount still propagate in. If that fails, the command aborts. The read-only commands take a shared lock, so several can run at once. Each mounts the top level read-only at its own `/run/aios/ro.<pid>` and removes the directory again, even if it fails. If the directory can't be removed once unmounted (`EBUSY`, say), that is a warning (`aios: warning: cannot remove …`), and the command's outcome stands. A SIGKILL can leave the empty directory behind, but never the mount.
 
 ### 4.3 Apply algorithm
 
-Each step aborts on failure. Abort deletes the candidate subvolumes and candidate root, releases the lock and exits non-zero naming the step. The booted generation is never modified.
+Each step aborts on failure (or panic). Abort unmounts and deletes the candidate subvolumes and candidate root, releases the lock and exits non-zero naming the step. The booted generation is never modified. Nothing is deleted before step 2 starts, so a bootstrap that refuses its target (it already holds generations) leaves that target alone. If the candidate tree won't unmount, its subvolumes are kept and the next boot deletes them.
 
-1. Acquire the lock. Validate the manifest. If the manifest repo is dirty, `git commit -am "aios: manifest for gen-<N+1>"`. Record `HEAD` as `manifest_commit`. Mount the btrfs top level (`subvolid=5`) at `/run/aios/top`.
-2. Delete stale `@*-cand`. Snapshot `@usr-gen-N → @usr-cand` and `@etc-gen-N → @etc-cand` (rw), plus `@blank → @root-cand` (rw).
+1. Acquire the lock and enter the private mount namespace (§4.2). Load the manifest: check ownership (the manifest repo, its `.git` and `.git/config` (where present) and the secrets directory must be owned by root and not group- or world-writable; none of them may be a symlink, and `.git` may not be a `gitdir:` file), then validate it. `aios apply` then shows the plan and asks (§4.2). The build itself starts with these steps, in this order:
+   - `mount-top`: mount the btrfs top level (`subvolid=5`) at `/run/aios/top` (bootstrap's target is mounted already) and pick N+1. A bootstrap target that already holds generations is refused here, before anything runs on it. Then `mount --make-rprivate /run/aios/top`, so the candidate binds made from it don't join its peer group.
+   - `validate`: the ownership check again, right before git runs as root, and the machine facts (LUKS and ESP UUIDs, the hardening cmdline) must render.
+   - `commit-manifest`: if the manifest repo is dirty (`git status --porcelain`), run `git add -A`, then `git commit --no-verify -m "aios: manifest for gen-<N+1>"`. Record `HEAD` (`git rev-parse --short HEAD`) as `manifest_commit`. git runs as root, so every git call gets the environment `GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 GIT_CEILING_DIRECTORIES=<the repo's parent>` and the options `--attr-source=<the empty tree> -c core.attributesFile=/dev/null -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false` (`--attr-source` needs git ≥ 2.42; the empty tree is that of a SHA-1 repo, which `git init` makes). git then reads no system or global config, and never uses a repo above the manifest repo (without its `.git`, git fails). It reads no attributes from the work tree's `.gitattributes` or from a system or global attributes file; `.git/info/attributes` still applies. A filter, diff or merge driver runs only if a config entry defines it, and the only config left is the root-owned `.git/config` (with anything it includes) and these options. No hook, fsmonitor or signing program runs.
+2. If something is still mounted at `/run/aios/cand` (`mountpoint -q`, left by a run that crashed outside a private namespace), `umount -R` it. Delete stale `@*-cand`: a symlink, or anything that isn't a directory with the subvolume root inode (256) and passes `btrfs subvolume show`, is an error. Apply snapshots `@usr-gen-N → @usr-cand` and `@etc-gen-N → @etc-cand` (rw), plus `@blank → @root-cand` (rw). Bootstrap creates all three empty instead (`btrfs subvolume create`): with an empty database, pacman refuses to install `filesystem` and `pacman` over `@blank`'s `bin`, `sbin`, `lib`, `lib64` and `var/lib/pacman` symlinks (`exists in filesystem`). Apply's database already owns those paths, so its upgrades over the `@blank` snapshot are fine (pacman may turn the root's `var/lib/pacman` link into a directory; harmless, as `@root-cand` is discarded and every boot starts from `@blank`'s link). `@blank` must exist in both modes. A snapshot or create whose destination exists (even as a dangling symlink) is refused, because btrfs would put it inside an existing directory.
 3. Assemble the candidate root at `/run/aios/cand` = `@root-cand`, with these mounted into it:
    - `@usr-cand` at `usr`
    - `@etc-cand` at `etc`
    - binds of `/var/cache/pacman/pkg` and `/var/log`
-4. Packages:
-   - `arch-chroot /run/aios/cand pacman -Syu --needed --noconfirm <install set>`
-   - `pacman -Rns --noconfirm <removed set>` (if any)
-   - `pacman -D --asexplicit <install set>`
-   - Remove orphans: `pacman -Qdtq`, piped to `pacman -Rns --noconfirm` if non-empty.
-   - The mkinitcpio pacman hooks are masked via `[files]` symlinks to `/dev/null`, so pacman never writes `/boot` or the ESP.
+   - a bind of `/persist/aios/repo` at `persist/aios/repo`, so the `[aios-local]` server `file:///persist/aios/repo` resolves in the chroot (§4.6)
+4. Packages (operands always follow `--`, here and for `systemctl` and `chown`; `pacstrap` can't take one, so it relies on the manifest's ban on a leading `-`):
+   - `arch-chroot /run/aios/cand pacman -Syu --needed --noconfirm -- <install set>`
+   - `pacman -Rns --noconfirm -- <removed set>` (if any)
+   - `pacman -D --asexplicit -- <install set>`
+   - Remove orphans: `pacman -Qdtq`, piped to `pacman -Rns --noconfirm --` if non-empty.
+   - Bootstrap instead runs `pacstrap -C /run/aios/aios-pacstrap.conf /run/aios/cand <install set>` on the host. pacman takes `DBPath` and `HookDir` from that config as they are, not below the new root, so the config is the manifest's `pacman.conf` rewritten: `DBPath = /run/aios/cand/usr/lib/pacman/` and `HookDir = /run/aios/cand/etc/pacman.d/hooks/` right after `[options]` (added at the top if missing), replacing the manifest's own; no `LogFile`, which then defaults to the new root's `/var/log/pacman.log` (the `@log` bind); and `file:///persist/` servers pointed at the candidate's bind of the local repo. `/run/aios/cand/usr/lib/pacman` is created first. The config stays in `/run/aios` (tmpfs) for inspection.
+   - While pacstrap runs, the candidate's `/etc/pacman.d/hooks/90-mkinitcpio-install.hook`, `60-mkinitcpio-remove.hook` and `zz-sbctl.hook` are symlinks to `/dev/null`, so it builds no throwaway initramfs and sbctl's hook (`sbctl sign-all`, with no keys in the candidate) can't fail. Afterwards, those the manifest's `[files]` doesn't declare are removed again.
+   - Bootstrap then runs the keyring step: `arch-chroot /run/aios/cand pacman-key --init`, then `pacman-key --populate archlinux cachyos`. pacstrap copied the live system's keyring (§6.2 step 9) into the candidate's `/etc/pacman.d/gnupg`; this makes sure it has a local master key and trusts the Arch and CachyOS keys from the keyring packages it just installed.
+   - In the chroot, the same three hooks are masked through `[files]` symlinks to `/dev/null` (the default manifest declares all three), so pacman never writes `/boot` or the ESP and never runs `sbctl sign-all`, which finds no keys there (the UKIs are signed on the host, step 9).
 5. Render config into `@etc-cand`:
-   - `[files]` entries, with mode, owner and symlinks.
+   - `[files]` entries, with mode, owner and symlinks. An entry with an owner is written without its setuid/setgid bits, chowned (`chown -h` in the chroot), and only then given its full mode, through a descriptor that never follows a symlink: chown clears those bits, and the file is never setuid root in between.
    - `hostname`, `locale.conf` (plus `locale-gen` in the chroot), `vconsole.conf`, the `localtime` symlink.
    - `fstab` (§3 step 9).
-   - `tmpfiles.d/aios-persist.conf` and `tmpfiles.d/aios-home.conf`. The latter creates empty file targets owned by the user.
+   - `tmpfiles.d/aios-persist.conf` and `tmpfiles.d/aios-home.conf`. The latter creates each user's home (`0700`) and the directories between it and each managed home path (`0700` under `~/.ssh`, else `0755`), owned by the user. Paths are tmpfiles-escaped.
    - Home-managed sources copied to `/etc/aios/home/<user>/…`, the bind sources.
    - `kernel/cmdline`.
    - `aios/generation.toml`.
+   - `tmpfiles.d/zz-aios-pkgdirs.conf`, from the installed packages. Every boot starts from `@blank`, so what packages put outside `/usr` and `/etc` would be gone. It covers each path `pacman -Qlq` lists in the chroot that:
+     - lies outside `/usr`, `/etc`, `/boot`, `/persist`, `/home` and `/var/log` (the generation, and trees that persist or are only read during the build; `/var/log` is the `@log` bind while packages install) and outside the API and tmpfs mounts `/proc`, `/sys`, `/dev`, `/run`, `/tmp` and `/efi`, which start out empty on any system;
+     - `@blank` doesn't provide: it isn't in `@blank`, nor below one of its symlinks (`/bin`, `/lib`, `var/lib/pacman`, ...);
+     - isn't a declared persistent file.
+
+     Each is looked up in the candidate one component at a time, never following a symlink. A directory gets `d <path> <mode> <uid> <gid> -`, with its mode and numeric owner in the candidate, and a symlink `L <path> - - - - <target>`. A regular file can't be recreated, and neither can a symlink to `-` (which tmpfiles reads as no argument): each becomes a notice, `package file <path> lives outside /usr and /etc and is lost at every boot`, and the apply still succeeds. So does a name that isn't UTF-8 (`... has a name that isn't UTF-8 and is lost at every boot`). `aios` prints each as `aios: note: <notice>` before its summary. Notices are not warnings (§7): they come from before the commit point and don't change the final `reboot to activate gen-N` line, which a glibc upgrade (it ships `/var/db/Makefile`) would otherwise always turn into the "check the warnings" form. Paths are tmpfiles-escaped. Apply's candidate root is a fresh snapshot of `@blank` and holds only what this transaction installed, so a path the candidate lacks keeps the booted generation's line, as long as a package still owns it. A path below a symlink in the candidate lives wherever that points, and gets no line. A package's file is therefore reported when that package is installed or upgraded. The file is listed in `managed-files` but never part of plan's comparison (§4.2). Its name sorts after nearly every package's `tmpfiles.d` file, so where both name a path the package's line wins and aios only fills the gaps; systemd-tmpfiles then logs no duplicate-line noise at boot.
 6. Users: merge declared users into the candidate's `passwd`/`group`/`shadow`/`gshadow`.
    - Entries with uid < 1000 or ≥ 60000 (system and `nobody`) are kept as packages created them.
    - Declared users are created or updated with uid, primary group (same name, gid = uid), supplementary groups and shell. Their shadow hash comes from `secrets/passwd/<user>`.
    - Undeclared entries in 1000–59999 are removed.
    - The root shadow hash is set to `!*` (locked).
-7. Services: `systemctl --root=/run/aios/cand enable|disable|mask` per the manifest, plus AIOS core units (`aios-health.service`, `systemd-bless-boot.service` via `boot-complete.target`).
+7. Services: `systemctl --root=/run/aios/cand enable|disable|mask -- <units>` per the manifest, plus AIOS core units (`aios-health.service`, `systemd-bless-boot.service` via `boot-complete.target`).
 8. UKIs, for each kernel (default → flavor `cachyos`, fallback → flavor `lts`), in the chroot:
-   - `mkinitcpio -k <ver> -g /var/tmp/aios/initramfs-<flavor>.img`
-   - `ukify build --linux=/usr/lib/modules/<ver>/vmlinuz --initrd=/boot/intel-ucode.img (if present) --initrd=/var/tmp/aios/initramfs-<flavor>.img --cmdline=@/etc/kernel/cmdline --os-release=@/usr/lib/os-release --output=/var/tmp/aios/aios-gen-<N+1>-<flavor>.efi`
+   - `mkinitcpio -k <ver> -g /var/tmp/aios/initramfs-<flavor>.img`. The `microcode` hook (§3 step 4) puts the CPU microcode in the image's early cpio, from the `intel-ucode`/`amd-ucode` firmware in `/usr/lib/firmware` (after `autodetect`, only the build machine's CPU's), so there is no separate microcode initrd.
+   - `ukify build --linux=/usr/lib/modules/<ver>/vmlinuz --initrd=/var/tmp/aios/initramfs-<flavor>.img --cmdline=@/etc/kernel/cmdline --os-release=@/usr/lib/os-release --output=/var/tmp/aios/aios-gen-<N+1>-<flavor>.efi`
    - The cmdline file carries `aios.gen=<N+1>` and `subvol=@usr-gen-<N+1>`.
-   - The microcode image lands in the candidate's ephemeral `/boot`, which is fine because it lives in `@root-cand`.
-9. Sign each UKI on the host with `sbctl sign <cand>/var/tmp/aios/<uki>` (keys in persisted `/var/lib/sbctl`), then `sbctl verify` it.
-10. ESP space: if free space < 1.2 × total UKI size, run gc. If it's still short, abort.
+9. Sign each UKI on the host with `sbctl sign <cand>/var/tmp/aios/<uki>` (keys in persisted `/var/lib/sbctl`). A signing failure aborts the apply before anything reaches the ESP. There is no separate verify step: upstream `sbctl verify FILE` exits 0 for an unsigned file too, so it would prove nothing (§11 item 9). If an unsigned UKI still reached the ESP, it is caught at boot: with Secure Boot enabled the firmware refuses to start it, and boot counting (§3) moves on to the next entry once its tries run out.
+10. ESP space: if free space < 1.2 × total UKI size, run gc (`--keep 5`). If it's still short, abort. In bootstrap nothing has booted from the target yet, so this gc has no booted gen to spare and runs without one.
 11. Finalize, in this order:
+    - Remove any `aios-gen-<N+1>-*.efi` already on the ESP, whatever its counter (left by a gen whose subvolumes are gone), then copy the UKIs to `/efi/EFI/Linux/aios-gen-<N+1>-<flavor>+3.efi.tmp` (fsynced; systemd-boot ignores `.tmp`).
     - Unmount the candidate tree.
     - `btrfs property set -ts @usr-cand ro true`, same for `@etc-cand`.
     - `mv @usr-cand @usr-gen-<N+1>` and `@etc-cand → @etc-gen-<N+1>` (rename in the top level).
-    - Copy the UKIs to `/efi/EFI/Linux/aios-gen-<N+1>-<flavor>+3.efi`.
-    - `bootctl set-default ""`.
+    - `btrfs filesystem sync /run/aios/top`: the renames are on disk.
+    - Rename the main UKI from `.tmp`. **This is the commit point**: from here on gen-N+1 boots, so every later failure is a warning (§7), not a failed step.
+    - Rename the fallback UKI from `.tmp`, then fsync `/efi/EFI/Linux`.
+    - `bootctl set-default ""` (apply only, and only if the fsync worked).
     - Delete `@root-cand`.
 12. Unmount the top level and release the lock.
 
-**Crash safety:** before step 11 nothing visible has changed. In step 11 the subvolume rename happens before the UKI copy, so a UKI never exists without its subvolumes. A gen subvolume without a UKI is harmless; `aios gc` removes it. Stale candidates are removed at the next boot (§3 step 6) or the next apply.
+**Crash safety:** before step 11 nothing visible has changed. In step 11 the subvolume renames are synced to disk before any UKI gets its bootable name, so a UKI never exists without its subvolumes, even after a power loss; and the ESP directory is synced before the boot default moves, so it only moves to an entry that is on disk. A gen subvolume without a UKI is harmless; `aios gc` removes it once it falls out of `--keep`, or at once if it is half a pair. Stale candidates are removed at the next boot (§3 step 6) or the next apply.
 
 ### 4.4 Managed home paths
 
-- Each `[users.<u>.home]` entry becomes an `fstab` line `/etc/aios/home/<u>/<path> /home/<u>/<path> none bind,ro,x-systemd.requires-mounts-for=/home 0 0`.
-- Directory targets are created by systemd as mount points. File targets are created empty by `tmpfiles.d` (`f /home/<u>/<path> 0644 <u> <u> -`).
-- **Effect:** a user-level RAT can't add autostart entries, user units, shell-rc hooks, `~/.local/bin` shims or SSH keys. To change these, edit the manifest.
-- **Known limit:** other autostart vectors exist (compositor configs, `.desktop` overrides, editor plugins). They're added to the manifest defaults when the Cockpit picks the compositor. Sentinel watches the rest of `/home`.
+- Each `[users.<u>.home]` entry becomes an `fstab` line `/etc/aios/home/<u>/<path> /home/<u>/<path> none bind,ro,nofail,x-systemd.requires-mounts-for=/home 0 0`. `nofail`: a user who deletes or replaces a target can't drop the next boot into emergency mode.
+- systemd creates missing mount points itself: a directory for a directory source, an empty file for a file source (`apply` never touches `/home`; only `bootstrap` creates `@home/<u>`, 0700, owned by the user). Either may leave root-owned parents. `tmpfiles.d` then fixes the owner and mode of the home and of every parent directory of a target (`d /home/<u>/<dir> 0755 <u> <u> -`; `0700` for the home and under `~/.ssh`). It never names a target: after the first boot each is a read-only bind, and a `d` or `f` line on it would fail with EROFS.
+- **Default set** (the §4.1 example), each closing one vector:
+  - Shell startup and logout: `.zshenv`, `.zprofile`, `.zshrc`, `.zlogin`, `.zlogout` (zsh), and `.profile`, `.bash_profile`, `.bashrc`, `.bash_logout` (sh and bash). The defaults are minimal; `.bash_profile` sources `.profile` and `.bashrc`.
+  - SSH: `.ssh/authorized_keys`, `.ssh/authorized_keys2` (both empty) and `.ssh/rc` (comment only; sshd runs it at every login).
+  - XDG autostart: `.config/autostart/`.
+  - systemd user units: `.config/systemd/user/`, `.config/systemd/user.control/` and `.local/share/systemd/user/`, the per-user unit directories in `~` on the user manager's search path.
+  - User session environment: `.config/environment.d/`.
+  - PATH shims: `.local/bin/`.
+  - D-Bus activation: `.local/share/dbus-1/services/`. The session bus reads service files there and starts one whenever a client calls its name, so a file planted there would survive a reboot and run on demand.
+- **Effect:** a user-level RAT can't add autostart entries, user units, shell startup hooks, `~/.local/bin` shims or SSH keys. To change these, edit the manifest.
+- **Known limit, nested targets can be bypassed at runtime:** a target below a user-owned directory, such as `.ssh/authorized_keys` or `.config/autostart/`, can be dodged until the next reboot. The user can rename the parent directory, which moves the mount with it, and recreate it unprotected (`mv ~/.ssh ~/.x && mkdir ~/.ssh`). Direct children of the home, like `.zshrc`, can't be dodged this way, because a mount point can't be renamed or removed. A user-planted symlink at a target path could also redirect the bind at boot, and `nofail` would hide that failure. v0.1 mitigation: e2e test (g) checks that a planted symlink target doesn't redirect the bind. Fix: follow-up #7.
+- **Known limit, other autostart vectors:** these also exist, such as compositor configs, `.desktop` overrides, editor plugins, and `~/.config/systemd/user.conf`, whose `DefaultEnvironment=` reaches every user unit. They're added to the manifest defaults when the Cockpit picks the compositor (follow-up #5). Sentinel watches the rest of `/home`.
 
 ### 4.5 Code structure (Rust workspace `aios-cli/`)
 
@@ -258,12 +312,16 @@ Each step aborts on failure. Abort deletes the candidate subvolumes and candidat
 |---|---|---|
 | `aios-manifest` | Types, TOML parse (serde + `toml` spans), validation (every rule in §4.1) | Fixture manifests: one valid, one per invalid rule |
 | `aios-gen` | Generation id/subvolume/UKI naming, counter parsing (`+3`, `+1-2`), metadata TOML, listing, next id, GC selection | Pure unit tests |
-| `aios-render` | Pure renderers: fstab, tmpfiles, cmdline, passwd/group/shadow/gshadow merge, loader.conf | Golden files under `tests/golden/` |
+| `aios-render` | Pure renderers: fstab, tmpfiles, cmdline, passwd/group/shadow/gshadow merge, loader.conf | Expected output inline in each crate's `tests/` |
 | `aios-plan` | `SystemProbe` trait (booted gen, installed explicit packages, `/etc` file hashes, enabled units), observed state, `Plan` diff, human-readable rendering | Unit tests with a fake probe |
 | `aios-exec` | `CommandRunner` trait (real: `std::process::Command`; fake: records argv, returns scripted results) and the step sequences for apply, bootstrap, rollback, gc, secureboot, tpm | Golden argv-sequence tests, plus a failure injected at each step asserting the cleanup sequence |
-| `aios` (bin) | clap CLI, flock, logging, config of paths (overridable via env for tests: `AIOS_TOP`, `AIOS_ESP`, `AIOS_CONFIG`, `AIOS_SECRETS`, `AIOS_FAKE_RUNNER`) | CLI tests using the fake runner |
+| `aios` (bin) | clap CLI, flock, logging, config of paths. The paths are fixed in release builds | CLI tests using the fake runner (`test-hooks` builds) |
 
 All system interaction goes through `CommandRunner` and `SystemProbe`, so no unit test needs root.
+
+**Test overrides exist only in test builds.** The environment overrides the CLI tests use (`AIOS_TOP`, `AIOS_ESP`, `AIOS_CONFIG`, `AIOS_SECRETS` and the other `Layout` paths, `AIOS_ZONEINFO`, `AIOS_HARDENING_CMDLINE_FILE`, `AIOS_FAKE_RUNNER`, `AIOS_TEST_PASSWORD`) are read through a single function, which consults the environment only in builds with the `test-hooks` cargo feature. The feature is off by default, so a shipped `aios` reads no `AIOS_*` variable and can't be pointed at a fake runner or another manifest repo. The CLI tests require the feature, and `make check` runs them with `--all-features`. It then builds the release binary (`cargo build --release --locked -p aios`) and fails if it is empty or holds any `AIOS_` string at all, which would mean an override leaked in: `grep -q AIOS_` must exit 1 (no match), so a read error fails too. `make release-check` runs that check on a binary already built.
+
+`RealRunner` gives each child a clean environment (`PATH=/usr/bin`, `LC_ALL=C`, `TERM` passed through) and `/dev/null` as stdin, and captures stdout and stderr. A command marked interactive (`systemd-cryptenroll` for `aios tpm enroll`) inherits all three streams instead, so it can prompt.
 
 ### 4.6 AIOS packages
 
@@ -283,15 +341,15 @@ All system interaction goes through `CommandRunner` and `SystemProbe`, so no uni
 - The default manifest's `[files]` includes:
   - `/etc/pacman.conf` (`DBPath = /usr/lib/pacman/`, CachyOS repos).
   - `/etc/mkinitcpio.conf`.
-  - Mask symlinks for `90-mkinitcpio-install.hook` and `60-mkinitcpio-remove.hook`.
+  - Mask symlinks for `90-mkinitcpio-install.hook`, `60-mkinitcpio-remove.hook` and `zz-sbctl.hook` (the name sbctl installs its hook under).
   - `/etc/nftables.conf`.
   - `/etc/usbguard/usbguard-daemon.conf`.
-- AIOS core package set, always added: `base aios-cli aios-base btrfs-progs cryptsetup tpm2-tss sbctl systemd-ukify mkinitcpio nftables usbguard apparmor zram-generator fwupd polkit` + the manifest kernels.
+- AIOS core package set (16 packages), always added: `base aios-cli aios-base btrfs-progs cryptsetup dosfstools tpm2-tss sbctl systemd-ukify mkinitcpio nftables usbguard apparmor zram-generator fwupd polkit` + the manifest kernels. `dosfstools` provides `fsck.vfat`: the ESP's fstab line has fsck pass 2.
 
 **Packaging:**
 - PKGBUILDs live in `packaging/aios-cli/` and `packaging/aios-base/`.
 - `make repo` builds them with `makepkg` (no root) and creates `build/repo/aios-local.db.tar.gz` via `repo-add`.
-- The ISO uses this repo. The installer copies it to `/persist/aios/repo`, and the installed `pacman.conf` points `[aios-local]` at `file:///persist/aios/repo`. In the candidate chroot that's a bind of the same path.
+- The ISO uses this repo. The installer copies it to `/persist/aios/repo`, and the installed `pacman.conf` points `[aios-local]` at `file:///persist/aios/repo`. In the candidate chroot that's a bind of the same path. `[aios-local]` is the last repo in `pacman.conf`, so a package dropped into it can never shadow a signed one. `aios-cli` and `aios-base` come only from this unsigned repo, so a runtime root compromise could persist by planting packages in `/persist/aios/repo` until follow-up #2 (repo signing) lands.
 - The repo is unsigned (`SigLevel = Optional TrustAll`) for v0.1, because it's built locally on the same machine. Signing the repo is follow-up #2.
 
 ## 5. Hardening
@@ -353,14 +411,20 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
   - The root account is locked.
   - `sudo` is not installed. Admin is `run0` via polkit, with wheel as admin per Arch's default polkit rules.
 - **Network:** `nftables.conf` (default `/etc/nftables.conf` from the manifest):
-  - `input` policy `drop`, accepting loopback, `ct state established,related`, ICMP/ICMPv6 essentials (echo-reply, unreachable, time-exceeded, NDP) and DHCPv6 client.
+  - `input` policy `drop`, accepting loopback, `ct state established,related`, ICMP/ICMPv6 essentials (echo-reply, unreachable, time-exceeded, NDP, MLD listener query per RFC 4890) and DHCPv6 client.
   - `forward` policy `drop`.
   - `output` policy `accept`. The app firewall comes with Sentinel.
+  - **Trade-off, containers and VMs:** `forward` policy `drop` blocks the NAT that rootful podman and libvirt set up. The ruleset starts with `flush ruleset`, so restarting `nftables.service` also wipes the tables netavark and libvirt added at runtime. Rootless podman (slirp4netns/pasta) is unaffected. Users who need rootful NAT add forward rules in their `files/nftables.conf`.
+- **Network trade-offs** (follow-up #6):
+  - Strict reverse-path filtering (`rp_filter = 1`, §5.2) drops asymmetrically routed packets, which can break multi-homed hosts and some VPN setups.
+  - Strict DNS over TLS (`DNSOverTLS=yes`, §4.6) can't reach a captive portal's local resolver, so captive-portal networks need DoT relaxed until login.
+  - The DoT resolvers are IPv4 only, so IPv6-only networks have no DNS.
 - **USBGuard:**
-  - `usbguard-daemon.conf`: `RuleFile=/var/lib/usbguard/rules.conf` (persisted), `ImplicitPolicyTarget=block`, `PresentDevicePolicy=apply-policy`, `InsertedDevicePolicy=apply-policy`, `IPCAllowedGroups=wheel`.
+  - `usbguard-daemon.conf`: `RuleFile=/var/lib/usbguard/rules.conf` (persisted), `ImplicitPolicyTarget=block`, `PresentDevicePolicy=apply-policy`, `InsertedDevicePolicy=apply-policy`, `IPCAllowedUsers=root`, `IPCAllowedGroups=` (empty).
+  - Only root may use the daemon's IPC. Every policy change therefore goes through `run0` and its polkit prompt, and a process running as a wheel user can't allow a device on its own.
   - The installer writes `usbguard generate-policy` output, which allows devices present at install.
   - The installer then appends `block with-interface one-of { 03:*:* }` followed by `allow`, so new HID devices are blocked and other new devices are allowed.
-  - Approve a device with `usbguard allow-device -p <id>`.
+  - Approve a device with `run0 usbguard allow-device -p <id>`.
 - **AppArmor** is enabled via `lsm=` and `apparmor.service`, with packaged profiles enforced.
 - **Swap:** zram only. No disk swap, no hibernation.
 - **Firmware:** `fwupd-refresh.timer`.
@@ -369,60 +433,105 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
 
 ### 6.1 archiso profile (`iso/`)
 - Copied from `/usr/share/archiso/configs/releng/` and modified.
-- `profiledef.sh`: `iso_name="aios"`, `iso_label="AIOS_<YYYYMM>"`, `bootmodes=('uefi.systemd-boot.esp' 'uefi.systemd-boot.eltorito')`. UEFI only.
-- `pacman.conf`: `core`, `extra`, the CachyOS repos, and `[aios-local]` → `file://<repo>/build/repo`. `make iso` generates it from a template with the absolute path.
-- `packages.x86_64`: the releng list plus `arch-install-scripts sbctl btrfs-progs cryptsetup gptfdisk tpm2-tools git usbguard whois aios-cli aios-base`.
+- `profiledef.sh`: `iso_name="aios"`, `iso_label="AIOS_<YYYYMM>"`, `bootmodes=('uefi.systemd-boot')` (archiso 86 merged the ESP and El Torito modes into one). UEFI only.
+- `pacman.conf`: `core`, `extra`, the CachyOS repos, and `[aios-local]` → `file://<repo>/build/repo`. `make iso-build` generates it from `iso/pacman.conf.in` with the absolute path. `[cachyos]` only provides the keyring and the mirrorlists. `CacheDir` is a private `build/iso-pkgcache/`. mkarchiso's `pacstrap -c` would otherwise use the host cache, and a CachyOS host's cache holds CachyOS builds under the same file names as Arch's. Those fail the signature check of Arch's `[core]`/`[extra]`.
+- `packages.x86_64`: the releng list plus `arch-install-scripts sbctl btrfs-progs cryptsetup gptfdisk tpm2-tools git usbguard whois aios-cli aios-base cachyos-keyring cachyos-mirrorlist cachyos-v3-mirrorlist`. Bootstrap needs the CachyOS keyring and mirrorlists on the live system.
 - `airootfs/usr/local/bin/aios-install` and `airootfs/usr/local/lib/aios-install/*.sh`.
-- `efiboot/loader/entries/03-aios-serial.conf`: same as the default entry plus `console=ttyS0,115200`.
+- `efiboot/loader/entries/`: `01-aios-linux.conf` (default), `03-aios-serial.conf` (the same plus `console=ttyS0,115200`; the second menu entry) and `04-aios-memtest86+x64.conf`. releng's speech entry is dropped.
+- `airootfs/etc/systemd/system/aios-install-auto.service` runs `aios-install --auto`:
+  - `ConditionVirtualization=vm`, so it never starts on real hardware.
+  - `After=… pacman-init.service`, so the keyring check (§6.2 step 1) sees the populated keyring.
+  - stdout and stderr go to `journal+console`, with `LogRateLimitIntervalSec=0` so journald drops no installer line.
 - `airootfs/etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf`: root autologin on the live ISO only.
 - The build repo is copied into the ISO at `airootfs/opt/aios-repo/`, so the installer can seed `/persist/aios/repo` without network.
-- `make iso` runs `sudo mkarchiso -v -w work/ -o out/ iso/`. The developer runs it.
+- `iso/build-profile.sh` assembles `iso-build/` without root:
+  - It writes its `.aios-iso-build` marker right after creating the directory, and only ever replaces a directory that has the marker. A run that failed half way can be repeated.
+  - It accepts the keys file only as `make keys` writes it: comment lines plus exactly one `AIOS_CACHYOS_KEYS="<fingerprints>"` line, since the installer sources it as root.
+- `make iso` writes `iso-build/` without root (the profile, `pacman.conf`, the installer, `/opt/aios-repo`, `keys.sh`), clears `build/iso-work`, then runs `sudo mkarchiso -v -w build/iso-work -o out iso-build/`. The developer runs it.
+  - `make iso SUDO=` builds unprivileged (archiso ≥ 89). mkarchiso then leaves files owned by the user's subordinate IDs, so the work directory is cleared with `unshare --map-auto --map-root-user rm -rf --one-file-system`. This needs `/etc/subuid` and `/etc/subgid` ranges for the user.
+  - If clearing fails, make prints a hint and stops. If rm reported "different device" or "Device or resource busy", an interrupted build left mounts under `build/iso-work`: unmount them (`findmnt -R build/iso-work`; `umount -R …`). If it reported "Permission denied", clear the directory with the same mode that built it (`sudo`, or `SUDO=` for an unprivileged build). `make clean-iso` clears the work directory the same way.
 
 ### 6.2 `aios-install` (bash, `set -euo pipefail`, shellcheck-clean, helpers in `lib/` unit-tested with bats)
 
 **Modes:**
 - **Interactive:** prompts for disk, hostname, username, user password, LUKS passphrase and timezone.
-- **Unattended:** `--config <file>`, or automatically when `/sys/firmware/qemu_fw_cfg/by_name/opt/aios/install.conf/raw` exists.
+- **Unattended:** `--config <file>`, or automatically when `/sys/firmware/qemu_fw_cfg/by_name/opt/aios/install.conf/raw` exists. `--auto` (the ISO's `aios-install-auto.service`) installs from that fw_cfg file, and exits 0 when there is none.
   - `KEY=value` lines: `DISK HOSTNAME USERNAME USER_PASSWORD LUKS_PASSPHRASE TIMEZONE WIPE EXTRA_CMDLINE`.
-  - Values are parsed by a whitelist parser, never `source`d.
+  - Values are parsed by a whitelist parser, never `source`d. `EXTRA_CMDLINE` words may only hold letters, digits and `. _ , : = / + -`. There's no `@`, so no word can carry a manifest placeholder.
+  - A `--config` file that group or others can read gets a warning. The summary says to delete the file.
+- **`--dry-run`:** prints the commands that would change the system and runs only the read-only queries. Queries about what those commands would have created are skipped: the new partitions aren't checked, and the LUKS UUID is the placeholder `00000000-0000-0000-0000-000000000000`. So a dry run also works on a real machine.
+- **Secrets:**
+  - They reach programs only on stdin, never in argv, the log or the dry-run output.
+  - The installer refuses to run under xtrace (`bash -x`, `SHELLOPTS=xtrace`).
+  - It unsets the user password once it is hashed (step 1), and the LUKS passphrase after step 4.
 
 **Steps:**
-1. Preflight:
-   - `/sys/firmware/efi` exists.
-   - `DISK` is a whole block device and isn't the live medium (`/run/archiso/bootmnt` source).
-   - Network: `curl -sI https://geo.mirror.pkgbuild.com`.
+1. Preflight. Everything that can fail without touching the disk fails here:
+   - `/sys/firmware/efi` exists and `/dev/mapper/aios` doesn't. `/mnt/aios-top`, `/efi` and `/var/lib/sbctl` aren't mount points yet.
+   - `DISK` is a whole, writable block device of at least 16 GiB with no mounted filesystem.
+   - `DISK` isn't the live medium. The `/run/archiso/bootmnt` source's device stack is walked down with `lsblk -nrso NAME,TYPE`, so a medium on a partition or a device-mapper target (Ventoy) still protects the disk below it.
+   - Nothing holds `DISK`: `lsblk` lists no child other than partitions, and `/sys/class/block/<dev>/holders` is empty for the disk and every partition. Otherwise it stops with `<disk> is in use by <holder> (LVM/MD/dm); deactivate it first`.
+   - The disk's `diskseq` (`/sys/class/block/<dev>/diskseq`), model, serial and size are recorded.
+   - Network: `curl -fsI` (HTTP errors fail too) to `https://geo.mirror.pkgbuild.com`, and to `cachyos.db` on the first `https` `Server` of `/etc/pacman.d/cachyos-mirrorlist`.
    - x86-64-v3 detection (`/lib/ld-linux-x86-64.so.2 --help` lists "x86-64-v3 (supported, searched)"). If v3 isn't supported, the v3 CachyOS repos are dropped from the generated `pacman.conf`.
-2. Confirm the wipe. Interactive mode requires typing the disk path; unattended mode requires `WIPE=yes`.
-3. Partition: `sgdisk --zap-all`, then `-n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309`. Then `mkfs.fat -F32 -n EFI`.
-4. `cryptsetup luksFormat --type luks2 --pbkdf argon2id` (passphrase from stdin), then `cryptsetup open … aios`. `systemd-cryptenroll --recovery-key`, with the key printed and saved nowhere.
+   - The live keyring trusts exactly the pinned CachyOS keys (step 9).
+   - The filled-in manifest (and, without v3, the stripped `pacman.conf`), the yescrypt hash of `USER_PASSWORD` (`mkpasswd`) and the `usbguard generate-policy` output are made now and kept in memory. Steps 6 and 12 write them.
+2. Confirm the wipe:
+   - It shows the recorded model, serial, size and diskseq, and `lsblk -o NAME,SIZE,FSTYPE,LABEL,MODEL <disk>`.
+   - Interactive mode requires typing the disk path; unattended mode requires `WIPE=yes`.
+3. Partition:
+   - Re-read the diskseq. If another disk now has the name, stop with `disk changed since validation`, before anything is written.
+   - `wipefs -a`, `sgdisk --zap-all`, then `-n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309`.
+   - `udevadm settle`, then `blockdev --rereadpt`. While udev still has a new partition open the re-read fails with EBUSY, so it is tried up to five times; after that the failure is fatal.
+   - `udevadm settle` again. Then exactly partitions 1 and 2 must exist.
+   - `wipefs -a` on both new partitions, so an old signature inside them (a LUKS header, a btrfs superblock) can't confuse blkid.
+   - `mkfs.fat -F32 -n EFI`.
+4. Encrypt:
+   - `cryptsetup luksFormat --type luks2 --pbkdf argon2id` (passphrase from stdin), then `cryptsetup open … aios`.
+   - `systemd-cryptenroll --recovery-key`, with the key printed and saved nowhere.
+   - On a terminal (but not with `--auto`), wait for Enter: `Press Enter after writing down the recovery key`.
 5. `mkfs.btrfs -L aios /dev/mapper/aios`. Mount the top level and create `@blank` (skeleton §2, then `btrfs property set -ts … ro true`), `@persist`, `@home` and `@log`.
-6. Copy `/usr/share/aios/defaults/manifest` to `@persist/aios/config`, substituting hostname, username, timezone and `EXTRA_CMDLINE`. Then `git init`, commit "aios: initial manifest". Write the yescrypt hash of `USER_PASSWORD` to `@persist/aios/secrets/passwd/<user>` (0600). Copy `/opt/aios-repo` to `@persist/aios/repo`.
-7. Mount the ESP at `/mnt/aios-esp`.
+6. Copy `/usr/share/aios/defaults/manifest` to `@persist/aios/config`, substituting hostname, username, timezone and `EXTRA_CMDLINE`. Then `git init`, commit "aios: initial manifest". Write the yescrypt hash from step 1 to `@persist/aios/secrets/passwd/<user>` (0600). Copy `/opt/aios-repo` to `@persist/aios/repo`.
+7. Mount the ESP at `/efi` on the live system, where the installed system mounts it too.
 8. Secure Boot keys:
    - Bind `@persist/var/lib/sbctl` to the live system's `/var/lib/sbctl`.
    - `sbctl create-keys`.
    - Then `aios bootstrap` (step 9) can sign.
-9. `aios bootstrap --target /mnt/aios-top --esp /mnt/aios-esp --manifest /mnt/aios-top/@persist/aios/config/manifest.toml`.
-   - Before pacstrap, it imports and locally signs the CachyOS key into the candidate keyring. The fingerprint is pinned in `installer/lib/keys.sh`, taken from the build host at ISO build time by `make iso`.
-10. `bootctl install --esp-path=/mnt/aios-esp`. Write `loader.conf` (`default aios-gen-*-cachyos*`, `timeout 3`, `editor no`). Sign `systemd-bootx64.efi` and `BOOTX64.EFI` with `sbctl sign -s`.
-11. If `sbctl status` reports Setup Mode, run `sbctl enroll-keys --microsoft`.
-12. Write the USBGuard rules to `@persist/var/lib/usbguard/rules.conf` (§5.5).
-13. Unmount everything, `cryptsetup close aios`, and print the summary: the recovery key reminder, `aios secureboot enroll` (if not enrolled) and `aios tpm enroll`. Exit 0, then reboot when unattended.
+9. `aios bootstrap --target /mnt/aios-top --esp /efi --manifest /mnt/aios-top/@persist/aios/config/manifest.toml --luks-uuid <uuid>`.
+   - It takes `--luks-uuid` (from `cryptsetup luksUUID`). Its pacstrap verifies with, and copies, the live keyring. So step 1 checks that this keyring trusts exactly the CachyOS keys pinned in `installer/lib/keys.sh`, which `make keys` (part of `make iso`) generates from the build host's keyring.
+10. `bootctl install --esp-path=/efi`. Write `loader.conf` (`default aios-gen-*-cachyos*`, `timeout 3`, `editor no`). Sign `systemd-bootx64.efi` and `BOOTX64.EFI` with `sbctl sign -s`. With the ESP at `/efi`, the paths sbctl saves in its database (`/efi/EFI/...`, kept in `@persist`) are the ones the installed system re-signs.
+11. If `sbctl status` reports Setup Mode, run `sbctl enroll-keys --microsoft`. If that fails, the install still completes, and the summary points to `aios secureboot enroll`.
+12. Write the USBGuard rules from step 1 to `@persist/var/lib/usbguard/rules.conf` (§5.5).
+13. Finish:
+   - Unmount everything and `cryptsetup close aios`.
+   - Print the summary: the recovery key reminder, `aios secureboot enroll` (if not enrolled), `aios tpm enroll`, and for `--config`, deleting the config file.
+   - Exit 0. Only `--auto` reboots. Otherwise the summary says to remove the install medium and reboot.
+
+**Failure cleanup** (the EXIT trap, §7):
+- Each mount, and the LUKS open, is tracked before its command runs.
+- The trap runs without errexit and ignores further INT, TERM and SIGPIPE. A closed, read-only or broken-pipe stderr doesn't stop it.
+- It unmounts the tracked mounts newest first with `umount -R` (lazily if busy), each only if `mountpoint -q` says it's mounted. The step 1 mount point check makes sure the trap never unmounts something this run didn't mount.
+- Then, if `/dev/mapper/aios` exists, it unmounts everything else mounted from it, deepest first (`findmnt -rno TARGET -S /dev/mapper/aios`), and closes it.
+- It names the failed step, and says whether the disk was changed yet (it is from step 3 on). A failure after step 13 has unmounted everything (the reboot, say) leaves AIOS installed, and the trap says so.
 
 ## 7. Error handling summary
 
 | Failure | Behavior |
 |---|---|
 | Invalid manifest | `plan`/`apply` refuse with `manifest.toml:line:col: <reason>`. Nothing changes |
-| Any apply step fails | Candidates and the candidate root are deleted, the lock is released, and the command exits non-zero with `aios: step <name> failed: <detail>`. The booted gen is untouched |
+| Any apply step fails | Candidates and the candidate root are deleted, the lock is released, and the command exits non-zero with `aios: step <name> failed: <detail>`. The booted gen is untouched. A panic cleans up the same way. If the candidate tree won't unmount, its subvolumes are kept for the next boot to delete |
+| A failure after the commit point (§4.3 step 11: fallback UKI rename, ESP fsync, `bootctl set-default ""`, deleting `@root-cand`, unmounting the top level) | gen-N+1 is installed, so the command prints `aios: warning: <detail>` for each and exits 0. A failed fsync also skips `bootctl`, leaving the boot default as it was |
+| `aios bootstrap` on a target that already holds generations | Refused in step `mount-top`, before anything is run on or deleted from the target |
 | Power loss mid-apply | Stale `@*-cand` subvolumes are removed by `aios-root.service` at next boot and by the next apply |
 | ESP full | Auto-gc respecting protected gens. If still short, abort before finalizing |
-| UKI signing or verification fails | Abort before finalizing. No unsigned UKI is copied to the ESP |
+| UKI signing fails | Abort before finalizing. No UKI is copied to the ESP. There is no verify step (§4.3 step 9): an unsigned UKI that reached the ESP anyway doesn't start under Secure Boot, and boot counting falls back to the next entry |
 | Gen fails health check | Not blessed. After 3 tries systemd-boot boots the next entry. `aios status` lists it as bad |
-| Generation subvolume missing at boot | `aios-root.service` fails with a clear message → emergency shell. The boot menu still lists other gens |
+| Generation subvolume missing at boot | `aios-root.service` fails with a clear message and the boot stops. The initrd's root account is locked, so no emergency shell opens. Recovery: choose another boot entry (the menu still lists other gens) or boot the ISO, with Secure Boot disabled once the own keys are enrolled (§11 item 15) |
+| `@blank` missing, a symlink at `@blank` or at the generation's names, or a live/candidate name that isn't a subvolume, at boot | `aios-root.service` fails before deleting anything, with the same recovery |
+| `@etc-live` fails to mount in the initrd | `sysroot-etc.mount` is required by `initrd-fs.target`, so the boot stops, with the same recovery |
 | Concurrent `aios` commands | The second exits 1: "another aios operation is running" |
 | Runtime edits to `/etc` | Allowed, but discarded at reboot. `aios status` lists them |
-| Installer step fails | Stop with the step name. Leave LUKS closed if it was opened, unmount everything (trap). The disk is left in an undefined state and the user re-runs the installer |
+| Installer step fails | Stop with the step name. The trap unmounts what the run mounted and anything else on `/dev/mapper/aios`, then closes LUKS (§6.2). Before step 3 nothing on the disk has changed. From step 3 on, the disk is left in an undefined state and the user re-runs the installer |
 
 ## 8. Session for v0.1
 
@@ -433,18 +542,33 @@ The Base ISO includes no desktop. The Cockpit sub-project picks the compositor. 
 | Layer | Tooling | What |
 |---|---|---|
 | Rust unit/golden | `cargo test --workspace` | Manifest validation (each rule), gen naming/counter/GC, renderers (golden files), planner diff, argv sequences for apply/bootstrap/rollback/gc/secureboot/tpm with the fake runner, cleanup on a failure injected at every step |
-| Shell | `shellcheck`, `bats` | `aios-root.sh` with a fake `btrfs`/`mount`/`umount` on PATH and a fake `/proc/cmdline` (env override): normal boot, missing gen, no gen on cmdline, stale candidates. `aios-health.sh` with fake `findmnt` and cmdline. Installer `lib/` helpers: config parser (rejects unknown keys and shell metacharacters), disk validation, v3 detection parsing |
-| Units | `systemd-analyze verify` | `aios-root.service`, `sysroot-etc.mount`, `aios-health.service` |
+| Shell | `shellcheck`, `bats` | `aios-root.sh` with a fake `btrfs`/`mount`/`umount` on PATH (with failure injection) and a fake `/proc/cmdline` (env override): normal boot, missing gen, missing `@blank`, no or invalid gen on cmdline, stale candidates, nested subvolumes (including one named like a top-level subvolume), a non-subvolume or a symlink (also dangling) at a live or candidate name, a symlink (also dangling) at `@usr-gen-N`, `@etc-gen-N` or `@blank`, and mount/snapshot/unmount failures. The fake `btrfs` resolves symlinks the way btrfs-progs does, so a missing check would delete the link's target. `tests/bats/pacstrap-layout.bats` runs real pacman in an unprivileged user namespace, with `filesystem` and `pacman` from the local package cache (it skips without them, or without user namespaces): an empty database conflicts with a `@blank`-shaped root, an empty root with `DBPath` in its `/usr` takes both, and a database that owns them takes them over `@blank` again (apply). `aios-health.sh` with fake `findmnt` (including stacked mounts) and cmdline. The installer's tests are listed below the table |
+| Units | `systemd-analyze verify` | `aios-root.service`, `sysroot-etc.mount`, `aios-health.service`, the ISO's `aios-install-auto.service` |
 | Packaging | `makepkg` in `make repo`, `namcap` if available | PKGBUILDs build |
-| E2E | `make e2e`: pytest harness in `tests/e2e/`, QEMU (`-enable-kvm -cpu host -m 4G`), OVMF `OVMF_CODE.secboot.4m.fd` + a copy of the vars, `swtpm` socket TPM 2.0, a 20 GiB qcow2 | Boots the ISO with the fw_cfg install config, drives the serial console via a unix socket: install → reboot → LUKS passphrase → log in as the test user → assertions (a)–(f) from §1. Needs `out/aios-*.iso` |
+| E2E | `make e2e`: pytest harness in `tests/e2e/`, QEMU (`-enable-kvm -cpu host -m 4G`), OVMF `OVMF_CODE.secboot.4m.fd` + a copy of the vars, `swtpm` socket TPM 2.0, a 20 GiB qcow2 | Boots the ISO once, with the fw_cfg install config and `-no-reboot`, so QEMU exits when the installer reboots. Then it powers on from the disk alone, without the CD-ROM, fw_cfg or `-no-reboot` (the ISO's `--auto` would install again), and keeps the vars copy, the swtpm state, the disk and `-cpu host`. Later reboots are guest reboots. It drives the serial console via a unix socket: install → reboot → LUKS passphrase → log in as the test user → assertions (a)–(g) from §1. An install wait fails at once on `aios-install: error: …` or the trap's `step N (name) failed`, quoting the line. A failed run keeps the disk and TPM state in `build/e2e/`, and `--keep-vm` keeps them after a pass too. Also the private mount namespace (§4.2), which only a real root run exercises: after the apply in (d), no mount at or under `/run/aios` appears in the host namespace (`findmnt -rno TARGET`, filtered for `^/run/aios(/|$)`; `findmnt -Rn /run/aios` prints nothing when `/run/aios` itself isn't a mount point, so it can't fail). After (f), a second apply without a reboot in between (`aios apply --yes --upgrade`) succeeds, and no mount is left at or under `/run/aios` before or after it (same check). Each apply copies its UKIs to the ESP through the `/efi` automount, so its success shows that host mounts still propagate into the namespace. An apply killed with SIGKILL mid-build isn't exercised. Needs `out/aios-*.iso` |
 
-`make check` = `cargo test` + `cargo clippy -D warnings` + shellcheck + bats + `systemd-analyze verify`. It needs no root and no VM.
+The installer's bats tests use fake `lsblk`, `findmnt`, `mountpoint` and `curl`, and a fake sysfs:
+- **`lib/` helpers:**
+  - the config parser (rejects unknown keys, shell metacharacters and `@` in `EXTRA_CMDLINE`);
+  - disk validation (holders, the live medium's device stack, diskseq, exactly two new partitions);
+  - the network probes and v3 detection parsing;
+  - the partition table re-read, retried while busy;
+  - the cleanup: newest first, then the mapping's other mounts deepest first, with a closed, read-only or broken-pipe stderr, and through a second interrupt.
+- **`aios-install` itself, in dry-run mode:**
+  - golden command lists (virtio and NVMe disks, a path with spaces) and the exact read-only queries;
+  - a failure injected at a step;
+  - a disk that changes before the wipe;
+  - the reboot rule, and the Enter prompt on a terminal (under `script`);
+  - the passwords unset once used.
+- **The ISO and the Makefile:** `make iso-check` checks the profile without building it. `tests/bats/makefile.bats` runs the `make iso` cleanup and the venv rule with fake tools.
+
+`make check` = `cargo test --all-features` + `cargo clippy -D warnings` (with and without features) + the release-binary check for test hooks (§4.5) + shellcheck + bats + `systemd-analyze verify` + the e2e harness's unit tests (`make e2e-unit`). It needs no root and no VM. Without a system pytest, `make tools` installs a hash-pinned one into `build/venv/`. The venv is keyed on the Python minor version (`build/venv.python`), so a Python upgrade rebuilds it.
 
 ## 10. Repository layout
 
 ```
 AIOS/
-├─ Makefile                 check | repo | iso | vm | e2e | clean
+├─ Makefile                 check (rust-check shell-check bats-check unit-check e2e-unit) | release-check | tools | repo | keys | iso-build | iso | iso-check | clean-iso | e2e
 ├─ aios-cli/                Rust workspace (§4.5)
 ├─ initrd/                  aios-root.sh, aios-root.service, sysroot-etc.mount, install/aios hook
 ├─ base/                    aios-base payload (sysctl, cmdline, NM, resolved, zram, health)
@@ -452,7 +576,7 @@ AIOS/
 ├─ packaging/               PKGBUILDs: aios-cli, aios-base
 ├─ iso/                     archiso profile
 ├─ installer/               aios-install + lib/
-├─ tests/                   bats/, e2e/, fixtures/, golden/
+├─ tests/                   bats/ (with fakes/), e2e/; the Rust tests live in each crate's tests/
 └─ docs/superpowers/        specs/, plans/
 ```
 
@@ -462,4 +586,19 @@ AIOS/
 2. Signed `aios-local` repo.
 3. "Block USB while locked" (Cockpit).
 4. Offline install from the ISO's local repo.
-5. Managed home paths for the compositor chosen by the Cockpit.
+5. Managed home paths for the compositor chosen by the Cockpit, plus `~/.config/systemd/user.conf` (§4.4).
+6. Network trade-offs (§5.5): a manifest switch for loose `rp_filter` on multi-homed/VPN hosts, a captive-portal flow under strict DoT, IPv6 DoT resolvers, and opt-in forward rules for rootful container/VM NAT.
+7. Replace the fstab home binds with a root oneshot run before `user@.service`. For each target it:
+   - resolves the path with `openat2(RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH)`;
+   - re-creates a missing or replaced parent directory;
+   - bind-mounts through the file descriptor (`move_mount`);
+   - reports any failure to the journal and to `aios status`;
+   - re-checks at every user login, closing the rename bypass (§4.4).
+8. Read manifest sources from the git objects at `manifest_commit` instead of the working tree. This closes the check-then-read race, and guarantees that `apply` builds exactly what `plan` showed.
+9. Check each signature after `sbctl sign` (§4.3 step 9): run `sbctl verify --json` and require `is_signed` for the UKI, since plain `sbctl verify FILE` exits 0 for an unsigned file.
+10. Runtime root persistence through the signing keys: the sbctl keys live in `/persist` (`/var/lib/sbctl`), so code running as root can sign a UKI of its own (another initrd or cmdline) and put it on the ESP. That changes nothing PCR 7 measures, so the TPM still unlocks LUKS for it. Fix: a signing key kept offline or sealed to the TPM, so a running system can't use it; dm-verity for the `@usr-gen-N` subvolumes; and a signed PCR 11 policy (`systemd-measure`), so only UKIs signed with that key unlock the disk.
+11. systemd-boot is never updated or re-signed after the install: `systemd-bootx64.efi` and `BOOTX64.EFI` stay what step 10 of §6.2 installed, and sbctl's pacman hook is masked in the chroot (§4.3 step 4). Fix: `bootctl update` plus `sbctl sign` of both in `aios apply`, before the commit point.
+12. `cmdline-hardening` is read from the running `/usr` (the booted generation's `/usr/lib/aios/cmdline-hardening`, §4.3 step 1), so a change to it in `aios-base` takes effect one generation late: the generation that installs the new `aios-base` still gets the old hardening cmdline. Fix: read it from the candidate's `/usr` after the packages step.
+13. A per-generation root template instead of the shared `@blank`: every generation boots from the same skeleton, so changing it needs a reinstall, and package paths outside `/usr` and `/etc` need `zz-aios-pkgdirs.conf` (§4.3 step 5), which can't bring back a package's regular files. A `@root-gen-N` built with each generation, from what its packages put outside `/usr` and `/etc`, would carry both.
+14. AppArmor profiles are minimal: only the profiles the packages ship are enforced (§5.5). AIOS adds none for its own units or for common network-facing and user-facing programs.
+15. The unsigned ISO can't boot with Secure Boot enforced once the own keys are enrolled: archiso's systemd-boot is signed by neither those keys nor Microsoft's. Recovery from the ISO means disabling Secure Boot in the firmware first and enabling it again afterwards. While it is off, PCR 7 differs, so the TPM won't unlock LUKS: use the passphrase or the recovery key. Fix: sign the ISO's boot chain with the own key (or boot it through shim).

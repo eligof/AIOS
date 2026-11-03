@@ -1,0 +1,23 @@
+# AIOS live ISO only (spec §6.2): install unattended when the VM provides the QEMU fw_cfg
+# file opt/aios/install.conf (the e2e harness does). Without it, `aios-install --auto`
+# exits 0 at once. The unit never starts on bare metal, and it waits for pacman-init's
+# keyring. The installer's output goes to the console (the serial console when the serial
+# boot entry is used), with no journal rate limit, so no line of an install log is dropped.
+
+[Unit]
+Description=AIOS: unattended install from the QEMU fw_cfg config
+ConditionVirtualization=vm
+Wants=network-online.target
+After=network-online.target time-sync.target pacman-init.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/aios-install --auto
+StandardInput=null
+StandardOutput=journal+console
+StandardError=journal+console
+LogRateLimitIntervalSec=0
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

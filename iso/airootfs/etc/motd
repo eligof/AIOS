@@ -1,0 +1,8 @@
+AIOS live medium. Nothing is installed yet.
+
+  aios-install                  install AIOS; asks for the disk to erase and the settings
+  aios-install --config FILE    unattended install from KEY=value lines (see the script)
+  iwctl                         connect to Wi-Fi first when there is no Ethernet
+
+The installer erases the whole disk you choose.
+

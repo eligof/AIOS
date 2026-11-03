@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Fake btrfs for tests/bats/aios-root.bats.
+# A "subvolume" is a directory under $AIOS_TOP that contains a .subvol marker file.
+# Like btrfs-progs, which resolves paths with realpath(3), show and delete follow a symlink
+# at PATH: deleting through one deletes its target.
+# Every call is appended to $CALLS as one line: "btrfs <args>". A call whose line also
+# appears verbatim in the file $FAILS exits 1 without doing anything (failure injection).
+set -euo pipefail
+
+call="btrfs $*"
+echo "$call" >>"$CALLS"
+if [ -n "${FAILS:-}" ] && [ -f "$FAILS" ] && grep -qxF -- "$call" "$FAILS"; then
+    echo "fake btrfs: injected failure: $call" >&2
+    exit 1
+fi
+
+is_subvol() {
+    [ -d "$1" ] && [ -f "$1/.subvol" ]
+}
+
+# True if some subvolume lies strictly below $1.
+has_nested() {
+    [ -n "$(find "$1" -mindepth 2 -name .subvol -print -quit)" ]
+}
+
+[ "${1:-}" = subvolume ] || { echo "fake btrfs: unsupported: $*" >&2; exit 2; }
+case "${2:-}" in
+    show)
+        [ "$#" -eq 3 ] || { echo "fake btrfs: only 'show PATH' is supported" >&2; exit 2; }
+        if ! is_subvol "$3"; then
+            echo "ERROR: Not a Btrfs subvolume: $3" >&2
+            exit 1
+        fi
+        echo "${3#"$AIOS_TOP"/}"
+        ;;
+    snapshot)
+        src=$3 dst=$4
+        is_subvol "$src" || { echo "ERROR: not a subvolume: $src" >&2; exit 1; }
+        [ ! -e "$dst" ] || { echo "ERROR: target path already exists: $dst" >&2; exit 1; }
+        mkdir "$dst"
+        cp -a "$src/." "$dst/"
+        echo "Create a snapshot of '$src' in '$dst'"
+        ;;
+    delete)
+        # Like the kernel, a plain delete refuses a subvolume that still holds another;
+        # --recursive removes the nested ones too.
+        shift 2
+        recursive=no
+        if [ "${1:-}" = --recursive ] || [ "${1:-}" = -R ]; then
+            recursive=yes
+            shift
+        fi
+        [ "$#" -eq 1 ] || { echo "fake btrfs: only 'delete [--recursive] PATH' is supported" >&2; exit 2; }
+        target=$(realpath -m -- "$1")
+        is_subvol "$target" || { echo "ERROR: Not a Btrfs subvolume: $target" >&2; exit 1; }
+        if [ "$recursive" = no ] && has_nested "$target"; then
+            echo "ERROR: Could not destroy subvolume/snapshot: Directory not empty" >&2
+            exit 1
+        fi
+        rm -rf "$target"
+        echo "Delete subvolume '$target'"
+        ;;
+    *)
+        echo "fake btrfs: unsupported: $*" >&2
+        exit 2
+        ;;
+esac

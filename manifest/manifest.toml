@@ -1,0 +1,93 @@
+# AIOS system manifest: the only way to change this system (spec §4).
+# Edit, review with `aios plan`, build a new generation with `aios apply`, reboot.
+#
+# This is the default shipped in aios-base (/usr/share/aios/defaults/manifest/).
+# The installer copies it to /persist/aios/config/ and replaces @HOSTNAME@,
+# @USERNAME@ and @TIMEZONE@, and @EXTRA_CMDLINE@ with a TOML string list body
+# (possibly empty). Until then this file is a template, not valid TOML.
+
+[system]
+hostname = "@HOSTNAME@"
+timezone = "@TIMEZONE@"
+locale   = "en_US.UTF-8"
+keymap   = "us"
+
+[kernel]
+default       = "linux-cachyos"
+fallback      = "linux-cachyos-lts"
+lockdown      = "integrity"            # "integrity" | "none" (spec §5.4)
+extra_cmdline = [@EXTRA_CMDLINE@]      # appended after the AIOS hardening cmdline
+
+[packages]
+# AIOS always adds its core set (aios-cli, aios-base, btrfs-progs, cryptsetup, ...)
+# and the kernels above.
+install = [
+  "base", "linux-firmware", "intel-ucode", "amd-ucode",
+  "networkmanager", "zsh", "git", "neovim", "flatpak",
+  "cachyos-keyring", "cachyos-mirrorlist", "cachyos-v3-mirrorlist",
+  "pacman-contrib",
+]
+
+[services]
+enable = [
+  "NetworkManager", "systemd-resolved", "systemd-timesyncd", "nftables",
+  "usbguard", "fwupd-refresh.timer", "apparmor",
+]
+disable = []
+mask    = []
+
+[files]
+# Only paths under /etc. mode defaults to "0644", owner/group to "root".
+"/etc/pacman.conf"                   = { source = "files/pacman.conf" }
+"/etc/mkinitcpio.conf"               = { source = "files/mkinitcpio.conf" }
+"/etc/nftables.conf"                 = { source = "files/nftables.conf", mode = "0600" }
+"/etc/usbguard/usbguard-daemon.conf" = { source = "files/usbguard-daemon.conf", mode = "0600" }
+# `aios apply` builds the initramfs and UKIs itself; pacman must never write /boot or the ESP.
+"/etc/pacman.d/hooks/90-mkinitcpio-install.hook" = { symlink = "/dev/null" }
+"/etc/pacman.d/hooks/60-mkinitcpio-remove.hook"  = { symlink = "/dev/null" }
+# `aios apply` signs the UKIs on the host; the candidate chroot has no sbctl keys.
+"/etc/pacman.d/hooks/zz-sbctl.hook"              = { symlink = "/dev/null" }
+# Route all lookups through systemd-resolved (DNS over TLS, 90-aios-dot.conf). The
+# `filesystem` package ships a plain /etc/resolv.conf, which NetworkManager would fill
+# with the DHCP servers instead.
+"/etc/resolv.conf" = { symlink = "/run/systemd/resolve/stub-resolv.conf" }
+
+[persist]
+# Everything else outside /persist, /home and /var/log is gone after a reboot.
+directories = [
+  "/var/lib/NetworkManager", "/etc/NetworkManager/system-connections",
+  "/var/lib/bluetooth", "/var/lib/flatpak", "/var/lib/systemd",
+  "/var/lib/sbctl", "/var/lib/fwupd", "/var/lib/usbguard",
+  "/var/lib/containers", "/var/cache/pacman/pkg",
+]
+files = []
+
+[users.@USERNAME@]
+uid    = 1000
+groups = ["wheel", "video", "audio", "input"]
+shell  = "/usr/bin/zsh"
+
+[users.@USERNAME@.home]
+# Read-only bind mounts into the home directory (spec §4.4). A trailing "/" marks a directory.
+# Together they close the shell startup, SSH, systemd user-unit and D-Bus activation
+# autostart vectors.
+".zshrc"                         = "home/@USERNAME@/zshrc"
+".zshenv"                        = "home/@USERNAME@/zshenv"
+".zprofile"                      = "home/@USERNAME@/zprofile"
+".zlogin"                        = "home/@USERNAME@/zlogin"
+".zlogout"                       = "home/@USERNAME@/zlogout"
+".profile"                       = "home/@USERNAME@/profile"
+".bashrc"                        = "home/@USERNAME@/bashrc"
+".bash_profile"                  = "home/@USERNAME@/bash_profile"
+".bash_logout"                   = "home/@USERNAME@/bash_logout"
+".ssh/authorized_keys"           = "home/@USERNAME@/authorized_keys"
+".ssh/authorized_keys2"          = "home/@USERNAME@/authorized_keys2"
+".ssh/rc"                        = "home/@USERNAME@/ssh-rc"
+".config/autostart/"             = "home/@USERNAME@/autostart/"
+".config/systemd/user/"          = "home/@USERNAME@/systemd-user/"
+".config/systemd/user.control/"  = "home/@USERNAME@/systemd-user-control/"
+".local/share/systemd/user/"     = "home/@USERNAME@/local-share-systemd-user/"
+".config/environment.d/"         = "home/@USERNAME@/environment.d/"
+".local/bin/"                    = "home/@USERNAME@/bin/"
+# D-Bus activation: the session bus starts a service file found here on first call.
+".local/share/dbus-1/services/"  = "home/@USERNAME@/local-share-dbus-services/"

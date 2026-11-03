@@ -1,0 +1,56 @@
+# aios-base: the AIOS configuration payload (spec §4.6). Configs live in /usr, so they
+# are package-owned and immutable. Built from this repository by `make repo`.
+
+pkgname=aios-base
+pkgver=0.1.0.r54.g99f3fda
+pkgrel=1
+pkgdesc="AIOS base payload: hardening config, initrd hook, boot health check, default manifest"
+arch=(any)
+license=(GPL-3.0-or-later)
+depends=(btrfs-progs systemd mkinitcpio)
+
+# make repo builds in a copy under build/pkgbuild/ and passes the repository in AIOS_SRC_ROOT;
+# run in place, packaging/<pkg> is two levels below it.
+_root="${AIOS_SRC_ROOT:-$(realpath "$startdir/../..")}"
+
+# The version tracks the repo, so every rebuild is an upgrade for pacman. The static
+# pkgver above is only the makepkg fallback.
+pkgver() {
+  printf '0.1.0.r%s.g%s' \
+    "$(git -C "$_root" rev-list --count HEAD)" \
+    "$(git -C "$_root" rev-parse --short HEAD)"
+}
+
+prepare() {
+  [[ -d $_root/aios-cli ]] || { error "run from packaging/<pkg> inside the AIOS repo"; return 1; }
+}
+
+package() {
+  local lib="$pkgdir/usr/lib"
+
+  install -Dm644 "$_root/base/sysctl.d/90-aios-hardening.conf" \
+    "$lib/sysctl.d/90-aios-hardening.conf"
+  install -Dm644 "$_root/base/cmdline-hardening" "$lib/aios/cmdline-hardening"
+  install -Dm755 "$_root/base/aios-health.sh" "$lib/aios/aios-health.sh"
+  install -Dm644 "$_root/base/aios-health.service" "$lib/systemd/system/aios-health.service"
+  install -Dm644 "$_root/base/NetworkManager/conf.d/90-aios-privacy.conf" \
+    "$lib/NetworkManager/conf.d/90-aios-privacy.conf"
+  install -Dm644 "$_root/base/resolved.conf.d/90-aios-dot.conf" \
+    "$lib/systemd/resolved.conf.d/90-aios-dot.conf"
+  install -Dm644 "$_root/base/zram-generator.conf" "$lib/systemd/zram-generator.conf"
+
+  # Initrd pieces. The units stay outside the host's unit path; the mkinitcpio hook
+  # copies them into the initrd's /usr/lib/systemd/system/.
+  install -Dm755 "$_root/initrd/aios-root.sh" "$lib/aios/initrd/aios-root.sh"
+  install -Dm644 "$_root/initrd/aios-root.service" "$lib/aios/initrd/aios-root.service"
+  install -Dm644 "$_root/initrd/sysroot-etc.mount" "$lib/aios/initrd/sysroot-etc.mount"
+  install -Dm644 "$_root/initrd/install/aios" "$lib/initcpio/install/aios"
+
+  # Default manifest repo, copied by the installer. The whole tree is copied
+  # recursively so dotfiles and the .keep files (which keep empty managed home
+  # directories) are preserved without hand-listing each file.
+  local defaults="$pkgdir/usr/share/aios/defaults"
+  install -dm755 "$defaults"
+  cp -a "$_root/manifest" "$defaults/manifest"
+  chmod -R u=rwX,go=rX "$defaults/manifest"
+}

@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Multi-call fake for the installer tests, linked under the name of the command it fakes.
+# Every call is appended to $CALLS as "<name> <args>". Then, if $FAKE_SYS/hook.<name>
+# exists, sh runs it with the same arguments (to change the fake machine mid-run).
+# Answers come from $FAKE_SYS:
+#   lsblk      -o COLUMNS ... DEV  prints $FAKE_SYS/blk/<DEV without /dev/>/<COLUMNS>, or
+#                                  <COLUMNS>.inverse with -s (exit 32 "not a block device"
+#                                  if that dir is missing)
+#   findmnt    ... ARG             prints $FAKE_SYS/mnt<ARG> (ARG is the last argument: a mount
+#                                  point for its SOURCE, or with -S a source for its TARGETs),
+#                                  else exit 1
+#   mountpoint -q -- PATH          exit 0 if PATH is a line of $FAKE_SYS/mounted, else 32
+#   gpg        ...                 prints $FAKE_SYS/gpg.out (a --with-colons listing)
+#   mkpasswd   ...                 reads the password from stdin, appends it to
+#                                  $FAKE_SYS/mkpasswd.stdin, prints a fixed yescrypt hash
+#                                  (or exits with $FAKE_SYS/mkpasswd.rc if that exists)
+#   sbctl      status --json       prints $FAKE_SYS/sbctl-status.json
+#   usbguard   generate-policy     prints $FAKE_SYS/usbguard-policy
+#   curl       ... URL             exit 22 (an HTTP error) if URL is a line of
+#                                  $FAKE_SYS/curl.fail, else like modprobe
+#   modprobe                       exit with $FAKE_SYS/<name>.rc (default 0)
+set -euo pipefail
+
+name=${0##*/}
+echo "$name $*" >>"$CALLS"
+if [ -f "$FAKE_SYS/hook.$name" ]; then
+    sh "$FAKE_SYS/hook.$name" "$@"
+fi
+
+case "$name" in
+    lsblk)
+        column=""
+        suffix=""
+        prev=""
+        for arg in "$@"; do
+            case "$prev" in -o | -*o) column=$arg ;; esac
+            case "$arg" in --*) ;; -*s*) suffix=.inverse ;; esac
+            prev=$arg
+        done
+        dev=${!#}
+        dir="$FAKE_SYS/blk/${dev#/dev/}"
+        if [ ! -d "$dir" ]; then
+            echo "lsblk: $dev: not a block device" >&2
+            exit 32
+        fi
+        cat "$dir/$column$suffix"
+        ;;
+    findmnt)
+        file="$FAKE_SYS/mnt${!#}"
+        [ -f "$file" ] || exit 1
+        cat "$file"
+        ;;
+    mountpoint)
+        [ -f "$FAKE_SYS/mounted" ] && grep -qxF -- "${!#}" "$FAKE_SYS/mounted" || exit 32
+        ;;
+    gpg)
+        [ -f "$FAKE_SYS/gpg.out" ] || exit 2
+        cat "$FAKE_SYS/gpg.out"
+        ;;
+    mkpasswd)
+        cat >>"$FAKE_SYS/mkpasswd.stdin"
+        [ ! -f "$FAKE_SYS/mkpasswd.rc" ] || exit "$(cat "$FAKE_SYS/mkpasswd.rc")"
+        echo "\$y\$j9T\$fakesalt\$fakehashfakehashfakehashfakehashfake0"
+        ;;
+    sbctl)
+        [ "$*" = "status --json" ] || { echo "fake sbctl: unsupported: $*" >&2; exit 2; }
+        cat "$FAKE_SYS/sbctl-status.json"
+        ;;
+    usbguard)
+        [ "$*" = generate-policy ] || { echo "fake usbguard: unsupported: $*" >&2; exit 2; }
+        cat "$FAKE_SYS/usbguard-policy"
+        ;;
+    curl | modprobe)
+        if [ "$name" = curl ] && [ -f "$FAKE_SYS/curl.fail" ] && grep -qxF -- "${!#}" "$FAKE_SYS/curl.fail"; then
+            exit 22
+        fi
+        exit "$(cat "$FAKE_SYS/$name.rc" 2>/dev/null || echo 0)"
+        ;;
+    *)
+        echo "fake installer tool: unknown name $name" >&2
+        exit 2
+        ;;
+esac

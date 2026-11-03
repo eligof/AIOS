@@ -1,0 +1,13 @@
+# ~/.zshrc: managed by AIOS, bind-mounted read-only. Change it in the manifest repo
+# (/persist/aios/config/home/<user>/zshrc), then `aios apply` and reboot.
+
+HISTFILE=~/.zsh_history
+HISTSIZE=10000
+SAVEHIST=10000
+setopt hist_ignore_all_dups hist_ignore_space share_history
+
+typeset -U path
+path=(~/.local/bin $path)
+export PATH
+
+PROMPT='%F{cyan}%n@%m%f %F{blue}%~%f %# '

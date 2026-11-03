@@ -1,0 +1,17 @@
+# Boot health check (spec §3 step 11). `aios apply` enables it in every generation.
+# boot-complete.target requires it, so systemd-bless-boot marks the boot entry good only
+# when the check passes. Otherwise the boot counter keeps running and systemd-boot falls
+# back after 3 tries.
+
+[Unit]
+Description=AIOS: generation health check
+After=local-fs.target
+Before=boot-complete.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/aios/aios-health.sh
+
+[Install]
+RequiredBy=boot-complete.target

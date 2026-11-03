@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/aios-manifest",
+    "crates/aios-gen",
+    "crates/aios-render",
+    "crates/aios-plan",
+    "crates/aios-exec",
+    "crates/aios",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tempfile = "3"
+clap = { version = "4", features = ["derive"] }
+rpassword = "7"
+rustix = { version = "0.38", features = ["fs", "process"] }
+serde_json = "1"
+sha2 = "0.10"
+walkdir = "2"

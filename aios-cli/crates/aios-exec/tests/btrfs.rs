@@ -1,6 +1,7 @@
 use aios_exec::btrfs;
 use aios_exec::{FakeRunner, Output};
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::path::Path;
 
 fn calls_with(fake: &FakeRunner, top: &Path) -> Vec<String> {
@@ -82,9 +83,9 @@ fn delete_recursive_skips_missing_paths() {
 fn a_non_subvolume_is_never_deleted() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("@etc-cand");
-    fs::write(&path, "not a subvolume").unwrap();
+    fs::create_dir(&path).unwrap();
     let mut fake = FakeRunner::new();
-    fake.respond(
+    fake.emulate_subvolumes().respond(
         &["btrfs", "subvolume", "show"],
         Output::failed(1, "ERROR: Not a Btrfs subvolume"),
     );
@@ -97,11 +98,81 @@ fn a_non_subvolume_is_never_deleted() {
 }
 
 #[test]
+fn only_a_directory_with_the_subvolume_root_inode_is_deleted() {
+    // Without emulation the fake applies the real check (inode 256), which no plain
+    // directory or file passes.
+    let dir = tempfile::tempdir().unwrap();
+    let fake = FakeRunner::new();
+    fs::create_dir(dir.path().join("@usr-cand")).unwrap();
+    fs::write(dir.path().join("@etc-cand"), "x").unwrap();
+    for name in ["@usr-cand", "@etc-cand"] {
+        let path = dir.path().join(name);
+        let err = btrfs::delete_recursive(&fake, &path).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("{} exists but is not a subvolume", path.display())
+        );
+        assert!(path.exists());
+    }
+    assert!(fake.calls().is_empty());
+}
+
+#[test]
+fn a_symlink_is_never_followed_or_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let top = dir.path();
+    fs::create_dir(top.join("@home")).unwrap();
+    fs::write(top.join("@home/user-file"), "precious").unwrap();
+    symlink("@home", top.join("@root-cand")).unwrap();
+    symlink("missing", top.join("@etc-cand")).unwrap();
+    let mut fake = FakeRunner::new();
+    fake.emulate_subvolumes();
+    for name in ["@root-cand", "@etc-cand"] {
+        let link = top.join(name);
+        let err = btrfs::delete_recursive(&fake, &link).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("{} is a symlink, not a subvolume", link.display())
+        );
+        assert!(fs::symlink_metadata(&link).unwrap().is_symlink());
+    }
+    assert!(fake.calls().is_empty());
+    assert_eq!(
+        fs::read_to_string(top.join("@home/user-file")).unwrap(),
+        "precious"
+    );
+}
+
+#[test]
+fn snapshot_and_create_refuse_an_existing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let top = dir.path();
+    fs::create_dir(top.join("@blank")).unwrap();
+    fs::create_dir(top.join("@usr-cand")).unwrap();
+    fs::write(top.join("@etc-cand"), "x").unwrap();
+    symlink("@blank", top.join("@root-cand")).unwrap();
+    symlink("missing", top.join("@dangling")).unwrap();
+    let mut fake = FakeRunner::new();
+    fake.emulate_subvolumes();
+    for name in ["@usr-cand", "@etc-cand", "@root-cand", "@dangling"] {
+        let dst = top.join(name);
+        let expected = format!("{} already exists", dst.display());
+        let err = btrfs::snapshot(&fake, &top.join("@blank"), &dst).unwrap_err();
+        assert_eq!(err.to_string(), expected);
+        let err = btrfs::create(&fake, &dst).unwrap_err();
+        assert_eq!(err.to_string(), expected);
+    }
+    assert!(fake.calls().is_empty());
+    assert_eq!(fs::read_dir(top.join("@usr-cand")).unwrap().count(), 0);
+}
+
+#[test]
 fn failures_propagate() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("@etc-cand")).unwrap();
     let mut fake = FakeRunner::new();
-    fake.fail_on(&["btrfs", "subvolume", "delete"]);
+    fake.emulate_subvolumes()
+        .fail_on(&["btrfs", "subvolume", "delete"]);
     let err = btrfs::delete_recursive(&fake, &dir.path().join("@etc-cand")).unwrap_err();
     assert!(
         err.to_string()

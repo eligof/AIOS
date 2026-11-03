@@ -60,10 +60,14 @@ generation_from_cmdline() {
 # nested inside it (systemd creates /var/lib/machines and /var/lib/portables as subvolumes
 # inside @root-live). btrfs walks the nesting itself; subvolume names are never parsed,
 # so a nested subvolume named "x @home" cannot make this delete @home. Anything at NAME
-# that is not a subvolume stops the boot rather than being guessed at.
+# that is not a subvolume stops the boot rather than being guessed at. That includes a
+# symlink, even a dangling one: btrfs resolves the path, so it would delete the target.
 # The body is a subshell so its variables stay local.
 delete_subvol() (
     target="$TOP/$1"
+    if [ -L "$target" ]; then
+        die "$1 is a symlink, not a subvolume"
+    fi
     [ -e "$target" ] || exit 0
     btrfs subvolume show "$target" >/dev/null || die "$1 exists but is not a subvolume"
     log "deleting $1"

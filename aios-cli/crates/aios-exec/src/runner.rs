@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::fs;
 use std::io::{ErrorKind, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -150,11 +151,25 @@ impl Output {
     }
 }
 
-/// Every system command aios runs goes through this trait.
+/// Inode number of every btrfs subvolume's root directory (`BTRFS_FIRST_FREE_OBJECTID`).
+/// A plain directory on btrfs never has it.
+pub const SUBVOLUME_ROOT_INO: u64 = 256;
+
+/// Every system command aios runs goes through this trait, and so do the few file system
+/// checks and effects that tests cannot get from a tempdir (a subvolume's inode number).
 pub trait CommandRunner {
     /// Run `cmd` to completion. `Err` only when it could not be started: a non-zero exit is
     /// an `Ok` carrying that status.
     fn run(&self, cmd: &Cmd) -> Result<Output, ExecError>;
+
+    /// `meta` (from `symlink_metadata`) is the root directory of a btrfs subvolume: a
+    /// directory with inode [`SUBVOLUME_ROOT_INO`]. Tests can't make that inode, so
+    /// [`FakeRunner::emulate_subvolumes`] counts every directory instead.
+    fn is_subvolume_root(&self, meta: &fs::Metadata) -> bool;
+}
+
+fn subvolume_root_inode(meta: &fs::Metadata) -> bool {
+    meta.is_dir() && meta.ino() == SUBVOLUME_ROOT_INO
 }
 
 /// Run `cmd` and turn a non-zero exit into an error naming the command and the last
@@ -279,6 +294,10 @@ impl CommandRunner for RealRunner {
             stderr: out.stderr,
         })
     }
+
+    fn is_subvolume_root(&self, meta: &fs::Metadata) -> bool {
+        subvolume_root_inode(meta)
+    }
 }
 
 /// Test double: records every command and answers from a script. Unscripted commands
@@ -341,9 +360,11 @@ impl FakeRunner {
         self.respond(prefix, Output::failed(1, "injected failure"))
     }
 
-    /// Treat plain directories as subvolumes: a successful `btrfs subvolume create DST` or
-    /// `snapshot SRC DST` creates the directory DST (empty), and `delete --recursive PATH`
-    /// removes PATH.
+    /// Treat plain directories as subvolumes: every directory counts as a subvolume root
+    /// ([`CommandRunner::is_subvolume_root`]), a successful `btrfs subvolume create DST` or
+    /// `snapshot SRC DST` creates the directory DST (empty; an existing DST is an error), and
+    /// `delete --recursive PATH` removes PATH. Like btrfs-progs, which resolves PATH with
+    /// realpath(3), the delete follows a symlink at PATH and removes its target.
     pub fn emulate_subvolumes(&mut self) -> &mut FakeRunner {
         self.emulate_subvolumes = true;
         self
@@ -405,10 +426,11 @@ impl FakeRunner {
     fn emulate(&self, argv: &[&str]) -> Result<(), ExecError> {
         match argv {
             ["btrfs", "subvolume", "create", dst] | ["btrfs", "subvolume", "snapshot", _, dst] => {
-                fs::create_dir_all(dst).map_err(|e| ExecError::io(Path::new(dst), e))
+                fs::create_dir(dst).map_err(|e| ExecError::io(Path::new(dst), e))
             }
             ["btrfs", "subvolume", "delete", "--recursive", path] if Path::new(path).exists() => {
-                fs::remove_dir_all(path).map_err(|e| ExecError::io(Path::new(path), e))
+                let real = fs::canonicalize(path).map_err(|e| ExecError::io(Path::new(path), e))?;
+                fs::remove_dir_all(&real).map_err(|e| ExecError::io(&real, e))
             }
             _ => Ok(()),
         }
@@ -477,5 +499,13 @@ impl CommandRunner for FakeRunner {
             self.emulate_top_mount(top, &argv)?;
         }
         Ok(output)
+    }
+
+    fn is_subvolume_root(&self, meta: &fs::Metadata) -> bool {
+        if self.emulate_subvolumes {
+            meta.is_dir()
+        } else {
+            subvolume_root_inode(meta)
+        }
     }
 }

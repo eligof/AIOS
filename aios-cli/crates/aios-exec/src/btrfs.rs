@@ -12,8 +12,9 @@ fn run(runner: &dyn CommandRunner, cmd: Cmd) -> Result<(), ExecError> {
     run_ok(runner, &cmd).map(drop)
 }
 
-/// `btrfs subvolume create PATH`
+/// `btrfs subvolume create PATH`. Refused if anything, even a dangling symlink, is at PATH.
 pub fn create(runner: &dyn CommandRunner, path: &Path) -> Result<(), ExecError> {
+    vacant(path)?;
     run(
         runner,
         Cmd::new("btrfs")
@@ -22,27 +23,49 @@ pub fn create(runner: &dyn CommandRunner, path: &Path) -> Result<(), ExecError> 
     )
 }
 
-/// `btrfs subvolume snapshot SRC DST` (writable, even from a read-only source).
+/// `btrfs subvolume snapshot SRC DST` (writable, even from a read-only source). Refused if
+/// anything is at DST: btrfs would put the snapshot inside an existing directory.
 pub fn snapshot(runner: &dyn CommandRunner, src: &Path, dst: &Path) -> Result<(), ExecError> {
+    vacant(dst)?;
     let cmd = Cmd::new("btrfs").args(["subvolume", "snapshot"]);
     run(runner, cmd.arg_path(src).arg_path(dst))
 }
 
+/// Nothing is at `path`, not even a dangling symlink (`lstat`).
+fn vacant(path: &Path) -> Result<(), ExecError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Err(ExecError(format!("{} already exists", path.display()))),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(ExecError::io(path, e)),
+    }
+}
+
 /// Delete the subvolume at `path` and every subvolume nested in it, if anything exists
 /// there. btrfs walks the nesting itself (`delete --recursive`), so subvolume names are never
-/// parsed, as in `aios-root.sh`. Anything at `path` that is not a subvolume is an error.
+/// parsed, as in `aios-root.sh`. Anything at `path` that is not a subvolume is an error:
+/// - a symlink, which btrfs-progs would resolve and so delete its target;
+/// - anything but a directory with the subvolume root inode
+///   ([`CommandRunner::is_subvolume_root`]);
+/// - anything `btrfs subvolume show` rejects.
 pub fn delete_recursive(runner: &dyn CommandRunner, path: &Path) -> Result<(), ExecError> {
-    match fs::symlink_metadata(path) {
-        Ok(_) => {}
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(ExecError::io(path, e)),
+    };
+    let not_a_subvolume = || ExecError(format!("{} exists but is not a subvolume", path.display()));
+    if meta.file_type().is_symlink() {
+        return Err(ExecError(format!(
+            "{} is a symlink, not a subvolume",
+            path.display()
+        )));
+    }
+    if !runner.is_subvolume_root(&meta) {
+        return Err(not_a_subvolume());
     }
     let show = Cmd::new("btrfs").args(["subvolume", "show"]).arg_path(path);
     if runner.run(&show)?.status != 0 {
-        return Err(ExecError(format!(
-            "{} exists but is not a subvolume",
-            path.display()
-        )));
+        return Err(not_a_subvolume());
     }
     let cmd = Cmd::new("btrfs").args(["subvolume", "delete", "--recursive"]);
     run(runner, cmd.arg_path(path))

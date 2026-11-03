@@ -166,6 +166,34 @@ call_index() {
     [ "$(tail -n 1 "$CALLS")" = "umount $AIOS_TOP" ]
 }
 
+@test "a symlink at a live name fails without following it" {
+    subvol @home
+    touch "$AIOS_TOP/@home/user-file"
+    ln -s @home "$AIOS_TOP/@root-live"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"aios: @root-live is a symlink, not a subvolume"* ]]
+    [ "$(grep -c ' delete ' "$CALLS")" -eq 0 ]
+    [ "$(grep -c ' snapshot ' "$CALLS")" -eq 0 ]
+    [ -f "$AIOS_TOP/@home/.subvol" ]
+    [ -f "$AIOS_TOP/@home/user-file" ]
+    [ -L "$AIOS_TOP/@root-live" ]
+    [ "$(tail -n 1 "$CALLS")" = "umount $AIOS_TOP" ]
+}
+
+@test "a dangling symlink at a candidate name fails too" {
+    ln -s /nonexistent "$AIOS_TOP/@etc-cand"
+
+    run "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"aios: @etc-cand is a symlink, not a subvolume"* ]]
+    [ "$(grep -c ' snapshot ' "$CALLS")" -eq 0 ]
+    [ -L "$AIOS_TOP/@etc-cand" ]
+}
+
 @test "missing @blank fails before deleting anything" {
     rm -r "$AIOS_TOP/@blank"
     subvol @root-live
@@ -316,4 +344,16 @@ umount -l $AIOS_TOP" ]
     run btrfs subvolume delete --recursive "$AIOS_TOP/@root-live"
     [ "$status" -eq 0 ]
     [ ! -e "$AIOS_TOP/@root-live" ]
+}
+
+@test "fake btrfs: like btrfs-progs, show and delete resolve a symlink" {
+    subvol @home
+    ln -s @home "$AIOS_TOP/link"
+
+    run btrfs subvolume show "$AIOS_TOP/link"
+    [ "$status" -eq 0 ]
+
+    run btrfs subvolume delete --recursive "$AIOS_TOP/link"
+    [ "$status" -eq 0 ]
+    [ ! -e "$AIOS_TOP/@home" ]
 }

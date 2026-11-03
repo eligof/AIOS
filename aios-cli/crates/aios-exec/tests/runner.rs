@@ -190,6 +190,51 @@ fn subvolume_emulation_uses_plain_directories() {
 }
 
 #[test]
+fn subvolume_emulation_fails_like_btrfs_on_an_existing_destination() {
+    let dir = tempfile::tempdir().unwrap();
+    let dst = dir.path().join("@usr-cand");
+    fs::create_dir(&dst).unwrap();
+    let mut fake = FakeRunner::new();
+    fake.emulate_subvolumes();
+    for args in [vec!["create"], vec!["snapshot", "/top/@blank"]] {
+        let cmd = Cmd::new("btrfs").arg("subvolume").args(args).arg_path(&dst);
+        let err = fake.run(&cmd).unwrap_err();
+        assert!(err.to_string().starts_with(&dst.display().to_string()));
+    }
+}
+
+#[test]
+fn subvolume_emulation_deletes_through_a_symlink_like_btrfs_progs() {
+    // btrfs-progs resolves the path with realpath(3), so a symlink at PATH deletes its
+    // target; the fake does the same, so a missing check in aios shows up as data loss.
+    let dir = tempfile::tempdir().unwrap();
+    let top = dir.path();
+    fs::create_dir(top.join("@home")).unwrap();
+    std::os::unix::fs::symlink("@home", top.join("@root-cand")).unwrap();
+    let mut fake = FakeRunner::new();
+    fake.emulate_subvolumes();
+    let delete = Cmd::new("btrfs")
+        .args(["subvolume", "delete", "--recursive"])
+        .arg_path(top.join("@root-cand"));
+    fake.run(&delete).unwrap();
+    assert!(!top.join("@home").exists());
+}
+
+#[test]
+fn subvolume_emulation_counts_directories_as_subvolume_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("file"), "x").unwrap();
+    let meta = |name: &str| fs::symlink_metadata(dir.path().join(name)).unwrap();
+    let real = FakeRunner::new();
+    assert!(!real.is_subvolume_root(&meta(".")), "real check: inode 256");
+    assert!(!RealRunner.is_subvolume_root(&meta(".")));
+    let mut fake = FakeRunner::new();
+    fake.emulate_subvolumes();
+    assert!(fake.is_subvolume_root(&meta(".")));
+    assert!(!fake.is_subvolume_root(&meta("file")));
+}
+
+#[test]
 fn top_mount_emulation_links_the_top_level_entries() {
     let dir = tempfile::tempdir().unwrap();
     let (top, ro) = (dir.path().join("top"), dir.path().join("ro.1"));

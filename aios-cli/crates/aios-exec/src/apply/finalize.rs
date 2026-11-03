@@ -51,11 +51,15 @@ impl Run<'_> {
     fn after_commit(&mut self, rest: &[PathBuf]) {
         let (runner, l, gen) = (self.ctx.runner, self.ctx.layout, self.gen);
         let mut warnings = Vec::new();
-        for tmp in rest {
+        // `rest` holds the copies of `ukis[1..]`, in order.
+        let mut missing = Vec::new();
+        for (tmp, name) in rest.iter().zip(&self.ukis[1..]) {
             if let Err(e) = rename(tmp, &tmp.with_extension("")) {
                 warnings.push(format!("{e}; gen-{gen} is installed without this UKI"));
+                missing.push(name.clone());
             }
         }
+        self.ukis.retain(|name| !missing.contains(name));
         match runner.sync_dir(&l.uki_dir()) {
             Err(e) => warnings.push(format!("{e}; the boot default is unchanged")),
             Ok(()) if matches!(self.ctx.mode, Mode::Apply { .. }) => {

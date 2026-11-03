@@ -461,6 +461,11 @@ fn a_fallback_uki_that_cannot_be_installed_is_a_warning() {
         "{:?}",
         outcome.warnings
     );
+    assert_eq!(
+        outcome.ukis,
+        ["aios-gen-0008-cachyos+3.efi"],
+        "what is on the ESP"
+    );
     assert!(fx.calls().contains(&"bootctl set-default ''".to_string()));
     assert!(esp(&fx).contains(&"aios-gen-0008-cachyos+3.efi".to_string()));
 }

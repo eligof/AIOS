@@ -9,6 +9,7 @@ dependencies = [
  "aios-exec",
  "aios-gen",
  "aios-manifest",
+ "aios-plan",
  "clap",
  "rpassword",
  "rustix 0.38.44",

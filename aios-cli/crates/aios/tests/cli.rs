@@ -1,12 +1,16 @@
 //! The `aios` binary end to end, with `AIOS_FAKE_RUNNER` and every path in a tempdir.
 //! Needs the `test-hooks` feature (the binary reads no `AIOS_*` variable without it).
 
+use aios_exec::{days_since_epoch, etcfs, read_hashes, DirProbe, FakeRunner, Layout, MachineFacts};
+use aios_gen::{GenId, GenerationMeta};
+use aios_plan::{desired_etc, Inputs};
 use rustix::fs::{flock, FlockOperation};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::time::SystemTime;
 use tempfile::TempDir;
 
 const LUKS_UUID: &str = "0b6c2e7f-5d0a-4c2e-9a71-3f1d2c4b5a69";
@@ -159,6 +163,85 @@ impl Machine {
     fn calls(&self) -> String {
         fs::read_to_string(self.path("fake.json.calls")).unwrap_or_default()
     }
+
+    /// Make `@etc-gen-0001` what the manifest renders for gen-1 and the running system's
+    /// packages and units match it, so `aios plan` shows no changes. `fail_on` as in
+    /// `script`.
+    fn sync(&self, fail_on: &str) {
+        let layout = Layout::under(self.dir.path());
+        let manifest = aios_manifest::parse(MANIFEST).unwrap();
+        let facts = MachineFacts {
+            hardening_cmdline: "quiet\n".to_string(),
+            luks_uuid: LUKS_UUID.to_string(),
+            esp_uuid: "7A1B-2C3D".to_string(),
+        };
+        let ctx = facts.render_ctx(GenId(1)).unwrap();
+        let hashes = read_hashes(&layout, &manifest).unwrap();
+        let inputs = Inputs {
+            manifest: &manifest,
+            repo_root: &layout.config,
+            ctx: &ctx,
+            hashes: &hashes,
+            today_days: days_since_epoch(SystemTime::now()),
+        };
+        let snapshot = layout.subvol("@etc-gen-0001");
+        let quiet = FakeRunner::new();
+        let probe = DirProbe::new(&snapshot, &quiet, None);
+        for (path, entry) in desired_etc(&inputs, &probe).unwrap() {
+            etcfs::write(&snapshot, &path, &entry).unwrap();
+        }
+        let respond = format!(
+            r#"[
+                {{"argv": ["findmnt"], "stdout": "7A1B-2C3D\n"}},
+                {{"argv": ["pacman", "-Qqe"], "stdout": "{}\n"}},
+                {{"argv": ["systemctl", "is-enabled"], "stdout": "enabled\n"}}
+            ]"#,
+            manifest.package_set().join("\\n")
+        );
+        self.script(&respond, fail_on);
+    }
+
+    /// Hold the lock the way another aios command would. Released on drop.
+    fn hold_lock(&self, operation: FlockOperation) -> fs::File {
+        let held = fs::File::create(self.path("aios.lock")).unwrap();
+        flock(&held, operation).unwrap();
+        held
+    }
+
+    /// The installer's view: a new top level at `target/` with the manifest repo (holding
+    /// `manifest.toml` and `custom.toml`) and secrets in `@persist`.
+    fn bootstrap_target(&self, custom: &str) -> PathBuf {
+        let config = "target/@persist/aios/config";
+        self.write(&format!("{config}/manifest.toml"), MANIFEST, 0o644);
+        self.write(&format!("{config}/custom.toml"), custom, 0o644);
+        self.write(
+            &format!("{config}/files/nftables.conf"),
+            "flush ruleset\n",
+            0o644,
+        );
+        self.write(&format!("{config}/home/eli/zshrc"), "# zshrc\n", 0o644);
+        let secrets = "target/@persist/aios/secrets";
+        self.write(
+            &format!("{secrets}/passwd/eli"),
+            "$y$j9T$salt$hash\n",
+            0o600,
+        );
+        fs::set_permissions(self.path(config), fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(self.path(secrets), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir_all(self.path("target-esp")).unwrap();
+        self.path(config)
+    }
+}
+
+/// The read-write mount every build starts with. Scripted to fail in the apply tests,
+/// which only check that the build starts: the build itself is aios-exec's.
+const WRITER_MOUNT: &str = r#"[["mount", "-t", "btrfs", "-o", "subvolid=5"]]"#;
+
+fn writer_mount(m: &Machine) -> String {
+    format!(
+        "mount -t btrfs -o subvolid=5 /dev/mapper/aios {}\n",
+        m.path("top").display()
+    )
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -310,4 +393,196 @@ fn passwd_writes_the_secret() {
         0o600
     );
     assert_eq!(m.calls(), "mkpasswd -m yescrypt -s\n");
+}
+
+#[test]
+fn apply_asks_first_and_anything_but_yes_aborts() {
+    let m = Machine::new();
+    let (out, _) = m.aios_with_stdin(&["apply"], "n\n");
+    assert_eq!(out.status.code(), Some(1));
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("  + /etc/hostname\n"),
+        "the plan comes first: {stdout}"
+    );
+    assert!(stdout.ends_with("Proceed? [y/N] "), "{stdout}");
+    assert_eq!(text(&out.stderr), "aios: aborted\n");
+    assert!(!m.calls().contains(&writer_mount(&m)), "nothing was built");
+}
+
+#[test]
+fn apply_builds_after_yes_or_with_dash_dash_yes() {
+    for (args, stdin) in [(&["apply"][..], "y\n"), (&["apply", "--yes"][..], "")] {
+        let m = Machine::new();
+        m.script(RESPOND, WRITER_MOUNT);
+        let (out, _) = m.aios_with_stdin(args, stdin);
+        let stdout = text(&out.stdout);
+        assert_eq!(
+            stdout.contains("Proceed?"),
+            stdin == "y\n",
+            "{args:?}: {stdout}"
+        );
+        assert!(
+            m.calls().contains(&writer_mount(&m)),
+            "{args:?}: {}",
+            m.calls()
+        );
+        assert!(
+            text(&out.stderr).contains("aios: step mount-top failed: "),
+            "{}",
+            text(&out.stderr)
+        );
+        assert_eq!(out.status.code(), Some(1));
+    }
+}
+
+#[test]
+fn apply_without_changes_exits_0_and_builds_nothing() {
+    let m = Machine::new();
+    m.sync("[]");
+    let (out, _) = m.aios_with_stdin(&["apply"], "");
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));
+    assert_eq!(text(&out.stdout), "no changes\n");
+    assert!(!m.calls().contains(&writer_mount(&m)), "{}", m.calls());
+}
+
+#[test]
+fn apply_upgrade_builds_even_without_changes() {
+    let m = Machine::new();
+    m.sync(WRITER_MOUNT);
+    let (out, _) = m.aios_with_stdin(&["apply", "--upgrade", "--yes"], "");
+    assert_eq!(
+        text(&out.stdout),
+        "no changes\nupgrading: no manifest changes\n"
+    );
+    assert!(m.calls().contains(&writer_mount(&m)), "{}", m.calls());
+    assert!(text(&out.stderr).contains("aios: step mount-top failed: "));
+}
+
+#[test]
+fn gen_list_prints_one_row_per_generation() {
+    let m = Machine::new();
+    let meta = GenerationMeta {
+        id: 1,
+        parent: 0,
+        created: "2026-11-01T10:00:00Z".to_string(),
+        manifest_commit: "3f9c2a1".to_string(),
+        kernels: vec!["linux-cachyos 7.3.0-4".to_string()],
+        package_set_sha256: "ab".repeat(32),
+    };
+    m.write(
+        "top/@etc-gen-0001/aios/generation.toml",
+        &meta.to_toml(),
+        0o644,
+    );
+    m.write("esp/EFI/Linux/aios-gen-0001-cachyos.efi", "uki", 0o644);
+    let out = m.aios(&["gen", "list"]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stdout),
+        "\
+GEN   CREATED               COMMIT   STATE           KERNELS
+0001  2026-11-01T10:00:00Z  3f9c2a1  booted,default  linux-cachyos 7.3.0-4
+"
+    );
+}
+
+#[test]
+fn shared_readers_run_side_by_side() {
+    let m = Machine::new();
+    let _reader = m.hold_lock(FlockOperation::NonBlockingLockShared);
+    for args in [&["gen", "list"][..], &["status"][..], &["plan"][..]] {
+        let out = m.aios(args);
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn a_shared_holder_blocks_a_writer() {
+    let m = Machine::new();
+    let _reader = m.hold_lock(FlockOperation::NonBlockingLockShared);
+    for args in [&["rollback", "7"][..], &["gc"][..], &["apply", "--yes"][..]] {
+        let out = m.aios(args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        assert_eq!(
+            text(&out.stderr),
+            "aios: another aios operation is running\n"
+        );
+    }
+    assert_eq!(m.calls(), "");
+}
+
+#[test]
+fn without_the_fake_runner_aios_needs_root() {
+    if rustix::process::geteuid().is_root() {
+        return; // the check passes as root, and a real command must not run here
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_aios"))
+        .arg("status")
+        .env_clear()
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        "aios: must run as root (try: run0 aios <cmd>)\n"
+    );
+}
+
+#[test]
+fn bootstrap_loads_the_manifest_it_is_given() {
+    let m = Machine::new();
+    let invalid = MANIFEST.replace("Asia/Jerusalem", "Mars/Olympus");
+    let config = m.bootstrap_target(&invalid);
+    let custom = config.join("custom.toml");
+    let (target, esp) = (m.path("target"), m.path("target-esp"));
+    let out = m.aios(&[
+        "bootstrap",
+        "--target",
+        &target.display().to_string(),
+        "--esp",
+        &esp.display().to_string(),
+        "--manifest",
+        &custom.display().to_string(),
+        "--luks-uuid",
+        LUKS_UUID,
+    ]);
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", text(&out.stderr));
+    assert_eq!(
+        text(&out.stderr),
+        "manifest.toml:3:1: unknown timezone \"Mars/Olympus\"\n"
+    );
+}
+
+#[test]
+fn bootstrap_needs_the_manifest_s_directory() {
+    let m = Machine::new();
+    m.bootstrap_target(MANIFEST);
+    let (target, esp) = (m.path("target"), m.path("target-esp"));
+    for manifest in ["manifest.toml", "/"] {
+        let out = m.aios(&[
+            "bootstrap",
+            "--target",
+            &target.display().to_string(),
+            "--esp",
+            &esp.display().to_string(),
+            "--manifest",
+            manifest,
+            "--luks-uuid",
+            LUKS_UUID,
+        ]);
+        assert_eq!(out.status.code(), Some(1), "{manifest}");
+        assert_eq!(
+            text(&out.stderr),
+            "aios: --manifest must be a path to a file in the manifest repo, such as \
+             <target>/@persist/aios/config/manifest.toml\n",
+            "{manifest}"
+        );
+    }
+    assert!(!Path::new("manifest.toml").exists());
 }

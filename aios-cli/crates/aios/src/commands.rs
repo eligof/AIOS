@@ -12,7 +12,7 @@ pub fn run(command: Command) -> Result<(), Failure> {
     cx.require_root()?;
     match command {
         Command::Plan => plan(&cx),
-        Command::Apply { yes } => apply_cmd(&cx, yes),
+        Command::Apply { yes, upgrade } => apply_cmd(&cx, yes, upgrade),
         Command::Status => status(&cx),
         Command::Gen {
             command: GenCommand::List,
@@ -58,7 +58,9 @@ fn plan(cx: &Context) -> Result<(), Failure> {
     Ok(())
 }
 
-fn apply_cmd(cx: &Context, yes: bool) -> Result<(), Failure> {
+/// Show the plan, confirm and build. "no changes" ends here unless `upgrade`: then the
+/// same manifest is built again, which upgrades every package (`pacman -Syu`).
+fn apply_cmd(cx: &Context, yes: bool, upgrade: bool) -> Result<(), Failure> {
     let _lock = cx.lock(true)?;
     let manifest = cx.load_manifest()?;
     let facts = cx.facts(None)?;
@@ -72,7 +74,10 @@ fn apply_cmd(cx: &Context, yes: bool) -> Result<(), Failure> {
     )?;
     print!("{plan}");
     if plan.is_empty() {
-        return Ok(());
+        if !upgrade {
+            return Ok(());
+        }
+        println!("upgrading: no manifest changes");
     }
     if !yes && !confirm()? {
         return Err(Failure::op("aios: aborted"));
@@ -163,7 +168,8 @@ fn read_password(cx: &Context, user: &str) -> Result<String, Failure> {
     Ok(first)
 }
 
-/// Installer only: everything lives below the target's subvolumes.
+/// Installer only: everything lives below the target's subvolumes. `manifest` is loaded
+/// as given; its directory is the manifest repo.
 fn bootstrap(
     mut cx: Context,
     target: &Path,
@@ -173,7 +179,13 @@ fn bootstrap(
 ) -> Result<(), Failure> {
     let config = manifest
         .parent()
-        .ok_or_else(|| Failure::op("aios: --manifest must name a file inside the repo"))?;
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .ok_or_else(|| {
+            Failure::op(
+                "aios: --manifest must be a path to a file in the manifest repo, such as \
+                 <target>/@persist/aios/config/manifest.toml",
+            )
+        })?;
     let l = &mut cx.layout;
     l.top = target.to_path_buf();
     l.esp = esp;
@@ -183,7 +195,7 @@ fn bootstrap(
     l.home = target.join("@home");
     l.log = target.join("@log");
     let _lock = cx.lock(true)?;
-    let manifest = cx.load_manifest()?;
+    let manifest = cx.load_manifest_at(manifest)?;
     let facts = cx.facts(Some(luks_uuid))?;
     let outcome = apply(&ApplyCtx {
         runner: cx.runner(),

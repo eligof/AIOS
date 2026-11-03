@@ -8,7 +8,7 @@ use aios_gen::{gen_from_cmdline, GenId};
 use aios_manifest::{load, Manifest, ValidationEnv};
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The test override named `name` (an `AIOS_*` environment variable). Only builds with the
 /// `test-hooks` feature, which the CLI tests require, read it: a release build has no
@@ -114,6 +114,11 @@ impl Context {
     /// Check the manifest repo and secrets ownership, then load and validate
     /// `<config>/manifest.toml`. Problems with the manifest exit 2.
     pub fn load_manifest(&self) -> Result<Manifest, Failure> {
+        self.load_manifest_at(&self.layout.manifest_path())
+    }
+
+    /// Like `load_manifest`, for the manifest file `path` in the repo `layout.config`.
+    pub fn load_manifest_at(&self, path: &Path) -> Result<Manifest, Failure> {
         check_trusted_dirs(&self.layout, self.trusted_uid()).map_err(|e| {
             Failure::from(StepError {
                 step: Step::Validate,
@@ -125,7 +130,7 @@ impl Context {
             secrets_dir: self.layout.secrets.clone(),
             zoneinfo_dir: self.zoneinfo.clone(),
         };
-        load(&self.layout.manifest_path(), &env).map_err(Failure::manifest)
+        load(path, &env).map_err(Failure::manifest)
     }
 
     /// The generation the running kernel booted (`aios.gen=`).

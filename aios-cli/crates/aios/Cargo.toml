@@ -29,5 +29,6 @@ rpassword.workspace = true
 rustix.workspace = true
 
 [dev-dependencies]
+aios-plan = { path = "../aios-plan" }
 rustix.workspace = true
 tempfile.workspace = true

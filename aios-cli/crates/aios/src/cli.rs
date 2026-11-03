@@ -21,6 +21,10 @@ pub enum Command {
         /// Do not ask for confirmation
         #[arg(long)]
         yes: bool,
+        /// Build a new generation even if the manifest has no changes: a full
+        /// `pacman -Syu` with the same manifest
+        #[arg(long)]
+        upgrade: bool,
     },
     /// Show the booted, default and bad generations and runtime changes to /etc
     Status,
@@ -64,7 +68,8 @@ pub enum Command {
         /// Mount point of the new ESP
         #[arg(long)]
         esp: PathBuf,
-        /// The manifest.toml inside <target>/@persist/aios/config
+        /// The manifest file, normally <target>/@persist/aios/config/manifest.toml; its
+        /// directory is the manifest repo
         #[arg(long)]
         manifest: PathBuf,
         /// UUID of the LUKS2 partition (`cryptsetup luksUUID <partition>`)

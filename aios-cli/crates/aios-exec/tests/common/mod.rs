@@ -236,7 +236,8 @@ impl Fixture {
                 &["arch-chroot", &cand, "pacman", "-Qq"],
                 Output::ok(ALL_PACKAGES),
             )
-            .respond(&["df"], Output::ok("     Avail\n2000000000\n"));
+            .respond(&["df"], Output::ok("     Avail\n2000000000\n"))
+            .respond(&["mountpoint"], Output::failed(32, ""));
         Fixture {
             trusted_uid: fs::metadata(dir.path()).unwrap().uid(),
             facts: facts(),

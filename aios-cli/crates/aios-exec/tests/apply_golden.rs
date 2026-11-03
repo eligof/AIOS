@@ -3,12 +3,15 @@ mod common;
 use aios_exec::{Output, Step};
 use common::{mkdir, write, Fixture, CLEANUP_MOUNTED, MANIFEST};
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 
 const APPLY: &str = "
 mount -t btrfs -o subvolid=5 /dev/mapper/aios {top}
+mount --make-rprivate {top}
 git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
 git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
+mountpoint -q {cand}
 btrfs subvolume snapshot {top}/@usr-gen-0007 {top}/@usr-cand
 btrfs subvolume snapshot {top}/@etc-gen-0007 {top}/@etc-cand
 btrfs subvolume snapshot {top}/@blank {top}/@root-cand
@@ -50,8 +53,10 @@ umount {top}
 ";
 
 const BOOTSTRAP: &str = "
+mount --make-rprivate {top}
 git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
 git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
+mountpoint -q {cand}
 btrfs subvolume create {top}/@usr-cand
 btrfs subvolume create {top}/@etc-cand
 btrfs subvolume snapshot {top}/@blank {top}/@root-cand
@@ -210,9 +215,12 @@ fn the_new_generation_lands_on_disk_and_on_the_esp() {
 }
 
 #[test]
-fn bootstrap_on_a_target_with_generations_is_refused() {
+fn bootstrap_on_a_target_with_generations_is_refused_and_left_alone() {
+    // Someone's installed system, maybe in the middle of its own apply.
     let fx = Fixture::fresh();
-    mkdir(&fx.layout.subvol("@usr-gen-0001"));
+    for name in ["@usr-gen-0001", "@usr-cand", "@etc-cand", "@root-cand"] {
+        mkdir(&fx.layout.subvol(name));
+    }
     let err = fx.run().unwrap_err();
     assert_eq!(err.step, Step::MountTop);
     assert_eq!(
@@ -220,6 +228,9 @@ fn bootstrap_on_a_target_with_generations_is_refused() {
         format!("{} already holds generations", fx.layout.top.display())
     );
     assert!(fx.calls().is_empty());
+    for name in ["@usr-cand", "@etc-cand", "@root-cand"] {
+        assert!(fx.layout.subvol(name).is_dir(), "{name} deleted");
+    }
 }
 
 #[test]
@@ -311,6 +322,36 @@ fn a_failed_signature_cleans_up_and_leaves_the_esp_alone() {
         esp(&fx),
         ["aios-gen-0006-cachyos.efi", "aios-gen-0007-cachyos.efi"]
     );
+}
+
+fn panic_now(_: &[&str]) {
+    panic!("injected panic");
+}
+
+#[test]
+fn a_panicking_step_still_cleans_up() {
+    let mut fx = Fixture::booted();
+    fx.runner.on_success(&["sbctl"], panic_now);
+    let caught = catch_unwind(AssertUnwindSafe(|| fx.run()));
+    assert!(caught.is_err());
+    assert_eq!(fx.calls_after("sbctl"), fx.expand(CLEANUP_MOUNTED));
+    fx.assert_no_candidates();
+}
+
+#[test]
+fn a_candidate_tree_that_will_not_unmount_keeps_its_subvolumes() {
+    let mut fx = Fixture::booted();
+    fx.runner.fail_on(&["sbctl"]).fail_on(&["umount", "-R"]);
+    let err = fx.run().unwrap_err();
+    assert_eq!(err.step, Step::Sign);
+    assert_eq!(
+        fx.calls_after("sbctl"),
+        fx.expand("umount -R {cand}\numount {top}"),
+        "no subvolume is deleted while it is mounted"
+    );
+    for name in ["@usr-cand", "@etc-cand", "@root-cand"] {
+        assert!(fx.layout.subvol(name).is_dir(), "{name}");
+    }
 }
 
 #[test]

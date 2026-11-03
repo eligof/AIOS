@@ -1,6 +1,6 @@
 //! `aios apply` and `aios bootstrap`: build the next generation in candidate subvolumes
-//! (spec §4.3). The booted generation is never modified; any failure deletes the
-//! candidates again.
+//! (spec §4.3). The booted generation is never modified; any failure (or panic) deletes
+//! the candidates again.
 
 mod etc;
 mod finalize;
@@ -54,8 +54,9 @@ pub struct ApplyOutcome {
     pub ukis: Vec<String>,
 }
 
-/// Build the next generation. On error, the candidate tree is unmounted, every candidate
-/// subvolume is deleted and the top level is unmounted (best effort, logged to stderr).
+/// Build the next generation. On error or panic, the candidate tree is unmounted, every
+/// candidate subvolume is deleted and the top level is unmounted (best effort, logged to
+/// stderr; see `Run::cleanup`).
 pub fn apply(ctx: &ApplyCtx) -> Result<ApplyOutcome, StepError> {
     let mut run = Run {
         ctx,
@@ -63,23 +64,23 @@ pub fn apply(ctx: &ApplyCtx) -> Result<ApplyOutcome, StepError> {
         manifest_commit: String::new(),
         top_mounted: false,
         cand_mounted: false,
+        candidates: false,
         ukis: Vec::new(),
         esp_tmp: Vec::new(),
+        done: false,
     };
-    match run.steps() {
-        Ok(()) => Ok(ApplyOutcome {
-            gen: run.gen,
-            manifest_commit: run.manifest_commit,
-            ukis: run.ukis.iter().map(UkiName::file_name).collect(),
-        }),
-        Err(e) => {
-            run.cleanup();
-            Err(e)
-        }
-    }
+    // A failed step returns here and drops `run`, which cleans up; so does a panic.
+    run.steps()?;
+    run.done = true;
+    Ok(ApplyOutcome {
+        gen: run.gen,
+        manifest_commit: std::mem::take(&mut run.manifest_commit),
+        ukis: run.ukis.iter().map(UkiName::file_name).collect(),
+    })
 }
 
-/// State of one apply, shared by the step implementations in the submodules.
+/// State of one apply, shared by the step implementations in the submodules. Dropping it
+/// before it is `done` runs the cleanup.
 struct Run<'a> {
     ctx: &'a ApplyCtx<'a>,
     /// The generation being built. Set by `mount-top`.
@@ -89,10 +90,23 @@ struct Run<'a> {
     top_mounted: bool,
     /// Something is mounted at `layout.cand`.
     cand_mounted: bool,
+    /// The candidate subvolumes are this run's to delete. Set by `prepare-candidate`, so a
+    /// target that bootstrap refuses (it holds a system, maybe mid-apply) is never touched.
+    candidates: bool,
     /// UKIs built in the candidate.
     ukis: Vec<UkiName>,
     /// UKI copies on the ESP not yet renamed into place.
     esp_tmp: Vec<PathBuf>,
+    /// Every step succeeded: nothing to clean up.
+    done: bool,
+}
+
+impl Drop for Run<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            self.cleanup();
+        }
+    }
 }
 
 impl Run<'_> {
@@ -136,7 +150,9 @@ impl Run<'_> {
         run_ok(self.ctx.runner, &cmd)
     }
 
-    /// Undo everything that is not finalized. Errors are logged, not returned.
+    /// Undo everything that is not finalized. Errors are logged, not returned. While the
+    /// candidate tree is still mounted (its unmount failed), its subvolumes are kept:
+    /// `aios-root.service` deletes them at the next boot.
     fn cleanup(&mut self) {
         eprintln!("aios: {}", Step::Cleanup);
         let (runner, l) = (self.ctx.runner, self.ctx.layout);
@@ -146,13 +162,21 @@ impl Run<'_> {
             }
         };
         if self.cand_mounted {
-            report(
-                "unmount candidate",
-                btrfs::umount_recursive(runner, &l.cand),
-            );
+            match btrfs::umount_recursive(runner, &l.cand) {
+                Ok(()) => self.cand_mounted = false,
+                Err(e) => report("unmount candidate", Err(e)),
+            }
         }
-        for name in CANDIDATES {
-            report(name, btrfs::delete_recursive(runner, &l.subvol(name)));
+        if self.candidates && self.cand_mounted {
+            eprintln!(
+                "aios: cleanup: {} is still mounted, so the candidate subvolumes stay; the \
+                 next boot deletes them",
+                l.cand.display()
+            );
+        } else if self.candidates {
+            for name in CANDIDATES {
+                report(name, btrfs::delete_recursive(runner, &l.subvol(name)));
+            }
         }
         for tmp in &self.esp_tmp {
             match fs::remove_file(tmp) {

@@ -16,6 +16,9 @@ const GIT_SAFETY: [&str; 6] = [
 impl Run<'_> {
     /// Mount the top level (apply only; bootstrap gets it mounted) and pick the generation
     /// id: max of every `@usr-gen-*`/`@etc-gen-*` + 1, or gen-1 on an empty bootstrap target.
+    /// Then make the top level private (`mount --make-rprivate`), since the candidate tree
+    /// is bound from it. A bootstrap target that already holds generations is refused
+    /// before anything is run on it.
     pub(super) fn mount_top(&mut self) -> Result<(), ExecError> {
         let l = self.ctx.layout;
         if let Mode::Apply { .. } = self.ctx.mode {
@@ -38,7 +41,7 @@ impl Run<'_> {
             Mode::Apply { .. } => next_id(&ids)
                 .ok_or_else(|| ExecError::new("no generation ids left (gen-9999 exists)"))?,
         };
-        Ok(())
+        btrfs::make_rprivate(self.ctx.runner, &l.top)
     }
 
     /// The manifest repo and secrets are trusted (`check_trusted_dirs`) and the machine
@@ -77,10 +80,18 @@ impl Run<'_> {
         Ok(())
     }
 
-    /// Delete stale candidates, then create fresh ones: snapshots of the booted generation
-    /// (apply) or empty subvolumes (bootstrap), plus `@blank` -> `@root-cand`.
+    /// Unmount a candidate tree left mounted by a run that crashed earlier in this boot,
+    /// delete stale candidates, then create fresh ones: snapshots of the booted generation
+    /// (apply) or empty subvolumes (bootstrap), plus `@blank` -> `@root-cand`. From here on
+    /// a failure deletes the candidates.
     pub(super) fn prepare_candidate(&mut self) -> Result<(), ExecError> {
         let (runner, l) = (self.ctx.runner, self.ctx.layout);
+        self.candidates = true;
+        if btrfs::is_mountpoint(runner, &l.cand)? {
+            self.cand_mounted = true;
+            btrfs::umount_recursive(runner, &l.cand)?;
+            self.cand_mounted = false;
+        }
         for name in CANDIDATES {
             btrfs::delete_recursive(runner, &l.subvol(name))?;
         }

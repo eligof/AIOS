@@ -11,10 +11,11 @@ fn mounts_the_top_level_and_records_head_of_a_clean_repo() {
     let outcome = fx.run().unwrap();
     assert_eq!(outcome.manifest_commit, "3f9c2a1");
     assert_eq!(
-        fx.calls()[..3],
+        fx.calls()[..4],
         fx.expand(
             "
             mount -t btrfs -o subvolid=5 /dev/mapper/aios {top}
+            mount --make-rprivate {top}
             git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
             git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
             "
@@ -32,7 +33,7 @@ fn a_dirty_repo_is_committed_for_the_new_generation() {
     );
     fx.run().unwrap();
     assert_eq!(
-        fx.calls()[1..5],
+        fx.calls()[2..6],
         fx.expand(
             "
             git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
@@ -66,7 +67,7 @@ fn snapshots_the_booted_generation_and_blank() {
     let fx = Fixture::booted();
     fx.run().unwrap();
     assert_eq!(
-        fx.calls()[3..6],
+        fx.calls()[5..8],
         fx.expand(
             "
             btrfs subvolume snapshot {top}/@usr-gen-0007 {top}/@usr-cand
@@ -84,9 +85,10 @@ fn stale_candidates_are_deleted_first() {
     mkdir(&fx.layout.subvol("@root-cand"));
     fx.run().unwrap();
     assert_eq!(
-        fx.calls()[3..8],
+        fx.calls()[4..10],
         fx.expand(
             "
+            mountpoint -q {cand}
             btrfs subvolume show {top}/@usr-cand
             btrfs subvolume delete --recursive {top}/@usr-cand
             btrfs subvolume show {top}/@root-cand
@@ -102,7 +104,7 @@ fn assembles_the_candidate_root() {
     let fx = Fixture::booted();
     fx.run().unwrap();
     assert_eq!(
-        fx.calls()[6..12],
+        fx.calls()[8..14],
         fx.expand(
             "
             mount --bind {top}/@root-cand {cand}
@@ -138,13 +140,86 @@ fn a_failed_mount_needs_no_cleanup() {
 }
 
 #[test]
+fn a_failed_make_rprivate_unmounts_the_top_level() {
+    let mut fx = Fixture::booted();
+    fx.runner.fail_on(&["mount", "--make-rprivate"]);
+    let err = fx.run().unwrap_err();
+    assert_eq!(err.step, Step::MountTop);
+    assert_eq!(
+        fx.calls_after("mount --make-rprivate"),
+        fx.expand("umount {top}")
+    );
+}
+
+#[test]
+fn a_candidate_root_left_mounted_is_unmounted_before_anything_is_deleted() {
+    let mut fx = Fixture::booted();
+    mkdir(&fx.layout.subvol("@root-cand"));
+    fx.runner.respond(&["mountpoint"], Output::ok(""));
+    fx.run().unwrap();
+    assert_eq!(
+        fx.calls_after("git")[1..5],
+        fx.expand(
+            "
+            mountpoint -q {cand}
+            umount -R {cand}
+            btrfs subvolume show {top}/@root-cand
+            btrfs subvolume delete --recursive {top}/@root-cand
+            "
+        )
+    );
+}
+
+#[test]
+fn a_candidate_root_that_stays_mounted_keeps_the_stale_candidates() {
+    let mut fx = Fixture::booted();
+    mkdir(&fx.layout.subvol("@root-cand"));
+    fx.runner
+        .respond(&["mountpoint"], Output::ok(""))
+        .fail_on(&["umount", "-R"]);
+    let err = fx.run().unwrap_err();
+    assert_eq!(err.step, Step::PrepareCandidate);
+    assert_eq!(
+        fx.calls_after("mountpoint"),
+        fx.expand("umount -R {cand}\numount -R {cand}\numount {top}")
+    );
+    assert!(fx.layout.subvol("@root-cand").is_dir());
+}
+
+#[test]
+fn a_mountpoint_check_that_cannot_tell_fails() {
+    let mut fx = Fixture::booted();
+    fx.runner
+        .respond(&["mountpoint"], Output::failed(1, "permission denied"));
+    let err = fx.run().unwrap_err();
+    assert_eq!(err.step, Step::PrepareCandidate);
+    assert_eq!(
+        err.detail,
+        format!(
+            "`mountpoint -q {}` exited with status 1: permission denied",
+            fx.layout.cand.display()
+        )
+    );
+}
+
+#[test]
+fn no_candidate_root_directory_means_nothing_is_mounted_there() {
+    let fx = Fixture::fresh();
+    fs::remove_dir_all(&fx.layout.cand).unwrap();
+    // The build stops later on (the candidate tree holds nothing), but no mountpoint
+    // check ran: with no directory, nothing can be mounted there.
+    let _ = fx.run();
+    assert!(!fx.calls().iter().any(|c| c.starts_with("mountpoint")));
+}
+
+#[test]
 fn invalid_machine_facts_fail_validation() {
     let mut fx = Fixture::booted();
     fx.facts.luks_uuid = "not-a-uuid".to_string();
     let err = fx.run().unwrap_err();
     assert_eq!(err.step, Step::Validate);
     assert_eq!(err.detail, "invalid LUKS UUID \"not-a-uuid\"");
-    assert_eq!(fx.calls()[1..], fx.expand("umount {top}"));
+    assert_eq!(fx.calls()[2..], fx.expand("umount {top}"));
 }
 
 #[test]
@@ -161,7 +236,7 @@ fn a_group_writable_manifest_repo_fails_validation() {
             fx.layout.config.display()
         )
     );
-    assert_eq!(fx.calls()[1..], fx.expand("umount {top}"));
+    assert_eq!(fx.calls()[2..], fx.expand("umount {top}"));
 }
 
 #[test]

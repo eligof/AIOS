@@ -3,7 +3,7 @@
 //! Whether something exists at a subvolume path is checked on the file system, so tests
 //! model subvolumes as plain directories (see `FakeRunner::emulate_subvolumes`).
 
-use crate::{run_ok, Cmd, CommandRunner, ExecError};
+use crate::{run_ok, status_error, Cmd, CommandRunner, ExecError};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
@@ -106,6 +106,34 @@ pub fn filesystem_sync(runner: &dyn CommandRunner, path: &Path) -> Result<(), Ex
             .args(["filesystem", "sync"])
             .arg_path(path),
     )
+}
+
+/// `mount --make-rprivate PATH`: no mount or unmount at or below PATH propagates to or
+/// from any other mount. A bind of a shared mount joins its peer group, so without this
+/// every mount made in the candidate tree could also appear below the top level.
+pub fn make_rprivate(runner: &dyn CommandRunner, path: &Path) -> Result<(), ExecError> {
+    run(
+        runner,
+        Cmd::new("mount").arg("--make-rprivate").arg_path(path),
+    )
+}
+
+/// Something is mounted at `path`: `mountpoint -q PATH` exits 0 (32: nothing is). Nothing
+/// at `path` means nothing is mounted there, and no command runs. Any other exit (1:
+/// permission or system error) is an error rather than a guess.
+pub fn is_mountpoint(runner: &dyn CommandRunner, path: &Path) -> Result<bool, ExecError> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(ExecError::io(path, e)),
+    }
+    let cmd = Cmd::new("mountpoint").arg("-q").arg_path(path);
+    let out = runner.run(&cmd)?;
+    match (out.status, out.signal) {
+        (0, None) => Ok(true),
+        (32, None) => Ok(false),
+        _ => Err(status_error(&cmd, &out)),
+    }
 }
 
 /// `mount --bind SRC DST`

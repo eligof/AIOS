@@ -9,7 +9,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
         "--keep-vm",
         action="store_true",
-        help="leave build/e2e (disk, firmware variables, transcript) for inspection",
+        help="keep the VM disk and TPM state in build/e2e after a passing run too"
+        " (a failed run always keeps them; the firmware variables and transcript stay anyway)",
     )
 
 

@@ -91,14 +91,23 @@ class Machine:
         return self.shell.check(f"runuser -u {USER} -- sh -c '{cmd}'")
 
 
+def should_delete_vm(keep_vm: bool, failures: int) -> bool:
+    """Whether teardown deletes the VM disk and TPM state: only after a passing run without
+    --keep-vm. A failed run keeps them to inspect (or boot) what went wrong."""
+    return not keep_vm and failures == 0
+
+
 @pytest.fixture(scope="module")
 def machine(request: pytest.FixtureRequest):
     vm = Vm(CONFIG)
-    vm.prepare(E2E_INSTALL)
-    serial = vm.start()
-    yield Machine(vm, serial)
-    vm.stop()
-    if not request.config.getoption("--keep-vm"):
+    try:
+        vm.prepare(E2E_INSTALL)
+        serial = vm.start()
+        yield Machine(vm, serial)
+    finally:
+        vm.stop()
+    # testsfailed counts setup, call and teardown failures, not the xfails that follow one.
+    if should_delete_vm(request.config.getoption("--keep-vm"), request.session.testsfailed):
         CONFIG.disk.unlink(missing_ok=True)
         shutil.rmtree(CONFIG.tpm_dir, ignore_errors=True)
 

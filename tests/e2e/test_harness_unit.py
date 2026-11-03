@@ -488,9 +488,18 @@ from .test_e2e import (  # noqa: E402
     ISO_SERIAL_TITLE,
     MANIFEST,
     expect_install,
+    should_delete_vm,
 )
 
 GEN1_BUILT = r"gen-0001 built in /mnt/aios-top"
+
+
+def test_the_vm_disk_is_deleted_only_after_a_passing_run_without_keep_vm() -> None:
+    assert should_delete_vm(keep_vm=False, failures=0)
+    assert not should_delete_vm(keep_vm=True, failures=0)
+    # A failed run keeps the disk and the TPM state to inspect what went wrong.
+    assert not should_delete_vm(keep_vm=False, failures=1)
+    assert not should_delete_vm(keep_vm=True, failures=3)
 
 
 def test_the_install_wait_fails_at_once_on_an_error_line_and_quotes_all_of_it(sock_path: Path) -> None:

@@ -16,12 +16,64 @@ fn mounts_the_top_level_and_records_head_of_a_clean_repo() {
             "
             mount -t btrfs -o subvolid=5 /dev/mapper/aios {top}
             mount --make-rprivate {top}
-            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
-            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
+            {git} status --porcelain
+            {git} rev-parse --short HEAD
             "
         )
     );
     assert!(!fx.calls().iter().any(|c| c.contains(" commit ")));
+    assert_eq!(
+        fx.runner.calls()[2],
+        format!(
+            "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 git -C {} \
+             --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
+             -c core.attributesFile=/dev/null -c core.hooksPath=/dev/null \
+             -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain",
+            fx.layout.config.display()
+        )
+    );
+}
+
+/// No system or global config, no system attributes (env), no work tree or global
+/// attributes file (options): only the repo's root-owned `.git/config` and the `-c`
+/// options can name a filter, diff or merge driver. Every git call, the commit included.
+#[test]
+fn every_git_call_ignores_outside_config_and_work_tree_attributes() {
+    let mut fx = Fixture::booted();
+    fx.runner.respond(
+        &common::git(&fx.layout.config, &["status"]),
+        Output::ok(" M manifest.toml\n"),
+    );
+    fx.run().unwrap();
+    let env: Vec<(String, String)> = [
+        ("GIT_CONFIG_NOSYSTEM", "1"),
+        ("GIT_CONFIG_GLOBAL", "/dev/null"),
+        ("GIT_ATTR_NOSYSTEM", "1"),
+    ]
+    .iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let gits: Vec<_> = fx
+        .runner
+        .commands()
+        .into_iter()
+        .filter(|c| c.program == "git")
+        .collect();
+    let subcommands: Vec<&str> = gits
+        .iter()
+        .map(|c| {
+            c.args
+                .iter()
+                .find(|a| ["status", "add", "commit", "rev-parse"].contains(&a.as_str()))
+                .unwrap()
+                .as_str()
+        })
+        .collect();
+    assert_eq!(subcommands, ["status", "add", "commit", "rev-parse"]);
+    for git in &gits {
+        assert_eq!(git.env, env, "{git}");
+        assert_eq!(git.args[2..11], common::GIT_OPTIONS, "{git}");
+    }
 }
 
 #[test]
@@ -36,10 +88,10 @@ fn a_dirty_repo_is_committed_for_the_new_generation() {
         fx.calls()[2..6],
         fx.expand(
             "
-            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
-            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false add -A
-            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false -c user.name=aios -c user.email=aios@localhost commit --no-verify -m 'aios: manifest for gen-0008'
-            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
+            {git} status --porcelain
+            {git} add -A
+            {git} -c user.name=aios -c user.email=aios@localhost commit --no-verify -m 'aios: manifest for gen-0008'
+            {git} rev-parse --short HEAD
             "
         )
     );
@@ -158,7 +210,7 @@ fn a_candidate_root_left_mounted_is_unmounted_before_anything_is_deleted() {
     fx.runner.respond(&["mountpoint"], Output::ok(""));
     fx.run().unwrap();
     assert_eq!(
-        fx.calls_after("git")[1..5],
+        fx.calls_after("{git}")[1..5],
         fx.expand(
             "
             mountpoint -q {cand}
@@ -280,7 +332,7 @@ fn a_failed_commit_unmounts_the_top_level() {
     fx.runner.fail_on(&["git"]);
     let err = fx.run().unwrap_err();
     assert_eq!(err.step, Step::CommitManifest);
-    assert_eq!(fx.calls_after("git"), fx.expand("umount {top}"));
+    assert_eq!(fx.calls_after("{git}"), fx.expand("umount {top}"));
 }
 
 #[test]

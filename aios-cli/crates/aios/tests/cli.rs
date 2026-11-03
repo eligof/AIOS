@@ -226,7 +226,10 @@ impl Machine {
                     {{"argv": ["findmnt"], "stdout": "7A1B-2C3D\n"}},
                     {{"argv": ["pacman", "-Qqe"], "stdout": "zsh\n"}},
                     {{"argv": ["systemctl", "is-enabled"], "stdout": "enabled\n"}},
-                    {{"argv": ["git", "-C", "{config}", "-c", "core.hooksPath=/dev/null",
+                    {{"argv": ["git", "-C", "{config}",
+                               "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+                               "-c", "core.attributesFile=/dev/null",
+                               "-c", "core.hooksPath=/dev/null",
                                "-c", "core.fsmonitor=false", "-c", "commit.gpgsign=false",
                                "rev-parse"], "stdout": "3f9c2a1\n"}},
                     {{"argv": ["mountpoint"], "status": 32}},
@@ -531,6 +534,14 @@ fn apply_builds_gen_2_and_reports_post_commit_failures_as_warnings() {
     let out = m.aios(&["apply", "--yes"]);
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    let rev_parse = format!(
+        "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 git -C {} \
+         --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
+         -c core.attributesFile=/dev/null -c core.hooksPath=/dev/null \
+         -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD\n",
+        m.path("config").display()
+    );
+    assert!(m.calls().contains(&rev_parse), "{}", m.calls());
     assert!(
         stderr.contains(
             "\naios: warning: `bootctl set-default ''` exited with status 1: injected \

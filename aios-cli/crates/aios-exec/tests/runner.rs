@@ -333,6 +333,59 @@ fn real_runner_passes_only_path_lc_all_and_term() {
 }
 
 #[test]
+fn real_runner_adds_the_command_env_after_clearing() {
+    let cmd = Cmd::new("env")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("LC_ALL", "C.UTF-8");
+    let out = run_ok(&RealRunner, &cmd).unwrap();
+    let vars: Vec<&str> = out
+        .stdout
+        .split(|b| *b == b'\n')
+        .map(|l| std::str::from_utf8(l).unwrap())
+        .collect();
+    assert!(vars.contains(&"GIT_CONFIG_GLOBAL=/dev/null"), "{vars:?}");
+    assert!(
+        vars.contains(&"LC_ALL=C.UTF-8"),
+        "the command's value wins: {vars:?}"
+    );
+    assert!(!vars.contains(&"LC_ALL=C"), "{vars:?}");
+    assert!(vars.contains(&"PATH=/usr/bin"), "{vars:?}");
+}
+
+#[test]
+fn display_shows_env_assignments_as_a_prefix() {
+    let cmd = Cmd::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("NAME", "a b")
+        .env("X", "a\nb")
+        .args(["status", "--porcelain"]);
+    assert_eq!(
+        cmd.to_string(),
+        "GIT_CONFIG_NOSYSTEM=1 NAME='a b' X=\"a\\nb\" git status --porcelain"
+    );
+    assert_eq!(
+        cmd.argv().collect::<Vec<_>>(),
+        ["git", "status", "--porcelain"],
+        "the env is not part of argv"
+    );
+}
+
+#[test]
+fn the_fake_matches_argv_and_logs_the_env_prefix() {
+    let mut fake = FakeRunner::new();
+    fake.respond(&["git", "status"], Output::ok("dirty\n"));
+    let cmd = Cmd::new("git")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .arg("status");
+    assert_eq!(fake.run(&cmd).unwrap().stdout_text(), "dirty\n");
+    assert_eq!(fake.calls(), ["GIT_CONFIG_GLOBAL=/dev/null git status"]);
+    assert_eq!(
+        fake.commands()[0].env,
+        [("GIT_CONFIG_GLOBAL".to_string(), "/dev/null".to_string())]
+    );
+}
+
+#[test]
 fn real_runner_children_read_dev_null_by_default() {
     let cmd = Cmd::new("sh").args(["-c", "readlink /proc/self/fd/0"]);
     assert_eq!(
@@ -439,7 +492,7 @@ fn debug_redacts_stdin() {
     assert!(!debug.contains("hunter2"), "{debug}");
     assert_eq!(
         debug,
-        "Cmd { program: \"mkpasswd\", args: [\"-s\"], stdin: Some(<8 bytes redacted>), \
+        "Cmd { program: \"mkpasswd\", args: [\"-s\"], env: [], stdin: Some(<8 bytes redacted>), \
          interactive: false }"
     );
 }

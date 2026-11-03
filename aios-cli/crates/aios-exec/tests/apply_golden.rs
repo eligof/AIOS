@@ -9,8 +9,8 @@ use std::path::Path;
 const APPLY: &str = "
 mount -t btrfs -o subvolid=5 /dev/mapper/aios {top}
 mount --make-rprivate {top}
-git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
-git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
+{git} status --porcelain
+{git} rev-parse --short HEAD
 mountpoint -q {cand}
 btrfs subvolume snapshot {top}/@usr-gen-0007 {top}/@usr-cand
 btrfs subvolume snapshot {top}/@etc-gen-0007 {top}/@etc-cand
@@ -54,8 +54,8 @@ umount {top}
 
 const BOOTSTRAP: &str = "
 mount --make-rprivate {top}
-git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
-git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
+{git} status --porcelain
+{git} rev-parse --short HEAD
 mountpoint -q {cand}
 btrfs subvolume create {top}/@usr-cand
 btrfs subvolume create {top}/@etc-cand

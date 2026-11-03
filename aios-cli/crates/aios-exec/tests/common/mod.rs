@@ -284,7 +284,8 @@ impl Fixture {
 
     /// `{top}`, `{cand}`, `{config}`, `{persist}`, `{log}`, `{home}`, `{esp}`, `{ro}`
     /// (where readers mount the top level) and `{run}` (the tempdir root) replaced by
-    /// their paths; `{set}` by the package set. One entry per non-empty line.
+    /// their paths; `{set}` by the package set. `{git}` stands for
+    /// `<GIT_ENV> git -C {config} <GIT_OPTIONS>`. One entry per non-empty line.
     pub fn expand(&self, text: &str) -> Vec<String> {
         let set = self.manifest.package_set().join(" ");
         text.lines()
@@ -297,7 +298,13 @@ impl Fixture {
     /// Longest paths first, so `{top}` never eats part of `{cand}`.
     fn placeholders(&self) -> Vec<(&'static str, String)> {
         let l = &self.layout;
+        let git = format!(
+            "{GIT_ENV} git -C {} {}",
+            l.config.display(),
+            GIT_OPTIONS.join(" ")
+        );
         let mut pairs = vec![
+            ("{git}", git),
             ("{top}", l.top.display().to_string()),
             ("{cand}", l.cand.display().to_string()),
             ("{config}", l.config.display().to_string()),
@@ -330,18 +337,27 @@ impl Fixture {
     }
 }
 
-/// `git -C CONFIG <the -c options aios always passes> ARGS...`, as a `respond` prefix.
+/// The environment aios gives every git call, as `Display` prefixes it.
+pub const GIT_ENV: &str = "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1";
+
+/// The options aios passes every git call after `-C CONFIG`.
+pub const GIT_OPTIONS: [&str; 9] = [
+    "--attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "-c",
+    "core.attributesFile=/dev/null",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "commit.gpgsign=false",
+];
+
+/// `git -C CONFIG <GIT_OPTIONS> ARGS...`, as a `respond` prefix.
 pub fn git<'a>(config: &'a Path, args: &[&'a str]) -> Vec<&'a str> {
     let config = config.to_str().expect("tempdir paths are UTF-8");
     let mut argv = vec!["git", "-C", config];
-    argv.extend([
-        "-c",
-        "core.hooksPath=/dev/null",
-        "-c",
-        "core.fsmonitor=false",
-        "-c",
-        "commit.gpgsign=false",
-    ]);
+    argv.extend(GIT_OPTIONS);
     argv.extend(args);
     argv
 }

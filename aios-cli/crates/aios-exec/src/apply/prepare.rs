@@ -1,17 +1,37 @@
 use super::{mkdir, Mode, Run, CANDIDATES, ETC_CAND, ROOT_CAND, USR_CAND};
 use crate::{btrfs, check_trusted_dirs, run_ok, Cmd, ExecError};
 use aios_gen::{next_id, parse_subvol, GenId};
+use std::path::Path;
 
-/// `-c` options for every git call: hooks point at `/dev/null` (there are none), and
-/// neither an fsmonitor program nor a signing program runs.
-const GIT_SAFETY: [&str; 6] = [
-    "-c",
-    "core.hooksPath=/dev/null",
-    "-c",
-    "core.fsmonitor=false",
-    "-c",
-    "commit.gpgsign=false",
-];
+/// The empty tree (SHA-1), which git knows without reading the object store.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// `git -C <repo>`, as aios runs it as root (spec §4.3 step 1). Neither the system nor
+/// the global config is read (`GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL`), and attributes
+/// come from neither the work tree's `.gitattributes` (`--attr-source` names the empty
+/// tree) nor a system or global attributes file. A filter, diff or merge driver needs a
+/// config entry, and the only config left is the repo's `.git/config`, which
+/// `check_trusted_dirs` requires to be root-owned, plus the `-c` options: hooks point at
+/// `/dev/null` (there are none), and neither an fsmonitor nor a signing program runs.
+fn git(repo: &Path) -> Cmd {
+    Cmd::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .arg("-C")
+        .arg_path(repo)
+        .arg(format!("--attr-source={EMPTY_TREE}"))
+        .args([
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+}
 
 impl Run<'_> {
     /// Mount the top level (apply only; bootstrap gets it mounted) and pick the generation
@@ -52,16 +72,11 @@ impl Run<'_> {
     }
 
     /// Commit a dirty manifest repo (new files included) and record `HEAD`. git runs as
-    /// root here, so the repo's own config gets no say in running programs: no hooks, no
-    /// fsmonitor, no signing (spec §4.3 step 1).
+    /// root here, so nothing outside the root-owned `.git/config` gets a say in running
+    /// programs (see [`git`]; spec §4.3 step 1).
     pub(super) fn commit_manifest(&mut self) -> Result<(), ExecError> {
         let runner = self.ctx.runner;
-        let git = || {
-            Cmd::new("git")
-                .arg("-C")
-                .arg_path(&self.ctx.layout.config)
-                .args(GIT_SAFETY)
-        };
+        let git = || git(&self.ctx.layout.config);
         let status = run_ok(runner, &git().args(["status", "--porcelain"]))?;
         if !status.stdout_text().trim().is_empty() {
             run_ok(runner, &git().args(["add", "-A"]))?;

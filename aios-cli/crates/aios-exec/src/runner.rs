@@ -14,6 +14,9 @@ use std::process::{Command, Stdio};
 pub struct Cmd {
     pub program: String,
     pub args: Vec<String>,
+    /// Variables the child gets on top of the clean environment [`RealRunner`] gives
+    /// every command, set in this order (a later one wins). Not part of `argv`.
+    pub env: Vec<(String, String)>,
     pub stdin: Option<Vec<u8>>,
     /// The child talks to the user: it inherits all three standard streams (nothing is
     /// captured), except that `stdin` bytes, if any, still go through a pipe.
@@ -25,9 +28,16 @@ impl Cmd {
         Cmd {
             program: program.into(),
             args: Vec::new(),
+            env: Vec::new(),
             stdin: None,
             interactive: false,
         }
+    }
+
+    /// Set the variable `key` to `value` in the child's environment.
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Cmd {
+        self.env.push((key.into(), value.into()));
+        self
     }
 
     pub fn arg(mut self, arg: impl Into<String>) -> Cmd {
@@ -68,11 +78,17 @@ impl Cmd {
 }
 
 impl fmt::Display for Cmd {
-    /// Shell-like: words outside `[A-Za-z0-9@%+=:,./_-]` are single-quoted. Words with a
-    /// control or other unprintable character are written escaped in double quotes
-    /// (`"a\nb"`), so a command can never forge a second log line.
+    /// Shell-like: the env as `KEY=value` prefixes, then argv. Words outside
+    /// `[A-Za-z0-9@%+=:,./_-]` are single-quoted. Words with a control or other
+    /// unprintable character are written escaped in double quotes (`"a\nb"`), so a
+    /// command can never forge a second log line.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let words: Vec<String> = self.argv().map(quote).collect();
+        let words: Vec<String> = self
+            .env
+            .iter()
+            .map(|(key, value)| format!("{}={}", quote(key), quote(value)))
+            .chain(self.argv().map(quote))
+            .collect();
         f.write_str(&words.join(" "))
     }
 }
@@ -88,6 +104,7 @@ impl fmt::Debug for Cmd {
         f.debug_struct("Cmd")
             .field("program", &self.program)
             .field("args", &self.args)
+            .field("env", &self.env)
             .field("stdin", &self.stdin.as_ref().map(|b| Redacted(b.len())))
             .field("interactive", &self.interactive)
             .finish()
@@ -243,7 +260,8 @@ fn escape_line(line: &str) -> String {
 }
 
 /// Runs commands with `std::process::Command`. The child gets a clean environment
-/// (`PATH=/usr/bin`, `LC_ALL=C`, and `TERM` if set) and `/dev/null` as standard input
+/// (`PATH=/usr/bin`, `LC_ALL=C`, and `TERM` if set) plus the command's
+/// [`env`](Cmd#structfield.env), and `/dev/null` as standard input
 /// unless the command supplies bytes; stdout and stderr are captured. An
 /// [`interactive`](Cmd::interactive) command instead inherits all three streams.
 #[derive(Debug, Default, Clone, Copy)]
@@ -261,6 +279,7 @@ impl CommandRunner for RealRunner {
         if let Some(term) = std::env::var_os("TERM") {
             command.env("TERM", term);
         }
+        command.envs(cmd.env.iter().map(|(k, v)| (k, v)));
         let stream = || {
             if cmd.interactive {
                 Stdio::inherit()

@@ -201,13 +201,13 @@ EOF
     done
     cat >"$FAKES/makepkg" <<'MKPKG'
 #!/bin/sh
-echo "makepkg in $PWD root=$AIOS_SRC_ROOT dest=$PKGDEST" >>"$FAKE_LOG"
+echo "makepkg in $PWD root=$AIOS_SRC_ROOT dest=$PKGDEST" >>"$MAKEPKG_LOG"
 sed -i 's/^pkgver=.*/pkgver=0.1.0.r99.gabc/' PKGBUILD
 echo pkg >"$PKGDEST/$(sed -n 's/^pkgname=//p' PKGBUILD)-1-any.pkg.tar.zst"
 MKPKG
     chmod +x "$FAKES/makepkg"
     fake repo-add
-    export FAKE_LOG=$LOG
+    export MAKEPKG_LOG=$LOG
     before=$(cat "$W"/packaging/*/PKGBUILD)
     run mk repo
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }

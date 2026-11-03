@@ -57,6 +57,9 @@ impl Run<'_> {
             if let Err(e) = rename(tmp, &tmp.with_extension("")) {
                 warnings.push(format!("{e}; gen-{gen} is installed without this UKI"));
                 missing.push(name.clone());
+                if let Err(e) = fs::remove_file(tmp) {
+                    warnings.push(ExecError::io(tmp, e).to_string());
+                }
             }
         }
         self.ukis.retain(|name| !missing.contains(name));

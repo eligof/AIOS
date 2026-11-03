@@ -87,11 +87,13 @@ impl Run<'_> {
     pub(super) fn prepare_candidate(&mut self) -> Result<(), ExecError> {
         let (runner, l) = (self.ctx.runner, self.ctx.layout);
         self.candidates = true;
+        // Counted as mounted until known otherwise, so a check that fails makes the
+        // cleanup unmount before it deletes anything.
+        self.cand_mounted = true;
         if btrfs::is_mountpoint(runner, &l.cand)? {
-            self.cand_mounted = true;
             btrfs::umount_recursive(runner, &l.cand)?;
-            self.cand_mounted = false;
         }
+        self.cand_mounted = false;
         for name in CANDIDATES {
             btrfs::delete_recursive(runner, &l.subvol(name))?;
         }

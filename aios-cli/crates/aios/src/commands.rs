@@ -95,7 +95,14 @@ fn apply_cmd(cx: &Context, yes: bool, upgrade: bool) -> Result<(), Failure> {
         trusted_uid: cx.trusted_uid(),
     })?;
     warn(&outcome.warnings);
-    println!("reboot to activate gen-{}", outcome.gen);
+    if outcome.warnings.is_empty() {
+        println!("reboot to activate gen-{}", outcome.gen);
+    } else {
+        println!(
+            "gen-{} is installed; check the warnings above, then reboot to activate it",
+            outcome.gen
+        );
+    }
     Ok(())
 }
 

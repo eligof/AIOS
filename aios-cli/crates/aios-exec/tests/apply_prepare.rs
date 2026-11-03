@@ -203,6 +203,24 @@ fn a_mountpoint_check_that_cannot_tell_fails() {
 }
 
 #[test]
+fn after_a_mountpoint_check_that_cannot_tell_cleanup_unmounts_before_deleting() {
+    let mut fx = Fixture::booted();
+    mkdir(&fx.layout.subvol("@root-cand"));
+    fx.runner
+        .respond(&["mountpoint"], Output::failed(1, "permission denied"))
+        .fail_on(&["umount", "-R"]);
+    fx.run().unwrap_err();
+    assert_eq!(
+        fx.calls_after("mountpoint"),
+        fx.expand("umount -R {cand}\numount {top}")
+    );
+    assert!(
+        fx.layout.subvol("@root-cand").is_dir(),
+        "maybe still mounted"
+    );
+}
+
+#[test]
 fn no_candidate_root_directory_means_nothing_is_mounted_there() {
     let fx = Fixture::fresh();
     fs::remove_dir_all(&fx.layout.cand).unwrap();

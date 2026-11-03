@@ -538,7 +538,13 @@ fn apply_builds_gen_2_and_reports_post_commit_failures_as_warnings() {
         ),
         "{stderr}"
     );
-    assert!(text(&out.stdout).ends_with("reboot to activate gen-0002\n"));
+    assert!(
+        text(&out.stdout).ends_with(
+            "gen-0002 is installed; check the warnings above, then reboot to activate it\n"
+        ),
+        "{}",
+        text(&out.stdout)
+    );
     assert!(m.path("top/@usr-gen-0002").is_dir() && m.path("top/@etc-gen-0002").is_dir());
     assert!(m
         .path("esp/EFI/Linux/aios-gen-0002-cachyos+3.efi")

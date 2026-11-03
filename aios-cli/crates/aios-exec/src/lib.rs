@@ -4,6 +4,7 @@
 mod apply;
 pub mod btrfs;
 mod error;
+pub mod etcfs;
 mod facts;
 mod layout;
 mod probe;

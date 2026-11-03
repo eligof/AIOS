@@ -2,9 +2,12 @@
 //! (spec §4.3). The booted generation is never modified; any failure deletes the
 //! candidates again.
 
+mod etc;
+mod packages;
 mod prepare;
+mod services;
 
-use crate::{btrfs, CommandRunner, ExecError, Layout, MachineFacts};
+use crate::{btrfs, run_ok, Cmd, CommandRunner, ExecError, Layout, MachineFacts, Output};
 use crate::{Step, StepError};
 use aios_gen::GenId;
 use aios_manifest::Manifest;
@@ -86,7 +89,13 @@ impl Run<'_> {
         self.step(Step::Validate, Run::validate)?;
         self.step(Step::CommitManifest, Run::commit_manifest)?;
         self.step(Step::PrepareCandidate, Run::prepare_candidate)?;
-        self.step(Step::Assemble, Run::assemble)
+        self.step(Step::Assemble, Run::assemble)?;
+        self.step(Step::Packages, Run::packages)?;
+        if self.ctx.mode == Mode::Bootstrap {
+            self.step(Step::Keyring, Run::keyring)?;
+        }
+        self.step(Step::RenderEtc, Run::render_etc)?;
+        self.step(Step::Services, Run::services)
     }
 
     fn step(
@@ -96,6 +105,19 @@ impl Run<'_> {
     ) -> Result<(), StepError> {
         eprintln!("aios: {step}");
         f(self).map_err(|e| StepError { step, detail: e.0 })
+    }
+
+    /// `arch-chroot <cand> ARGS...`
+    fn chroot_cmd(&self, args: &[&str]) -> Cmd {
+        Cmd::new("arch-chroot")
+            .arg_path(&self.ctx.layout.cand)
+            .args(args.iter().copied())
+    }
+
+    /// Run `arch-chroot <cand> ARGS... MORE...`; a non-zero exit is an error.
+    fn chroot(&self, args: &[&str], more: &[String]) -> Result<Output, ExecError> {
+        let cmd = self.chroot_cmd(args).args(more.iter().cloned());
+        run_ok(self.ctx.runner, &cmd)
     }
 
     /// Undo everything that is not finalized. Errors are logged, not returned.
@@ -125,4 +147,13 @@ impl Run<'_> {
 /// `mkdir -p`.
 fn mkdir(path: &Path) -> Result<(), ExecError> {
     fs::create_dir_all(path).map_err(|e| ExecError::io(path, e))
+}
+
+/// Non-empty, trimmed lines.
+fn lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
 }

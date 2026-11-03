@@ -14,17 +14,19 @@ impl Run<'_> {
         }
     }
 
+    /// Package names always follow `--`, so none can be read as an option (the manifest
+    /// rejects a leading `-` too, but installed names come from `pacman -Qqe`/`-Qdtq`).
     fn upgrade(&self, set: &[String]) -> Result<(), ExecError> {
-        self.chroot(&["pacman", "-Syu", "--needed", "--noconfirm"], set)?;
+        self.chroot(&["pacman", "-Syu", "--needed", "--noconfirm", "--"], set)?;
         let explicit = lines(&self.chroot(&["pacman", "-Qqe"], &[])?.stdout_text());
         let removed: Vec<String> = explicit.into_iter().filter(|p| !set.contains(p)).collect();
         if !removed.is_empty() {
-            self.chroot(&["pacman", "-Rns", "--noconfirm"], &removed)?;
+            self.chroot(&["pacman", "-Rns", "--noconfirm", "--"], &removed)?;
         }
-        self.chroot(&["pacman", "-D", "--asexplicit"], set)?;
+        self.chroot(&["pacman", "-D", "--asexplicit", "--"], set)?;
         let orphans = self.orphans()?;
         if !orphans.is_empty() {
-            self.chroot(&["pacman", "-Rns", "--noconfirm"], &orphans)?;
+            self.chroot(&["pacman", "-Rns", "--noconfirm", "--"], &orphans)?;
         }
         Ok(())
     }
@@ -48,6 +50,8 @@ impl Run<'_> {
         // `var/lib/pacman` (from @blank) links to `../../usr/lib/pacman`; pacstrap's
         // `mkdir -p` fails on a dangling link.
         mkdir(&l.cand.join("usr/lib/pacman"))?;
+        // No `--` before the packages: pacstrap would pass it to pacman as a package name.
+        // The manifest validator rejects package names with a leading `-` instead.
         let cmd = Cmd::new("pacstrap")
             .arg("-C")
             .arg_path(&conf)

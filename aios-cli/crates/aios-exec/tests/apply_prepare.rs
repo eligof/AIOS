@@ -15,8 +15,8 @@ fn mounts_the_top_level_and_records_head_of_a_clean_repo() {
         fx.expand(
             "
             mount -t btrfs -o subvolid=5 /dev/mapper/aios {top}
-            git -C {config} status --porcelain
-            git -C {config} rev-parse --short HEAD
+            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
+            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
             "
         )
     );
@@ -27,12 +27,7 @@ fn mounts_the_top_level_and_records_head_of_a_clean_repo() {
 fn a_dirty_repo_is_committed_for_the_new_generation() {
     let mut fx = Fixture::booted();
     fx.runner.respond(
-        &[
-            "git",
-            "-C",
-            &fx.layout.config.display().to_string(),
-            "status",
-        ],
+        &common::git(&fx.layout.config, &["status"]),
         Output::ok(" M manifest.toml\n?? files/new.conf\n"),
     );
     fx.run().unwrap();
@@ -40,10 +35,10 @@ fn a_dirty_repo_is_committed_for_the_new_generation() {
         fx.calls()[1..5],
         fx.expand(
             "
-            git -C {config} status --porcelain
-            git -C {config} add -A
-            git -C {config} -c user.name=aios -c user.email=aios@localhost commit -m 'aios: manifest for gen-0008'
-            git -C {config} rev-parse --short HEAD
+            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
+            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false add -A
+            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false -c user.name=aios -c user.email=aios@localhost commit --no-verify -m 'aios: manifest for gen-0008'
+            git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
             "
         )
     );
@@ -54,12 +49,7 @@ fn the_new_id_follows_every_generation_subvolume() {
     let mut fx = Fixture::booted();
     mkdir(&fx.layout.subvol("@etc-gen-0011"));
     fx.runner.respond(
-        &[
-            "git",
-            "-C",
-            &fx.layout.config.display().to_string(),
-            "status",
-        ],
+        &common::git(&fx.layout.config, &["status"]),
         Output::ok(" M manifest.toml\n"),
     );
     // The fixture's prebuilt UKIs are named for gen-0008, so this run fails later on;
@@ -68,7 +58,7 @@ fn the_new_id_follows_every_generation_subvolume() {
     assert!(fx
         .calls()
         .iter()
-        .any(|c| c.ends_with("commit -m 'aios: manifest for gen-0012'")));
+        .any(|c| c.ends_with("commit --no-verify -m 'aios: manifest for gen-0012'")));
 }
 
 #[test]

@@ -59,7 +59,7 @@ impl Run<'_> {
             if !units.is_empty() {
                 let cmd = Cmd::new("systemctl")
                     .arg(format!("--root={}", cand.display()))
-                    .arg(verb)
+                    .args([verb, "--"])
                     .args(units);
                 run_ok(self.ctx.runner, &cmd)?;
             }

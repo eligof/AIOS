@@ -55,7 +55,7 @@ impl Run<'_> {
             let (owner, group) = (file.owner_or_default(), file.group_or_default());
             if owner != "root" || group != "root" {
                 let spec = format!("{owner}:{group}");
-                self.chroot(&["chown", "-h", &spec, path], &[])?;
+                self.chroot(&["chown", "-h", "--", &spec, path], &[])?;
             }
         }
         for dir in persist_dirs(m) {
@@ -72,7 +72,7 @@ impl Run<'_> {
         let kernels: Vec<String> = std::iter::once(m.kernel.default.clone())
             .chain(m.kernel.fallback.clone())
             .collect();
-        let versions = self.chroot(&["pacman", "-Q"], &kernels)?;
+        let versions = self.chroot(&["pacman", "-Q", "--"], &kernels)?;
         let mut packages = lines(&self.chroot(&["pacman", "-Qq"], &[])?.stdout_text());
         packages.sort();
         let listing: String = packages.iter().map(|p| format!("{p}\n")).collect();
@@ -117,7 +117,7 @@ impl Run<'_> {
             let owner = format!("{0}:{0}", user.uid);
             run_ok(
                 self.ctx.runner,
-                &Cmd::new("chown").arg(owner).arg_path(&home),
+                &Cmd::new("chown").arg("--").arg(owner).arg_path(&home),
             )?;
         }
         Ok(())

@@ -33,16 +33,16 @@ fn apply_upgrades_removes_marks_and_drops_orphans() {
         span(
             &fx,
             "arch-chroot {cand} pacman -Syu",
-            "arch-chroot {cand} pacman -Rns --noconfirm libnano"
+            "arch-chroot {cand} pacman -Rns --noconfirm -- libnano"
         ),
         fx.expand(
             "
-            arch-chroot {cand} pacman -Syu --needed --noconfirm {set}
+            arch-chroot {cand} pacman -Syu --needed --noconfirm -- {set}
             arch-chroot {cand} pacman -Qqe
-            arch-chroot {cand} pacman -Rns --noconfirm nano
-            arch-chroot {cand} pacman -D --asexplicit {set}
+            arch-chroot {cand} pacman -Rns --noconfirm -- nano
+            arch-chroot {cand} pacman -D --asexplicit -- {set}
             arch-chroot {cand} pacman -Qdtq
-            arch-chroot {cand} pacman -Rns --noconfirm libnano
+            arch-chroot {cand} pacman -Rns --noconfirm -- libnano
             "
         )
     );
@@ -140,10 +140,10 @@ fn generation_toml_records_ids_commit_kernels_and_package_hash() {
         ),
         fx.expand(
             "
-            arch-chroot {cand} pacman -Q linux-cachyos linux-cachyos-lts
+            arch-chroot {cand} pacman -Q -- linux-cachyos linux-cachyos-lts
             arch-chroot {cand} pacman -Qq
             arch-chroot {cand} locale-gen
-            arch-chroot {cand} chown -h root:wheel /etc/usbguard/usbguard-daemon.conf
+            arch-chroot {cand} chown -h -- root:wheel /etc/usbguard/usbguard-daemon.conf
             "
         )
     );
@@ -184,7 +184,7 @@ fn bootstrap_creates_private_home_directories() {
         .into_iter()
         .filter(|c| c.starts_with("chown "))
         .collect();
-    assert_eq!(chowns, fx.expand("chown 1000:1000 {home}/eli"));
+    assert_eq!(chowns, fx.expand("chown -- 1000:1000 {home}/eli"));
     let home = fx.layout.home.join("eli");
     assert_eq!(mode(&home), 0o700);
     assert_eq!(
@@ -222,9 +222,9 @@ fn services_follow_the_manifest_plus_core_units() {
         span(&fx, "systemctl", "systemctl --root={cand} mask"),
         fx.expand(
             "
-            systemctl --root={cand} enable NetworkManager.service aios-health.service fwupd-refresh.timer
-            systemctl --root={cand} disable bluetooth.service
-            systemctl --root={cand} mask sshd.socket
+            systemctl --root={cand} enable -- NetworkManager.service aios-health.service fwupd-refresh.timer
+            systemctl --root={cand} disable -- bluetooth.service
+            systemctl --root={cand} mask -- sshd.socket
             "
         )
     );
@@ -247,9 +247,9 @@ fn masked_units_are_unmasked_and_missing_units_are_not_disabled() {
         span(&fx, "systemctl", "systemctl --root={cand} mask"),
         fx.expand(
             "
-            systemctl --root={cand} unmask NetworkManager.service
-            systemctl --root={cand} enable NetworkManager.service aios-health.service fwupd-refresh.timer
-            systemctl --root={cand} mask sshd.socket
+            systemctl --root={cand} unmask -- NetworkManager.service
+            systemctl --root={cand} enable -- NetworkManager.service aios-health.service fwupd-refresh.timer
+            systemctl --root={cand} mask -- sshd.socket
             "
         )
     );

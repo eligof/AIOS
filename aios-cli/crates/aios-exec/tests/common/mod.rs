@@ -222,10 +222,7 @@ impl Fixture {
         runner
             .emulate_subvolumes()
             .emulate_top_mounts(&l.top)
-            .respond(
-                &["git", "-C", &l.config.display().to_string(), "rev-parse"],
-                Output::ok("3f9c2a1\n"),
-            )
+            .respond(&git(&l.config, &["rev-parse"]), Output::ok("3f9c2a1\n"))
             .respond(
                 &["arch-chroot", &cand, "pacman", "-Qqe"],
                 Output::ok(explicit),
@@ -330,6 +327,22 @@ impl Fixture {
             assert!(!self.layout.subvol(name).exists(), "{name} left behind");
         }
     }
+}
+
+/// `git -C CONFIG <the -c options aios always passes> ARGS...`, as a `respond` prefix.
+pub fn git<'a>(config: &'a Path, args: &[&'a str]) -> Vec<&'a str> {
+    let config = config.to_str().expect("tempdir paths are UTF-8");
+    let mut argv = vec!["git", "-C", config];
+    argv.extend([
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "commit.gpgsign=false",
+    ]);
+    argv.extend(args);
+    argv
 }
 
 /// The cleanup after a failure once the candidate tree is mounted (apply mode).

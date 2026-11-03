@@ -2,6 +2,17 @@ use super::{mkdir, Mode, Run, CANDIDATES, ETC_CAND, ROOT_CAND, USR_CAND};
 use crate::{btrfs, check_trusted_dirs, run_ok, Cmd, ExecError};
 use aios_gen::{next_id, parse_subvol, GenId};
 
+/// `-c` options for every git call: hooks point at `/dev/null` (there are none), and
+/// neither an fsmonitor program nor a signing program runs.
+const GIT_SAFETY: [&str; 6] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "commit.gpgsign=false",
+];
+
 impl Run<'_> {
     /// Mount the top level (apply only; bootstrap gets it mounted) and pick the generation
     /// id: max of every `@usr-gen-*`/`@etc-gen-*` + 1, or gen-1 on an empty bootstrap target.
@@ -37,15 +48,22 @@ impl Run<'_> {
         self.ctx.facts.render_ctx(self.gen).map(drop)
     }
 
-    /// Commit a dirty manifest repo (new files included) and record `HEAD`.
+    /// Commit a dirty manifest repo (new files included) and record `HEAD`. git runs as
+    /// root here, so the repo's own config gets no say in running programs: no hooks, no
+    /// fsmonitor, no signing (spec §4.3 step 1).
     pub(super) fn commit_manifest(&mut self) -> Result<(), ExecError> {
         let runner = self.ctx.runner;
-        let git = || Cmd::new("git").arg("-C").arg_path(&self.ctx.layout.config);
+        let git = || {
+            Cmd::new("git")
+                .arg("-C")
+                .arg_path(&self.ctx.layout.config)
+                .args(GIT_SAFETY)
+        };
         let status = run_ok(runner, &git().args(["status", "--porcelain"]))?;
         if !status.stdout_text().trim().is_empty() {
             run_ok(runner, &git().args(["add", "-A"]))?;
             let identity = ["-c", "user.name=aios", "-c", "user.email=aios@localhost"];
-            let commit = git().args(identity).args(["commit", "-m"]);
+            let commit = git().args(identity).args(["commit", "--no-verify", "-m"]);
             run_ok(
                 runner,
                 &commit.arg(format!("aios: manifest for gen-{}", self.gen)),

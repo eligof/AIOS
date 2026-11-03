@@ -7,8 +7,8 @@ use std::path::Path;
 
 const APPLY: &str = "
 mount -t btrfs -o subvolid=5 /dev/mapper/aios {top}
-git -C {config} status --porcelain
-git -C {config} rev-parse --short HEAD
+git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
+git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
 btrfs subvolume snapshot {top}/@usr-gen-0007 {top}/@usr-cand
 btrfs subvolume snapshot {top}/@etc-gen-0007 {top}/@etc-cand
 btrfs subvolume snapshot {top}/@blank {top}/@root-cand
@@ -18,19 +18,19 @@ mount --bind {top}/@etc-cand {cand}/etc
 mount --bind {persist}/var/cache/pacman/pkg {cand}/var/cache/pacman/pkg
 mount --bind {log} {cand}/var/log
 mount --bind {persist}/aios/repo {cand}/persist/aios/repo
-arch-chroot {cand} pacman -Syu --needed --noconfirm {set}
+arch-chroot {cand} pacman -Syu --needed --noconfirm -- {set}
 arch-chroot {cand} pacman -Qqe
-arch-chroot {cand} pacman -Rns --noconfirm nano
-arch-chroot {cand} pacman -D --asexplicit {set}
+arch-chroot {cand} pacman -Rns --noconfirm -- nano
+arch-chroot {cand} pacman -D --asexplicit -- {set}
 arch-chroot {cand} pacman -Qdtq
-arch-chroot {cand} pacman -Rns --noconfirm libnano
-arch-chroot {cand} pacman -Q linux-cachyos linux-cachyos-lts
+arch-chroot {cand} pacman -Rns --noconfirm -- libnano
+arch-chroot {cand} pacman -Q -- linux-cachyos linux-cachyos-lts
 arch-chroot {cand} pacman -Qq
 arch-chroot {cand} locale-gen
-arch-chroot {cand} chown -h root:wheel /etc/usbguard/usbguard-daemon.conf
-systemctl --root={cand} enable NetworkManager.service aios-health.service fwupd-refresh.timer
-systemctl --root={cand} disable bluetooth.service
-systemctl --root={cand} mask sshd.socket
+arch-chroot {cand} chown -h -- root:wheel /etc/usbguard/usbguard-daemon.conf
+systemctl --root={cand} enable -- NetworkManager.service aios-health.service fwupd-refresh.timer
+systemctl --root={cand} disable -- bluetooth.service
+systemctl --root={cand} mask -- sshd.socket
 arch-chroot {cand} mkinitcpio -k 7.3.0-4-cachyos -g /var/tmp/aios/initramfs-cachyos.img
 arch-chroot {cand} ukify build --linux=/usr/lib/modules/7.3.0-4-cachyos/vmlinuz --initrd=/var/tmp/aios/initramfs-cachyos.img --cmdline=@/etc/kernel/cmdline --os-release=@/usr/lib/os-release --output=/var/tmp/aios/aios-gen-0008-cachyos.efi
 arch-chroot {cand} mkinitcpio -k 6.18.55-2-cachyos-lts -g /var/tmp/aios/initramfs-lts.img
@@ -50,8 +50,8 @@ umount {top}
 ";
 
 const BOOTSTRAP: &str = "
-git -C {config} status --porcelain
-git -C {config} rev-parse --short HEAD
+git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain
+git -C {config} -c core.hooksPath=/dev/null -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD
 btrfs subvolume create {top}/@usr-cand
 btrfs subvolume create {top}/@etc-cand
 btrfs subvolume snapshot {top}/@blank {top}/@root-cand
@@ -64,14 +64,14 @@ mount --bind {persist}/aios/repo {cand}/persist/aios/repo
 pacstrap -C {run}/aios-pacstrap.conf {cand} {set}
 arch-chroot {cand} pacman-key --init
 arch-chroot {cand} pacman-key --populate archlinux cachyos
-arch-chroot {cand} pacman -Q linux-cachyos linux-cachyos-lts
+arch-chroot {cand} pacman -Q -- linux-cachyos linux-cachyos-lts
 arch-chroot {cand} pacman -Qq
 arch-chroot {cand} locale-gen
-arch-chroot {cand} chown -h root:wheel /etc/usbguard/usbguard-daemon.conf
-chown 1000:1000 {home}/eli
-systemctl --root={cand} enable NetworkManager.service aios-health.service fwupd-refresh.timer
-systemctl --root={cand} disable bluetooth.service
-systemctl --root={cand} mask sshd.socket
+arch-chroot {cand} chown -h -- root:wheel /etc/usbguard/usbguard-daemon.conf
+chown -- 1000:1000 {home}/eli
+systemctl --root={cand} enable -- NetworkManager.service aios-health.service fwupd-refresh.timer
+systemctl --root={cand} disable -- bluetooth.service
+systemctl --root={cand} mask -- sshd.socket
 arch-chroot {cand} mkinitcpio -k 7.3.0-4-cachyos -g /var/tmp/aios/initramfs-cachyos.img
 arch-chroot {cand} ukify build --linux=/usr/lib/modules/7.3.0-4-cachyos/vmlinuz --initrd=/var/tmp/aios/initramfs-cachyos.img --cmdline=@/etc/kernel/cmdline --os-release=@/usr/lib/os-release --output=/var/tmp/aios/aios-gen-0001-cachyos.efi
 arch-chroot {cand} mkinitcpio -k 6.18.55-2-cachyos-lts -g /var/tmp/aios/initramfs-lts.img
@@ -230,7 +230,7 @@ fn without_a_fallback_kernel_one_uki_is_built() {
     assert_eq!(outcome.ukis, ["aios-gen-0008-cachyos+3.efi"]);
     assert!(fx
         .calls()
-        .contains(&"arch-chroot {cand} pacman -Q linux-cachyos".to_string()));
+        .contains(&"arch-chroot {cand} pacman -Q -- linux-cachyos".to_string()));
     let ukify = "arch-chroot {cand} ukify";
     assert_eq!(
         fx.calls().iter().filter(|c| c.starts_with(ukify)).count(),

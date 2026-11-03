@@ -94,7 +94,7 @@ impl PackagePath {
     }
 }
 
-/// `/etc/tmpfiles.d/aios-pkgdirs.conf` (spec §4.3 step 5): recreates at every boot the
+/// `/etc/tmpfiles.d/zz-aios-pkgdirs.conf` (spec §4.3 step 5): recreates at every boot the
 /// package-owned directories (`d`, with the package's mode and numeric owner) and symlinks
 /// (`L`, which leaves an existing path alone) that live outside `/usr` and `/etc`. Sorted by
 /// path; a path given twice is written once.

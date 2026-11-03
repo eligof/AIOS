@@ -164,14 +164,14 @@ fn managed_files_lists_every_path_including_itself_and_pkgdirs_conf() {
     assert_eq!(d[MANAGED_FILES], text_file(&managed_list(&paths), 0o644));
 }
 
-/// The executor renders `aios-pkgdirs.conf` from the candidate's packages (spec §4.3
+/// The executor renders `zz-aios-pkgdirs.conf` from the candidate's packages (spec §4.3
 /// step 5), so it is managed but never part of the desired state, even when `[files]`
 /// names it.
 #[test]
 fn pkgdirs_conf_is_managed_but_never_desired() {
     let fx = fixture_with(&MANIFEST.replace(
         "[files]\n",
-        "[files]\n\"/etc/tmpfiles.d/aios-pkgdirs.conf\" = { source = \"files/nftables.conf\" }\n",
+        "[files]\n\"/etc/tmpfiles.d/zz-aios-pkgdirs.conf\" = { source = \"files/nftables.conf\" }\n",
     ));
     let d = desired_etc(&fx.inputs(), &FakeProbe::base()).unwrap();
     assert!(!d.contains_key(PKGDIRS_CONF));

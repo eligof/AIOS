@@ -53,9 +53,11 @@ pub struct ApplyOutcome {
     pub manifest_commit: String,
     /// The UKI file names now on the ESP.
     pub ukis: Vec<String>,
-    /// For the user to see, not errors: package files outside `/usr` and `/etc`, which
-    /// every boot loses (spec §4.3 step 5), and what failed after the new generation was
-    /// installed (spec §7). The apply still succeeded.
+    /// Information from before the commit point: package files outside `/usr` and `/etc`,
+    /// which every boot loses (spec §4.3 step 5). Not a problem with this apply.
+    pub notices: Vec<String>,
+    /// What failed after the new generation was installed (spec §7). The apply still
+    /// succeeded.
     pub warnings: Vec<String>,
 }
 
@@ -72,6 +74,7 @@ pub fn apply(ctx: &ApplyCtx) -> Result<ApplyOutcome, StepError> {
         candidates: false,
         ukis: Vec::new(),
         esp_tmp: Vec::new(),
+        notices: Vec::new(),
         warnings: Vec::new(),
         done: false,
     };
@@ -82,6 +85,7 @@ pub fn apply(ctx: &ApplyCtx) -> Result<ApplyOutcome, StepError> {
         gen: run.gen,
         manifest_commit: std::mem::take(&mut run.manifest_commit),
         ukis: run.ukis.iter().map(UkiName::file_name).collect(),
+        notices: std::mem::take(&mut run.notices),
         warnings: std::mem::take(&mut run.warnings),
     })
 }
@@ -104,6 +108,8 @@ struct Run<'a> {
     ukis: Vec<UkiName>,
     /// UKI copies on the ESP not yet renamed into place.
     esp_tmp: Vec<PathBuf>,
+    /// See `ApplyOutcome::notices`.
+    notices: Vec<String>,
     /// See `ApplyOutcome::warnings`.
     warnings: Vec<String>,
     /// Every step succeeded: nothing to clean up.

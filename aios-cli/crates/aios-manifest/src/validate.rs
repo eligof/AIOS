@@ -18,7 +18,7 @@ const GENERATED_ETC: &[&str] = &[
     "/etc/kernel/cmdline",
     "/etc/tmpfiles.d/aios-persist.conf",
     "/etc/tmpfiles.d/aios-home.conf",
-    "/etc/tmpfiles.d/aios-pkgdirs.conf",
+    "/etc/tmpfiles.d/zz-aios-pkgdirs.conf",
 ];
 
 /// Mount points and runtime trees a persist bind may not equal or sit under.

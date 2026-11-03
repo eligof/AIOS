@@ -30,7 +30,7 @@ enum Found {
 impl Run<'_> {
     /// Spec §4.3 step 5: every boot starts from a copy of `@blank`, so a package's
     /// directories and symlinks outside the generation and the persistent trees would be
-    /// gone. `aios-pkgdirs.conf` recreates them at boot, with the mode, owner and target
+    /// gone. `zz-aios-pkgdirs.conf` recreates them at boot, with the mode, owner and target
     /// they have in the candidate. A package's regular file there can't be recreated: each
     /// becomes a warning. Paths `@blank` provides (or leads elsewhere through its links) and
     /// declared persistent files are left out.
@@ -56,7 +56,7 @@ impl Run<'_> {
                     let lossy = String::from_utf8_lossy(line);
                     let path = lossy.trim_end_matches('/');
                     if outside(path) {
-                        self.warnings.push(format!(
+                        self.notices.push(format!(
                             "package file {} has a name that isn't UTF-8 and is lost at every \
                              boot",
                             escape_unprintable(path)
@@ -102,7 +102,7 @@ impl Run<'_> {
                 paths.push(PackagePath::Symlink { path, target });
             } else {
                 // A regular file, or a symlink whose target tmpfiles can't write.
-                self.warnings.push(format!(
+                self.notices.push(format!(
                     "package file {} lives outside /usr and /etc and is lost at every boot",
                     escape_unprintable(&path)
                 ));
@@ -115,7 +115,7 @@ impl Run<'_> {
         etcfs::write(etc, PKGDIRS_CONF, &entry)
     }
 
-    /// The booted generation's `aios-pkgdirs.conf`, by path (apply only; none if absent).
+    /// The booted generation's `zz-aios-pkgdirs.conf`, by path (apply only; none if absent).
     fn previous_pkgdirs(&self) -> Result<BTreeMap<String, PackagePath>, ExecError> {
         let Mode::Apply { booted } = self.ctx.mode else {
             return Ok(BTreeMap::new());

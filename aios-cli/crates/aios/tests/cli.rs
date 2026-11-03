@@ -555,6 +555,40 @@ fn apply_builds_after_yes_or_with_dash_dash_yes() {
 }
 
 #[test]
+fn apply_prints_package_file_notices_before_the_summary_and_still_says_reboot() {
+    let m = Machine::new();
+    m.buildable("[]");
+    let cand = m.path("cand");
+    m.write("cand/opt/tool.conf", "x\n", 0o644);
+    let fake = fs::read_to_string(m.path("fake.json")).unwrap();
+    let listing = format!(
+        r#"{{"respond": [
+                    {{"argv": ["arch-chroot", "{}", "pacman", "-Qlq"], "stdout": "/opt/tool.conf\n"}},"#,
+        cand.display()
+    );
+    m.write(
+        "fake.json",
+        &fake.replacen("{\"respond\": [", &listing, 1),
+        0o644,
+    );
+    let out = m.aios(&["apply", "--yes"]);
+    let (stdout, stderr) = (text(&out.stdout), text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
+    assert!(
+        stderr.contains(
+            "\naios: note: package file /opt/tool.conf lives outside /usr and /etc and is lost \
+             at every boot\n"
+        ),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("aios: warning:"), "{stderr}");
+    assert!(
+        stdout.ends_with("reboot to activate gen-0002\n"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn apply_builds_gen_2_and_reports_post_commit_failures_as_warnings() {
     let m = Machine::new();
     m.buildable(r#"[["bootctl"]]"#);

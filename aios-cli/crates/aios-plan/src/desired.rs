@@ -18,7 +18,7 @@ pub const GENERATION_TOML: &str = "/etc/aios/generation.toml";
 /// renders it from the candidate's packages once they are installed (spec §4.3 step 5), so
 /// it is listed in [`MANAGED_FILES`] but never part of the desired state: `aios plan`
 /// can't know package contents, and never compares this file.
-pub const PKGDIRS_CONF: &str = "/etc/tmpfiles.d/aios-pkgdirs.conf";
+pub const PKGDIRS_CONF: &str = "/etc/tmpfiles.d/zz-aios-pkgdirs.conf";
 
 /// Everything the planner needs besides the probe.
 pub struct Inputs<'a> {

@@ -94,6 +94,7 @@ fn apply_cmd(cx: &Context, yes: bool, upgrade: bool) -> Result<(), Failure> {
         mode: Mode::Apply { booted },
         trusted_uid: cx.trusted_uid(),
     })?;
+    note(&outcome.notices);
     warn(&outcome.warnings);
     if outcome.warnings.is_empty() {
         println!("reboot to activate gen-{}", outcome.gen);
@@ -104,6 +105,13 @@ fn apply_cmd(cx: &Context, yes: bool, upgrade: bool) -> Result<(), Failure> {
         );
     }
     Ok(())
+}
+
+/// Notices of a build (spec §4.3 step 5): information, not problems.
+fn note(notices: &[String]) {
+    for notice in notices {
+        eprintln!("aios: note: {notice}");
+    }
 }
 
 /// Warnings of a build that succeeded (spec §4.3 step 5, §7).
@@ -224,6 +232,7 @@ fn bootstrap(
         mode: Mode::Bootstrap,
         trusted_uid: cx.trusted_uid(),
     })?;
+    note(&outcome.notices);
     warn(&outcome.warnings);
     println!("gen-{} built in {}", outcome.gen, target.display());
     Ok(())

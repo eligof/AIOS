@@ -572,8 +572,8 @@ fn persist_path_conflicting_with_aios_managed_paths_rejected() {
             "/etc/tmpfiles.d/aios-home.conf",
         ),
         (
-            "/etc/tmpfiles.d/aios-pkgdirs.conf",
-            "/etc/tmpfiles.d/aios-pkgdirs.conf",
+            "/etc/tmpfiles.d/zz-aios-pkgdirs.conf",
+            "/etc/tmpfiles.d/zz-aios-pkgdirs.conf",
         ),
         ("/etc/aios", "/etc/aios"),
         ("/etc/aios/home/eli", "/etc/aios"),

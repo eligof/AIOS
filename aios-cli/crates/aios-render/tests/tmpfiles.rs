@@ -180,7 +180,7 @@ fn dir(path: &str, mode: u32, uid: u32, gid: u32) -> PackagePath {
     }
 }
 
-/// `aios-pkgdirs.conf` (spec §4.3 step 5): a `d` line with the package's mode and numeric
+/// `zz-aios-pkgdirs.conf` (spec §4.3 step 5): a `d` line with the package's mode and numeric
 /// owner per directory, an `L` line per symlink, sorted by path and unique.
 #[test]
 fn pkgdirs_tmpfiles_recreates_directories_and_symlinks() {

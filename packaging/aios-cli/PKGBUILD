@@ -2,26 +2,48 @@
 # workspace by `make repo`.
 
 pkgname=aios-cli
-pkgver=0.1.0
+pkgver=0.1.0.r54.g99f3fda
 pkgrel=1
 pkgdesc="AIOS system manager: declarative manifest, generations, rollback"
 arch=(x86_64)
 license=(GPL-3.0-or-later)
 depends=(btrfs-progs arch-install-scripts mkinitcpio systemd-ukify sbctl git whois)
 makedepends=(cargo)
+# !lto: makepkg.conf's LTO flags target the C toolchain and clash with cargo's own release
+# profile. !debug: no separate -debug package and no debuginfo/strip pass, so no build
+# paths are embedded for it to carry around.
 options=(!lto !debug)
 
 _root="$(realpath "$startdir/../..")"
 
+# The version tracks the repo, so every rebuild is an upgrade for pacman. The static
+# pkgver above is only the makepkg fallback.
+pkgver() {
+  printf '0.1.0.r%s.g%s' \
+    "$(git -C "$_root" rev-list --count HEAD)" \
+    "$(git -C "$_root" rev-parse --short HEAD)"
+}
+
+prepare() {
+  [[ -d $_root/aios-cli ]] || { error "run from packaging/<pkg> inside the AIOS repo"; return 1; }
+  # Fetch crates now so build() can run offline (--frozen).
+  cd "$_root/aios-cli"
+  cargo fetch --locked
+}
+
 build() {
   cd "$_root/aios-cli"
-  # CachyOS's makepkg.conf targets the build host's CPU (-C target-cpu=native,
-  # -march=native). The package must run on any x86_64 machine.
-  export RUSTFLAGS="-C target-cpu=x86-64"
+  # RUSTFLAGS is deliberately replaced, not appended to: this drops CachyOS's
+  # makepkg.conf `-C target-cpu=native`, keeping the binary generic x86_64. The path
+  # remaps keep the build user's home and checkout location out of the binary; the
+  # more specific _root comes last because rustc lets the last matching mapping win.
+  export RUSTFLAGS="-C target-cpu=x86-64 -C opt-level=3 \
+--remap-path-prefix=$HOME=/home/builder \
+--remap-path-prefix=$_root=/build/aios"
   export CFLAGS="${CFLAGS//-march=native/-march=x86-64}"
   export CXXFLAGS="${CXXFLAGS//-march=native/-march=x86-64}"
   export CARGO_TARGET_DIR="$srcdir/target"
-  cargo build --release --locked -p aios
+  cargo build --release --frozen -p aios
 }
 
 package() {

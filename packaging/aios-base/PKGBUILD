@@ -2,7 +2,7 @@
 # are package-owned and immutable. Built from this repository by `make repo`.
 
 pkgname=aios-base
-pkgver=0.1.0
+pkgver=0.1.0.r54.g99f3fda
 pkgrel=1
 pkgdesc="AIOS base payload: hardening config, initrd hook, boot health check, default manifest"
 arch=(any)
@@ -10,6 +10,18 @@ license=(GPL-3.0-or-later)
 depends=(btrfs-progs systemd mkinitcpio)
 
 _root="$(realpath "$startdir/../..")"
+
+# The version tracks the repo, so every rebuild is an upgrade for pacman. The static
+# pkgver above is only the makepkg fallback.
+pkgver() {
+  printf '0.1.0.r%s.g%s' \
+    "$(git -C "$_root" rev-list --count HEAD)" \
+    "$(git -C "$_root" rev-parse --short HEAD)"
+}
+
+prepare() {
+  [[ -d $_root/aios-cli ]] || { error "run from packaging/<pkg> inside the AIOS repo"; return 1; }
+}
 
 package() {
   local lib="$pkgdir/usr/lib"

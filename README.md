@@ -32,3 +32,7 @@ make repo    # build aios-base and aios-cli into build/repo/ (local pacman repo)
   manifest under `/usr/share/aios/defaults/manifest/`
 
 `make repo` builds both into `build/repo/`, with the database `aios-local.db.tar.gz`.
+
+## License
+
+AIOS is licensed under the GNU General Public License v3.0 or later. See `LICENSE`.

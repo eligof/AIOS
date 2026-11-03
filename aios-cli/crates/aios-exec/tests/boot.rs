@@ -381,3 +381,37 @@ fn an_unreadable_boot_default_is_an_error() {
     assert_eq!(esp(&fx), before);
     assert!(!fx.calls().iter().any(|c| c.contains("delete")));
 }
+
+/// A `LoaderEntryDefault` that can be read but not decoded fails too: gc must not guess
+/// which entry the boot loader will pick. An empty name or one that isn't an aios UKI is
+/// no aios override.
+#[test]
+fn an_undecodable_boot_default_is_an_error() {
+    let fx = many_gens();
+    mkdir(&fx.layout.efivars);
+    let var = fx.layout.loader_entry_default();
+    for bytes in [
+        vec![7, 0, 0],
+        vec![7, 0, 0, 0, b'a'],
+        vec![7, 0, 0, 0, 0x00, 0xd8, 0, 0],
+    ] {
+        fs::write(&var, &bytes).unwrap();
+        let err = BootState::read(&fx.layout).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("{}: not a UTF-16 boot entry name", var.display()),
+            "{bytes:?}"
+        );
+        assert!(gc(&fx.runner, &fx.layout, 0).is_err());
+    }
+    for bytes in [
+        vec![7, 0, 0, 0],
+        vec![7, 0, 0, 0, 0, 0],
+        efivar("arch.conf"),
+    ] {
+        fs::write(&var, &bytes).unwrap();
+        let state = BootState::read(&fx.layout).unwrap();
+        assert_eq!(state.default_override, None, "{bytes:?}");
+    }
+    assert!(!fx.calls().iter().any(|c| c.contains("delete")));
+}

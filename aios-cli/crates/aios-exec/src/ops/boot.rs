@@ -17,7 +17,8 @@ pub struct BootState {
     /// `aios.gen=` of the running kernel.
     pub booted: Option<GenId>,
     /// The `bootctl set-default` override (`LoaderEntryDefault`), if it names an aios UKI.
-    /// A missing variable is no override; one that can't be read fails [`BootState::read`].
+    /// A missing or empty variable is no override, and neither is a name that isn't an aios
+    /// UKI; one that can't be read or decoded fails [`BootState::read`].
     pub default_override: Option<GenId>,
     /// Newest generation with a main-kernel UKI that isn't bad: what `loader.conf` picks.
     pub newest: Option<GenId>,
@@ -32,9 +33,17 @@ impl BootState {
             .and_then(|cmdline| gen_from_cmdline(&cmdline));
         let efivar = layout.loader_entry_default();
         let default_override = match fs::read(&efivar) {
-            Ok(bytes) => parse_efivar_utf16(&bytes)
-                .and_then(|entry| UkiName::parse(&entry))
-                .map(|uki| uki.gen),
+            Ok(bytes) => match parse_efivar_utf16(&bytes) {
+                Some(entry) => UkiName::parse(&entry).map(|uki| uki.gen),
+                // The attributes alone, or a name that ends at once: no override.
+                None if bytes.len() == 4 || bytes.get(4..6) == Some(&[0, 0]) => None,
+                None => {
+                    return Err(ExecError(format!(
+                        "{}: not a UTF-16 boot entry name",
+                        efivar.display()
+                    )))
+                }
+            },
             Err(e) if e.kind() == ErrorKind::NotFound => None,
             Err(e) => return Err(ExecError::io(&efivar, e)),
         };

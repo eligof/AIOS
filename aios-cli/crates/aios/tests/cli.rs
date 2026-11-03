@@ -551,10 +551,12 @@ fn apply_builds_gen_2_and_reports_post_commit_failures_as_warnings() {
     let stderr = text(&out.stderr);
     assert_eq!(out.status.code(), Some(0), "stderr: {stderr}");
     let rev_parse = format!(
-        "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 git -C {} \
+        "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 \
+         GIT_CEILING_DIRECTORIES={} git -C {} \
          --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
          -c core.attributesFile=/dev/null -c core.hooksPath=/dev/null \
          -c core.fsmonitor=false -c commit.gpgsign=false rev-parse --short HEAD\n",
+        m.dir.path().display(),
         m.path("config").display()
     );
     assert!(m.calls().contains(&rev_parse), "{}", m.calls());

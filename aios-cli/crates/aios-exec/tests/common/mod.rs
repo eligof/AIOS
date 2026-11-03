@@ -285,7 +285,8 @@ impl Fixture {
     /// `{top}`, `{cand}`, `{config}`, `{persist}`, `{log}`, `{home}`, `{esp}`, `{ro}`
     /// (where readers mount the top level) and `{run}` (the tempdir root) replaced by
     /// their paths; `{set}` by the package set. `{git}` stands for
-    /// `<GIT_ENV> git -C {config} <GIT_OPTIONS>`. One entry per non-empty line.
+    /// `<GIT_ENV> GIT_CEILING_DIRECTORIES=<parent of {config}> git -C {config} <GIT_OPTIONS>`.
+    /// One entry per non-empty line.
     pub fn expand(&self, text: &str) -> Vec<String> {
         let set = self.manifest.package_set().join(" ");
         text.lines()
@@ -299,7 +300,8 @@ impl Fixture {
     fn placeholders(&self) -> Vec<(&'static str, String)> {
         let l = &self.layout;
         let git = format!(
-            "{GIT_ENV} git -C {} {}",
+            "{GIT_ENV} GIT_CEILING_DIRECTORIES={} git -C {} {}",
+            l.config.parent().unwrap().display(),
             l.config.display(),
             GIT_OPTIONS.join(" ")
         );

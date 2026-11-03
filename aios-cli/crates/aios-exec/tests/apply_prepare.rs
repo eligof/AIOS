@@ -25,18 +25,21 @@ fn mounts_the_top_level_and_records_head_of_a_clean_repo() {
     assert_eq!(
         fx.runner.calls()[2],
         format!(
-            "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 git -C {} \
+            "GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_ATTR_NOSYSTEM=1 \
+             GIT_CEILING_DIRECTORIES={} git -C {} \
              --attr-source=4b825dc642cb6eb9a060e54bf8d69288fbee4904 \
              -c core.attributesFile=/dev/null -c core.hooksPath=/dev/null \
              -c core.fsmonitor=false -c commit.gpgsign=false status --porcelain",
+            fx.dir.path().display(),
             fx.layout.config.display()
         )
     );
 }
 
-/// No system or global config, no system attributes (env), no work tree or global
-/// attributes file (options): only the repo's root-owned `.git/config` and the `-c`
-/// options can name a filter, diff or merge driver. Every git call, the commit included.
+/// No system or global config, no system attributes, no repo found above the manifest
+/// repo (env), no work tree or global attributes file (options): only the repo's
+/// root-owned `.git/config` and the `-c` options can name a filter, diff or merge driver.
+/// Every git call, the commit included.
 #[test]
 fn every_git_call_ignores_outside_config_and_work_tree_attributes() {
     let mut fx = Fixture::booted();
@@ -45,10 +48,12 @@ fn every_git_call_ignores_outside_config_and_work_tree_attributes() {
         Output::ok(" M manifest.toml\n"),
     );
     fx.run().unwrap();
+    let ceiling = fx.dir.path().display().to_string();
     let env: Vec<(String, String)> = [
         ("GIT_CONFIG_NOSYSTEM", "1"),
         ("GIT_CONFIG_GLOBAL", "/dev/null"),
         ("GIT_ATTR_NOSYSTEM", "1"),
+        ("GIT_CEILING_DIRECTORIES", ceiling.as_str()),
     ]
     .iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))

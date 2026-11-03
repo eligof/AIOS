@@ -73,7 +73,7 @@ setup() {
 
     [ ! -e "$cfg/home/@USERNAME@" ]
     sources=$(sed -n 's/^"[^"]*" *= *"\(home\/[^"]*\)"$/\1/p' "$cfg/manifest.toml")
-    [ "$(wc -l <<<"$sources")" -eq 18 ]
+    [ "$(wc -l <<<"$sources")" -eq 19 ]
     while IFS= read -r src; do
         case $src in
             home/tester/*/) [ -d "$cfg/$src" ] || { echo "missing dir $src"; return 1; } ;;

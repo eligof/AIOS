@@ -1,0 +1,15 @@
+[package]
+name = "aios-plan"
+description = "Diff the AIOS manifest against the booted generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aios-manifest = { path = "../aios-manifest" }
+aios-render = { path = "../aios-render" }
+
+[dev-dependencies]
+aios-gen = { path = "../aios-gen" }
+tempfile.workspace = true

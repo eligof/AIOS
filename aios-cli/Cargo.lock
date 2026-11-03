@@ -20,6 +20,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aios-plan"
+version = "0.1.0"
+dependencies = [
+ "aios-gen",
+ "aios-manifest",
+ "aios-render",
+ "tempfile",
+]
+
+[[package]]
 name = "aios-render"
 version = "0.1.0"
 dependencies = [

@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/aios-manifest", "crates/aios-gen", "crates/aios-render"]
+members = [
+    "crates/aios-manifest",
+    "crates/aios-gen",
+    "crates/aios-render",
+    "crates/aios-plan",
+]
 
 [workspace.package]
 version = "0.1.0"

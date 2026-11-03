@@ -5,6 +5,10 @@
 
 mod cmdline;
 mod ctx;
+mod fstab;
+mod home;
 
 pub use cmdline::cmdline;
 pub use ctx::RenderCtx;
+pub use fstab::{fstab, fstab_escape};
+pub use home::{home_binds, HomeBind};

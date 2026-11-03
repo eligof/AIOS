@@ -65,7 +65,9 @@ rust-check:
 # The shipped binary reads no AIOS_* variable at all, so any AIOS_ string in it means an
 # override leaked into the release build. Only grep's "no match" (status 1) passes: a read
 # error (2) proves nothing. `make release-check` checks a binary already built.
-RELEASE_BIN ?= aios-cli/target/release/aios
+# cargo runs in aios-cli/, so a relative CARGO_TARGET_DIR is relative to it.
+CARGO_OUT = $(if $(CARGO_TARGET_DIR),$(if $(filter /%,$(CARGO_TARGET_DIR)),$(CARGO_TARGET_DIR),aios-cli/$(CARGO_TARGET_DIR)),aios-cli/target)
+RELEASE_BIN ?= $(CARGO_OUT)/release/aios
 define check-release-bin
 	test -s $(RELEASE_BIN)
 	grep -q AIOS_ $(RELEASE_BIN); rc=$$?; [ $$rc -eq 1 ] || { \
@@ -133,13 +135,17 @@ FORCE:
 
 # Local pacman repo with aios-base and aios-cli (spec §4.6). No root: makepkg -d skips
 # the dependency check, so the build host needs cargo but not the runtime depends.
+# makepkg rewrites pkgver= in the PKGBUILD it runs on (they have pkgver()), so it runs on
+# copies in build/pkgbuild/; AIOS_SRC_ROOT points the copies back at this checkout.
+PACKAGES := aios-base aios-cli
 repo:
-	rm -rf build/repo build/makepkg
+	rm -rf build/repo build/makepkg build/pkgbuild
 	mkdir -p build/repo build/makepkg
-	cd packaging/aios-base && PKGDEST=$(CURDIR)/build/repo BUILDDIR=$(CURDIR)/build/makepkg \
-		makepkg -f -d --noconfirm
-	cd packaging/aios-cli && PKGDEST=$(CURDIR)/build/repo BUILDDIR=$(CURDIR)/build/makepkg \
-		makepkg -f -d --noconfirm
+	for p in $(PACKAGES); do \
+		mkdir -p build/pkgbuild/$$p && cp packaging/$$p/PKGBUILD build/pkgbuild/$$p/ && \
+		(cd build/pkgbuild/$$p && AIOS_SRC_ROOT=$(CURDIR) PKGDEST=$(CURDIR)/build/repo \
+			BUILDDIR=$(CURDIR)/build/makepkg makepkg -f -d --noconfirm) || exit 1; \
+	done
 	repo-add build/repo/aios-local.db.tar.gz build/repo/*.pkg.tar.zst
 	if command -v namcap >/dev/null; then namcap build/repo/*.pkg.tar.zst; fi
 
@@ -147,8 +153,9 @@ repo:
 keys:
 	installer/gen-keys.sh installer/lib/keys.sh
 
-# The profile mkarchiso builds: iso/ plus pacman.conf, the installer and build/repo.
-iso-build: keys
+# The profile mkarchiso builds: iso/ plus pacman.conf, the installer and build/repo. repo is
+# rebuilt every time, so the ISO never ships packages older than the checkout.
+iso-build: keys repo
 	iso/build-profile.sh $(ISO_BUILD) build/repo installer/lib/keys.sh
 
 # Needs root: run `make iso` yourself (not `sudo make iso`); it asks sudo for the two root

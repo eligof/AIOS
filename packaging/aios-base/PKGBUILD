@@ -9,7 +9,9 @@ arch=(any)
 license=(GPL-3.0-or-later)
 depends=(btrfs-progs systemd mkinitcpio)
 
-_root="$(realpath "$startdir/../..")"
+# make repo builds in a copy under build/pkgbuild/ and passes the repository in AIOS_SRC_ROOT;
+# run in place, packaging/<pkg> is two levels below it.
+_root="${AIOS_SRC_ROOT:-$(realpath "$startdir/../..")}"
 
 # The version tracks the repo, so every rebuild is an upgrade for pacman. The static
 # pkgver above is only the makepkg fallback.

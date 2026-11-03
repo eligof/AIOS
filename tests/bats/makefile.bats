@@ -15,7 +15,7 @@ setup() {
 # mk ARGS...: make with the repo's Makefile in $W, the fakes first on PATH, and none of the
 # calling make's flags or variables (MAKEFLAGS carries command-line variables such as SUDO=).
 mk() {
-    env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u SUDO -u PYTHON PATH="$FAKES:$PATH" \
+    env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL -u SUDO -u PYTHON -u CARGO_TARGET_DIR PATH="$FAKES:$PATH" \
         make --no-print-directory -f "$ROOT/Makefile" -C "$W" "$@"
 }
 
@@ -162,4 +162,64 @@ EOF
     run mk release-check RELEASE_BIN=unreadable
     chmod 644 "$W/unreadable"
     [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+}
+
+# RELEASE_BIN follows CARGO_TARGET_DIR. A relative one is relative to aios-cli/, where cargo
+# runs; the checks run from the repo root.
+@test "RELEASE_BIN defaults to aios-cli/target and honours CARGO_TARGET_DIR, relative or absolute" {
+    mkdir -p "$W/aios-cli/target/release" "$W/aios-cli/rel/release" "$W/abs/release"
+    printf 'ELF\0clean\0' | tee "$W/aios-cli/rel/release/aios" "$W/abs/release/aios" >/dev/null
+    # The default binary leaks, so a wrong path fails the checks below.
+    printf 'ELF\0AIOS_TOP\0' >"$W/aios-cli/target/release/aios"
+    run mk release-check
+    [ "$status" -ne 0 ]
+    run mk release-check CARGO_TARGET_DIR=rel
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    run env CARGO_TARGET_DIR="$W/abs" make --no-print-directory -f "$ROOT/Makefile" -C "$W" release-check
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    printf 'ELF\0AIOS_TOP\0' >"$W/aios-cli/rel/release/aios"
+    run mk release-check CARGO_TARGET_DIR=rel
+    [ "$status" -ne 0 ]
+    printf 'ELF\0clean\0' >"$W/aios-cli/target/release/aios"
+    run mk release-check
+    [ "$status" -eq 0 ]
+}
+
+@test "make iso-build builds the repo first, so the ISO never ships stale packages" {
+    run mk -n iso-build
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    repo=$(grep -n 'makepkg' <<<"$output" | head -1 | cut -d: -f1)
+    prof=$(grep -n 'build-profile.sh' <<<"$output" | head -1 | cut -d: -f1)
+    [ -n "$repo" ] && [ -n "$prof" ] && [ "$repo" -lt "$prof" ]
+}
+
+# makepkg rewrites pkgver= in the PKGBUILD it runs on, so make repo runs it on copies.
+@test "make repo builds from copies of the PKGBUILDs and leaves the tracked ones alone" {
+    for p in aios-base aios-cli; do
+        mkdir -p "$W/packaging/$p"
+        printf 'pkgname=%s\npkgver=0.1.0\n' "$p" >"$W/packaging/$p/PKGBUILD"
+    done
+    cat >"$FAKES/makepkg" <<'MKPKG'
+#!/bin/sh
+echo "makepkg in $PWD root=$AIOS_SRC_ROOT dest=$PKGDEST" >>"$FAKE_LOG"
+sed -i 's/^pkgver=.*/pkgver=0.1.0.r99.gabc/' PKGBUILD
+echo pkg >"$PKGDEST/$(sed -n 's/^pkgname=//p' PKGBUILD)-1-any.pkg.tar.zst"
+MKPKG
+    chmod +x "$FAKES/makepkg"
+    fake repo-add
+    export FAKE_LOG=$LOG
+    before=$(cat "$W"/packaging/*/PKGBUILD)
+    run mk repo
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(cat "$W"/packaging/*/PKGBUILD)" = "$before" ]
+    [ "$(grep -c '^makepkg in' "$LOG")" -eq 2 ]
+    grep -q "makepkg in $W/build/pkgbuild/aios-base root=$W dest=$W/build/repo" "$LOG"
+    grep -q "makepkg in $W/build/pkgbuild/aios-cli root=$W dest=$W/build/repo" "$LOG"
+    grep -q 'pkgver=0.1.0.r99.gabc' "$W/build/pkgbuild/aios-cli/PKGBUILD"
+}
+
+@test "the PKGBUILDs take the source root from AIOS_SRC_ROOT" {
+    for p in aios-base aios-cli; do
+        grep -Fq '_root="${AIOS_SRC_ROOT:-$(realpath "$startdir/../..")}"' "$ROOT/packaging/$p/PKGBUILD"
+    done
 }

@@ -39,8 +39,10 @@ sudo pacman -S --needed archiso arch-install-scripts sbctl swtpm systemd-ukify p
 2. `make check` runs everything that needs no root and no VM: Rust fmt, clippy and tests,
    shellcheck, the bats suites, `systemd-analyze verify`, and the e2e harness unit tests.
 3. `make repo` builds `aios-cli` and `aios-base` into `build/repo/` (the local pacman repo
-   the ISO and the installed system use).
-4. `make iso` builds `out/aios-YYYY.MM.DD-x86_64.iso`. Run it as yourself, not as
+   the ISO and the installed system use). makepkg runs on copies of the PKGBUILDs in
+   `build/pkgbuild/`, so the tracked files are never rewritten.
+4. `make iso` first runs `make repo` (every time, so the ISO never ships packages older
+   than the checkout), then builds `out/aios-YYYY.MM.DD-x86_64.iso`. Run it as yourself, not as
    `sudo make iso`: it writes `iso-build/` without root, then runs
    `sudo mkarchiso -v -w build/iso-work -o out iso-build/`. For an unprivileged archiso build
    (needs `/etc/subuid` and `/etc/subgid` ranges for your user) use `make iso SUDO=`.

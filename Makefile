@@ -21,10 +21,17 @@ UNITS := initrd/aios-root.service initrd/sysroot-etc.mount base/aios-health.serv
 
 check: rust-check shell-check bats-check unit-check
 
+# The CLI tests need the `test-hooks` feature (AIOS_* overrides, AIOS_FAKE_RUNNER), hence
+# --all-features. The shipped configuration (no features) is linted too, and its release
+# binary must not contain the test hooks.
 rust-check:
 	cd aios-cli && $(CARGO) fmt --all -- --check
-	cd aios-cli && $(CARGO) clippy --workspace --all-targets -- -D warnings
-	cd aios-cli && $(CARGO) test --workspace
+	cd aios-cli && $(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+	cd aios-cli && $(CARGO) clippy --workspace -- -D warnings
+	cd aios-cli && $(CARGO) test --workspace --all-features
+	cd aios-cli && $(CARGO) build --release --locked -p aios
+	test -s aios-cli/target/release/aios
+	! grep -q AIOS_FAKE_RUNNER aios-cli/target/release/aios
 
 shell-check: tools
 	$(SHELLCHECK) -s sh $(SH_SCRIPTS)

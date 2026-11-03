@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 pub fn run(command: Command) -> Result<(), Failure> {
-    let cx = Context::from_env()?;
+    let cx = Context::new()?;
     cx.require_root()?;
     match command {
         Command::Plan => plan(&cx),
@@ -148,9 +148,8 @@ fn passwd(cx: &Context, user: &str) -> Result<(), Failure> {
 
 /// Prompt twice on the terminal. Under `AIOS_FAKE_RUNNER`, `AIOS_TEST_PASSWORD` instead.
 fn read_password(cx: &Context, user: &str) -> Result<String, Failure> {
-    if cx.fake {
-        return std::env::var("AIOS_TEST_PASSWORD")
-            .map_err(|_| Failure::op("aios: AIOS_TEST_PASSWORD is not set"));
+    if let Some(password) = cx.test_password() {
+        return password;
     }
     let prompt = |text: String| {
         rpassword::prompt_password(text)

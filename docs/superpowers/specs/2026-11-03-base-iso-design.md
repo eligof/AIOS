@@ -292,9 +292,13 @@ Each step aborts on failure. Abort deletes the candidate subvolumes and candidat
 | `aios-render` | Pure renderers: fstab, tmpfiles, cmdline, passwd/group/shadow/gshadow merge, loader.conf | Golden files under `tests/golden/` |
 | `aios-plan` | `SystemProbe` trait (booted gen, installed explicit packages, `/etc` file hashes, enabled units), observed state, `Plan` diff, human-readable rendering | Unit tests with a fake probe |
 | `aios-exec` | `CommandRunner` trait (real: `std::process::Command`; fake: records argv, returns scripted results) and the step sequences for apply, bootstrap, rollback, gc, secureboot, tpm | Golden argv-sequence tests, plus a failure injected at each step asserting the cleanup sequence |
-| `aios` (bin) | clap CLI, flock, logging, config of paths (overridable via env for tests: `AIOS_TOP`, `AIOS_ESP`, `AIOS_CONFIG`, `AIOS_SECRETS`, `AIOS_FAKE_RUNNER`) | CLI tests using the fake runner |
+| `aios` (bin) | clap CLI, flock, logging, config of paths. The paths are fixed in release builds | CLI tests using the fake runner (`test-hooks` builds) |
 
 All system interaction goes through `CommandRunner` and `SystemProbe`, so no unit test needs root.
+
+**Test overrides exist only in test builds.** The environment overrides the CLI tests use (`AIOS_TOP`, `AIOS_ESP`, `AIOS_CONFIG`, `AIOS_SECRETS` and the other `Layout` paths, `AIOS_ZONEINFO`, `AIOS_HARDENING_CMDLINE_FILE`, `AIOS_FAKE_RUNNER`, `AIOS_TEST_PASSWORD`) are read through a single function that only builds with the `test-hooks` cargo feature consult. The feature is off by default, so a shipped `aios` reads no `AIOS_*` variable and can't be pointed at a fake runner or another manifest repo. The CLI tests require the feature, and `make check` runs them with `--all-features`. It then builds the release binary (`cargo build --release --locked -p aios`) and fails if the string `AIOS_FAKE_RUNNER` is in it.
+
+`RealRunner` gives each child a clean environment (`PATH=/usr/bin`, `LC_ALL=C`, `TERM` passed through) and `/dev/null` as stdin, and captures stdout and stderr. A command marked interactive (`systemd-cryptenroll` for `aios tpm enroll`) inherits all three streams instead, so it can prompt.
 
 ### 4.6 AIOS packages
 
@@ -477,7 +481,7 @@ The Base ISO includes no desktop. The Cockpit sub-project picks the compositor. 
 | Packaging | `makepkg` in `make repo`, `namcap` if available | PKGBUILDs build |
 | E2E | `make e2e`: pytest harness in `tests/e2e/`, QEMU (`-enable-kvm -cpu host -m 4G`), OVMF `OVMF_CODE.secboot.4m.fd` + a copy of the vars, `swtpm` socket TPM 2.0, a 20 GiB qcow2 | Boots the ISO with the fw_cfg install config, drives the serial console via a unix socket: install → reboot → LUKS passphrase → log in as the test user → assertions (a)–(g) from §1. Needs `out/aios-*.iso` |
 
-`make check` = `cargo test` + `cargo clippy -D warnings` + shellcheck + bats + `systemd-analyze verify`. It needs no root and no VM.
+`make check` = `cargo test --all-features` + `cargo clippy -D warnings` (with and without features) + the release-binary check for test hooks (§4.5) + shellcheck + bats + `systemd-analyze verify`. It needs no root and no VM.
 
 ## 10. Repository layout
 

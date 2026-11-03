@@ -1,48 +1,87 @@
 use crate::failure::Failure;
 use crate::lock::{self, Lock};
 use aios_exec::{
-    check_trusted_dirs, luks_uuid_from_cmdline, run_ok, Cmd, CommandRunner, FakeRunner, Layout,
-    MachineFacts, RealRunner, Step, StepError,
+    check_trusted_dirs, luks_uuid_from_cmdline, run_ok, Cmd, CommandRunner, Layout, MachineFacts,
+    RealRunner, Step, StepError,
 };
 use aios_gen::{gen_from_cmdline, GenId};
 use aios_manifest::{load, Manifest, ValidationEnv};
-use std::env;
+use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-/// Paths, the command runner and environment overrides for one `aios` invocation.
+/// The test override named `name` (an `AIOS_*` environment variable). Only builds with the
+/// `test-hooks` feature, which the CLI tests require, read it: a release build has no
+/// overrides at all. Every `AIOS_*` lookup goes through here.
+#[cfg(feature = "test-hooks")]
+fn hook(name: &str) -> Option<OsString> {
+    std::env::var_os(name)
+}
+
+/// Release builds: no overrides.
+#[cfg(not(feature = "test-hooks"))]
+#[inline(always)]
+fn hook(_name: &str) -> Option<OsString> {
+    None
+}
+
+fn hook_path(name: &str, default: &str) -> PathBuf {
+    hook(name).map_or_else(|| default.into(), PathBuf::from)
+}
+
+/// The scripted runner `AIOS_FAKE_RUNNER` names, if any.
+fn fake_runner() -> Result<Option<Box<dyn CommandRunner>>, Failure> {
+    #[cfg(feature = "test-hooks")]
+    if let Some(script) = hook("AIOS_FAKE_RUNNER") {
+        let fake = aios_exec::FakeRunner::from_json_file(script.as_ref())?;
+        return Ok(Some(Box::new(fake)));
+    }
+    Ok(None)
+}
+
+/// Paths, the command runner and test overrides for one `aios` invocation.
 pub struct Context {
     pub layout: Layout,
     runner: Box<dyn CommandRunner>,
-    /// `AIOS_FAKE_RUNNER` is set (tests): no root check, commands are scripted, the
-    /// manifest repo must belong to the caller instead of root, and `aios passwd` reads
-    /// `AIOS_TEST_PASSWORD`.
+    /// `AIOS_FAKE_RUNNER` is set (test builds only): no root check, commands are scripted,
+    /// the manifest repo must belong to the caller instead of root, and `aios passwd`
+    /// reads `AIOS_TEST_PASSWORD`.
     pub fake: bool,
     zoneinfo: PathBuf,
     hardening_file: PathBuf,
 }
 
-fn env_path(name: &str, default: &str) -> PathBuf {
-    env::var_os(name).map_or_else(|| default.into(), PathBuf::from)
-}
-
 impl Context {
-    pub fn from_env() -> Result<Context, Failure> {
-        let script = env::var_os("AIOS_FAKE_RUNNER");
-        let runner: Box<dyn CommandRunner> = match &script {
-            Some(path) => Box::new(FakeRunner::from_json_file(Path::new(path))?),
-            None => Box::new(RealRunner),
-        };
+    /// The production context; in a `test-hooks` build, with any `AIOS_*` override.
+    pub fn new() -> Result<Context, Failure> {
+        let fake = fake_runner()?;
         Ok(Context {
-            layout: Layout::from_env(),
-            runner,
-            fake: script.is_some(),
-            zoneinfo: env_path("AIOS_ZONEINFO", "/usr/share/zoneinfo"),
-            hardening_file: env_path(
+            layout: Layout::from_vars(hook),
+            fake: fake.is_some(),
+            runner: fake.unwrap_or_else(|| Box::new(RealRunner)),
+            zoneinfo: hook_path("AIOS_ZONEINFO", "/usr/share/zoneinfo"),
+            hardening_file: hook_path(
                 "AIOS_HARDENING_CMDLINE_FILE",
                 "/usr/lib/aios/cmdline-hardening",
             ),
         })
+    }
+
+    /// Under `AIOS_FAKE_RUNNER`, `aios passwd` takes `AIOS_TEST_PASSWORD` instead of
+    /// prompting. `None`: prompt.
+    #[cfg(feature = "test-hooks")]
+    pub fn test_password(&self) -> Option<Result<String, Failure>> {
+        self.fake.then(|| {
+            hook("AIOS_TEST_PASSWORD")
+                .and_then(|password| password.into_string().ok())
+                .ok_or_else(|| Failure::op("aios: AIOS_TEST_PASSWORD is not set"))
+        })
+    }
+
+    /// Release builds always prompt.
+    #[cfg(not(feature = "test-hooks"))]
+    pub fn test_password(&self) -> Option<Result<String, Failure>> {
+        None
     }
 
     pub fn runner(&self) -> &dyn CommandRunner {
@@ -139,5 +178,16 @@ impl Context {
             .ok_or_else(|| {
                 Failure::op(format!("aios: findmnt shows no UUID for {}", esp.display()))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hook;
+
+    /// PATH is always set, but only a `test-hooks` build may see it through `hook`.
+    #[test]
+    fn hooks_read_the_environment_only_in_test_hook_builds() {
+        assert_eq!(hook("PATH").is_some(), cfg!(feature = "test-hooks"));
     }
 }

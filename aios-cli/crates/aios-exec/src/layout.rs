@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 /// GUID of the systemd-boot loader interface EFI variables.
 const LOADER_GUID: &str = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f";
 
-/// Every path aios reads or writes. `from_env` lets tests point all of them at a tempdir.
+/// Every path aios reads or writes. `from_vars` reads an override for each one; the `aios`
+/// binary passes its test hook, which only builds with the `test-hooks` feature consult, so
+/// tests can point all of them at a tempdir while release builds use the defaults.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
     /// btrfs top level (`subvolid=5`) mount point. `AIOS_TOP`, default `/run/aios/top`.
@@ -36,12 +38,8 @@ pub struct Layout {
 }
 
 impl Layout {
-    /// The production layout, with any `AIOS_*` override from the environment.
-    pub fn from_env() -> Layout {
-        Layout::from_vars(|name| std::env::var_os(name))
-    }
-
-    /// Like `from_env`, reading variables through `var`.
+    /// The layout with each path overridden by `var(<its AIOS_* name>)` when that is
+    /// `Some`. `Layout::from_vars(|_| None)` is the production layout.
     pub fn from_vars(var: impl Fn(&str) -> Option<OsString>) -> Layout {
         let path = |name: &str, default: &str| var(name).map_or_else(|| default.into(), Into::into);
         Layout {

@@ -1,11 +1,12 @@
 use crate::ExecError;
-use serde::Deserialize;
 use std::cell::RefCell;
 use std::fmt;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{ErrorKind, Write};
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(feature = "test-hooks")]
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 /// One command line. `stdin`, when set, is written to the child's standard input. It is
@@ -288,12 +289,14 @@ impl CommandRunner for RealRunner {
 pub struct FakeRunner {
     calls: RefCell<Vec<Cmd>>,
     script: Vec<(Vec<String>, Output)>,
+    #[cfg(feature = "test-hooks")]
     call_log: Option<PathBuf>,
     emulate_subvolumes: bool,
 }
 
 /// `AIOS_FAKE_RUNNER` file format.
-#[derive(Deserialize)]
+#[cfg(feature = "test-hooks")]
+#[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Script {
     #[serde(default)]
@@ -302,7 +305,8 @@ struct Script {
     fail_on: Vec<Vec<String>>,
 }
 
-#[derive(Deserialize)]
+#[cfg(feature = "test-hooks")]
+#[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Scripted {
     argv: Vec<String>,
@@ -351,7 +355,10 @@ impl FakeRunner {
     }
 
     /// Load a script (`{"respond": [{"argv": [..], "status": 0, "stdout": "", "stderr": ""}],
-    /// "fail_on": [[..]]}`) and append each call to `<path>.calls`, one line per call.
+    /// "fail_on": [[..]]}`) and append each call to `<path>.calls`, one line per call
+    /// (never through a symlink). Only with the `test-hooks` feature: the `aios` CLI tests
+    /// drive the binary with it.
+    #[cfg(feature = "test-hooks")]
     pub fn from_json_file(path: &Path) -> Result<FakeRunner, ExecError> {
         let text = fs::read_to_string(path).map_err(|e| ExecError::io(path, e))?;
         let script: Script = serde_json::from_str(&text).map_err(|e| ExecError::io(path, e))?;
@@ -394,10 +401,13 @@ impl FakeRunner {
 impl CommandRunner for FakeRunner {
     fn run(&self, cmd: &Cmd) -> Result<Output, ExecError> {
         self.calls.borrow_mut().push(cmd.clone());
+        #[cfg(feature = "test-hooks")]
         if let Some(log) = &self.call_log {
-            let mut file = OpenOptions::new()
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = fs::OpenOptions::new()
                 .create(true)
                 .append(true)
+                .custom_flags(crate::sys::O_NOFOLLOW)
                 .open(log)
                 .map_err(|e| ExecError::io(log, e))?;
             writeln!(file, "{cmd}").map_err(|e| ExecError::io(log, e))?;

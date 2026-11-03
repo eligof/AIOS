@@ -89,6 +89,7 @@ fn run_ok_keeps_the_last_three_stderr_lines() {
     );
 }
 
+#[cfg(feature = "test-hooks")]
 #[test]
 fn json_script_answers_and_logs_every_call() {
     let dir = tempfile::tempdir().unwrap();
@@ -114,6 +115,7 @@ fn json_script_answers_and_logs_every_call() {
     );
 }
 
+#[cfg(feature = "test-hooks")]
 #[test]
 fn json_script_rejects_unknown_keys() {
     let dir = tempfile::tempdir().unwrap();
@@ -124,6 +126,21 @@ fn json_script_rejects_unknown_keys() {
         err.to_string().contains("unknown field `responses`"),
         "got {err}"
     );
+}
+
+#[cfg(feature = "test-hooks")]
+#[test]
+fn the_call_log_never_follows_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("fake.json");
+    fs::write(&script, "{}").unwrap();
+    let victim = dir.path().join("victim");
+    fs::write(&victim, "precious\n").unwrap();
+    std::os::unix::fs::symlink(&victim, dir.path().join("fake.json.calls")).unwrap();
+    let fake = FakeRunner::from_json_file(&script).unwrap();
+    let err = fake.run(&Cmd::new("sync")).unwrap_err();
+    assert!(err.to_string().contains("fake.json.calls: "), "{err}");
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n");
 }
 
 #[test]

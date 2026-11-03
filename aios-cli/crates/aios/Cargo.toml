@@ -10,6 +10,16 @@ publish.workspace = true
 name = "aios"
 path = "src/main.rs"
 
+[[test]]
+name = "cli"
+path = "tests/cli.rs"
+required-features = ["test-hooks"]
+
+[features]
+# The AIOS_* overrides (paths, AIOS_FAKE_RUNNER, AIOS_TEST_PASSWORD) the CLI tests use.
+# Off by default: a release build reads no AIOS_* variable.
+test-hooks = ["aios-exec/test-hooks"]
+
 [dependencies]
 aios-exec = { path = "../aios-exec" }
 aios-gen = { path = "../aios-gen" }

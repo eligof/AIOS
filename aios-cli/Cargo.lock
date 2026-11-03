@@ -23,6 +23,7 @@ dependencies = [
  "aios-manifest",
  "aios-plan",
  "aios-render",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "sha2",

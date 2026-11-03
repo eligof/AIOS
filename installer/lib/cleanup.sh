@@ -15,6 +15,8 @@ AIOS_MOUNTS=()
 AIOS_LUKS_OPEN=0
 # 1 once step 3 starts changing the disk; before that a failure changed nothing on it.
 AIOS_DISK_CHANGED=0
+# 1 once step 13 has unmounted the finished install; a failure after that leaves AIOS installed.
+AIOS_INSTALLED=0
 AIOS_LUKS_DEV=/dev/mapper/aios
 
 # mount_tracked MOUNT-ARGS... TARGET: remember TARGET (the last argument), then mount.
@@ -76,16 +78,19 @@ cleanup() {
 }
 
 # on_exit: the EXIT trap. On failure: name the step, clean up, keep the exit status. It runs
-# without errexit and ignores further interrupts, so nothing stops the cleanup half way.
+# without errexit and ignores further interrupts and SIGPIPE (stderr may be a dead pipe), so
+# nothing stops the cleanup half way.
 on_exit() {
     local rc=$?
     set +e
-    trap '' INT TERM
+    trap '' INT TERM PIPE
     trap - EXIT
     if ((rc != 0)); then
         log "step $AIOS_STEP ($AIOS_STEP_NAME) failed (exit $rc)"
         cleanup
-        if ((AIOS_DISK_CHANGED)); then
+        if ((AIOS_INSTALLED)); then
+            log "AIOS is installed on the disk; only the end of step 13 failed: reboot by hand"
+        elif ((AIOS_DISK_CHANGED)); then
             log "the disk is left in an undefined state: fix the problem and run aios-install again"
         else
             log "nothing on the disk was changed: fix the problem and run aios-install again"

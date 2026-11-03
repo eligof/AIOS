@@ -22,16 +22,18 @@ part_path() {
 }
 
 # live_medium_disks: the whole disks below the live system's boot medium, one per line. The
-# device stack is walked down (lsblk -s), so a partition, or a device-mapper target such as
-# Ventoy's, leads to its disk. Prints the medium itself when no disk is below it (a CD-ROM),
-# and nothing when there is no medium device (copytoram, PXE).
+# device stack of each source (more than one if mounts are stacked) is walked down (lsblk -s),
+# so a partition, or a device-mapper target such as Ventoy's, leads to its disk. Prints a
+# source itself when no disk is below it (a CD-ROM), and nothing when there is no medium
+# device (copytoram, PXE).
 live_medium_disks() {
     local src disks
-    src=$(findmnt -nro SOURCE "${AIOS_LIVE_MNT:-/run/archiso/bootmnt}") || return 0
-    [[ -n $src ]] || return 0
-    disks=$(lsblk -nrso NAME,TYPE "$src" 2>/dev/null | awk '$2 == "disk" { print "/dev/" $1 }') ||
-        disks=""
-    printf '%s\n' "${disks:-$src}"
+    while IFS= read -r src; do
+        [[ -n $src ]] || continue
+        disks=$(lsblk -nrso NAME,TYPE "$src" 2>/dev/null | awk '$2 == "disk" { print "/dev/" $1 }') ||
+            disks=""
+        printf '%s\n' "${disks:-$src}"
+    done < <(findmnt -nro SOURCE "${AIOS_LIVE_MNT:-/run/archiso/bootmnt}" 2>/dev/null || true)
 }
 
 # disk_holder DISK: a device that sits on DISK or one of its partitions (LVM, MD RAID,
@@ -92,7 +94,10 @@ validate_disk() {
         log "error: $disk is read-only"
         return 1
     fi
-    mounts=$(lsblk -nro MOUNTPOINTS "$disk")
+    if ! mounts=$(lsblk -nro MOUNTPOINTS "$disk"); then
+        log "error: cannot list the mount points on $disk"
+        return 1
+    fi
     if [[ -n ${mounts//[[:space:]]/} ]]; then
         log "error: $disk has mounted filesystems: $(printf '%s' "$mounts" | tr -s '\n' ' ')"
         return 1
@@ -134,6 +139,21 @@ disk_unchanged() {
         log "error: $1: disk changed since validation (diskseq $2, now $now)"
         return 1
     fi
+}
+
+# reread_partitions DISK: make the kernel re-read DISK's partition table. Right after sgdisk,
+# udev may still have a new partition open (blkid), and the re-read fails with EBUSY for a
+# moment, so it is tried up to five times, a second and a `udevadm settle` apart.
+reread_partitions() {
+    local try
+    for try in 1 2 3 4 5; do
+        run_cmd blockdev --rereadpt "$1" && return 0
+        ((try < 5)) || break
+        log "the partition table of $1 is busy; trying again"
+        dry_run || sleep 1
+        run_cmd udevadm settle || true
+    done
+    return 1
 }
 
 # check_partitions DISK: after partitioning, DISK has exactly its partitions 1 and 2.

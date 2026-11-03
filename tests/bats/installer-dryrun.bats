@@ -64,7 +64,7 @@ EOF
         ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$T/bin/$n"
     done
     for n in wipefs sgdisk blockdev udevadm mkfs.fat cryptsetup systemd-cryptenroll mkfs.btrfs btrfs \
-        mount umount git aios bootctl install cp mv chown chmod; do
+        mount umount git aios bootctl install cp mv chown chmod systemctl; do
         ln -s "$BATS_TEST_DIRNAME/fakes/record" "$T/bin/$n"
     done
     PATH="$T/bin:$PATH"
@@ -117,8 +117,10 @@ golden() {
 wipefs -a $disk
 sgdisk --zap-all $disk
 sgdisk -n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309 $disk
+udevadm settle
 blockdev --rereadpt $disk
 udevadm settle
+wipefs -a $p1 $p2
 mkfs.fat -F32 -n EFI $p1
 cryptsetup luksFormat --type luks2 --pbkdf argon2id --batch-mode --key-file - $p2 <secret
 cryptsetup open --key-file - $p2 aios <secret
@@ -372,6 +374,7 @@ EOF
 
     [ "$status" -eq 1 ]
     [ "$(tail -n 1 <<<"$DRY")" = "blockdev --rereadpt /dev/vda" ]
+    [ "$(grep -c '^blockdev --rereadpt /dev/vda$' <<<"$DRY")" -eq 5 ]
     [[ "$LOG" == *"the kernel did not re-read the new partition table of /dev/vda"* ]]
 }
 
@@ -462,6 +465,44 @@ EOF
     [[ "$LOG" == *"EXTRA_CMDLINE word 'x=@USERNAME@' may only hold"* ]]
 }
 
+@test "a manifest template or pacman.conf the installer cannot use is found in preflight" {
+    export AIOS_DEFAULTS="$T/defaults"
+    command -p cp -r "$ROOT/manifest" "$AIOS_DEFAULTS"
+    echo '# @ROOTPW@' >>"$AIOS_DEFAULTS/manifest.toml"
+    install_dry --config "$T/install.conf"
+    [ "$status" -eq 1 ]
+    [ -z "$DRY" ]
+    [[ "$LOG" == *"unknown placeholder @ROOTPW@"* ]]
+
+    command -p cp "$ROOT/manifest/manifest.toml" "$AIOS_DEFAULTS/manifest.toml"
+    echo '# BEGIN v3' >>"$AIOS_DEFAULTS/files/pacman.conf"
+    printf '#!/bin/sh\necho "  x86-64-v3"\n' >"$T/ld.so"
+    install_dry --config "$T/install.conf"
+    [ "$status" -eq 1 ]
+    [ -z "$DRY" ]
+    [[ "$LOG" == *"# BEGIN v3 is never closed"* ]]
+
+    command -p cp "$ROOT/manifest/files/pacman.conf" "$AIOS_DEFAULTS/files/pacman.conf"
+    command -p mv "$AIOS_DEFAULTS/home/@USERNAME@" "$AIOS_DEFAULTS/home/eli"
+    install_dry --config "$T/install.conf"
+    [ "$status" -eq 1 ]
+    [ -z "$DRY" ]
+    [[ "$LOG" == *"no home/@USERNAME@ template in $AIOS_DEFAULTS"* ]]
+}
+
+@test "a failure once AIOS is installed does not call the disk broken" {
+    export AIOS_INSTALL_DRYRUN_FAILS="$T/fails"
+    echo "systemctl reboot" >"$AIOS_INSTALL_DRYRUN_FAILS"
+    mkdir -p "$AIOS_FWCFG_DIR/by_name/opt/aios/install.conf"
+    cat "$T/install.conf" >"$AIOS_FWCFG_DIR/by_name/opt/aios/install.conf/raw"
+
+    install_dry --auto
+
+    [ "$status" -eq 1 ]
+    [[ "$LOG" == *"AIOS is installed on the disk; only the end of step 13 failed: reboot by hand"* ]]
+    [[ "$LOG" != *"undefined state"* ]]
+}
+
 @test "the passwords are forgotten as soon as they have been used" {
     # A probe: at the start of each step, save what the installer still holds.
     export PROBE="$T/probe"
@@ -477,6 +518,7 @@ EOF
 
     [ "$status" -eq 0 ]
     # The user password is hashed in preflight, then dropped.
+    [ -s "$PROBE.2" ] && [ -s "$PROBE.5" ]
     run ! grep -q -e USER_PASSWORD -e e2e-user-pass "$PROBE.2"
     grep -qF 'PASSWD_HASH="\$y\$j9T\$fakesalt' "$PROBE.2"
     # The LUKS passphrase is gone once step 4 used it.

@@ -186,9 +186,16 @@ main() {
     fi
     check_cachyos_keys "${AIOS_CACHYOS_KEYS:-}" || die "untrusted package keyring"
     [[ -f $DEFAULTS/manifest.toml ]] || die "no default manifest in $DEFAULTS (aios-base)"
+    [[ -d $DEFAULTS/home/@USERNAME@ ]] || die "no home/@USERNAME@ template in $DEFAULTS"
+    MANIFEST_TEXT=$(render_manifest "${CFG[HOSTNAME]}" "${CFG[USERNAME]}" "${CFG[TIMEZONE]}" \
+        "${CFG[EXTRA_CMDLINE]}" <"$DEFAULTS/manifest.toml") || die "unusable manifest template"
+    if ((!V3)); then
+        PACMAN_TEXT=$(strip_v3 <"$DEFAULTS/files/pacman.conf") || die "unusable pacman.conf"
+    fi
     [[ -f $LIVE_REPO/aios-local.db.tar.gz ]] || die "no local package repo in $LIVE_REPO"
-    # Whatever can fail without touching the disk fails here: the password hash and the USB
-    # policy are made now and written in steps 6 and 12. The password is not needed again.
+    # Whatever can fail without touching the disk fails here: the manifest (above), the password
+    # hash and the USB policy are made now and written in steps 6 and 12. The password is not
+    # needed again.
     PASSWD_HASH=$(hash_password "${CFG[USER_PASSWORD]}") ||
         die "cannot hash the password of ${CFG[USERNAME]}"
     unset 'CFG[USER_PASSWORD]'
@@ -214,11 +221,15 @@ main() {
     run_cmd wipefs -a "$DISK"
     run_cmd sgdisk --zap-all "$DISK"
     run_cmd sgdisk -n1:0:+2G -t1:EF00 -n2:0:0 -t2:8309 "$DISK"
-    run_cmd blockdev --rereadpt "$DISK" ||
+    run_cmd udevadm settle
+    reread_partitions "$DISK" ||
         die "the kernel did not re-read the new partition table of $DISK (is something still using it?)"
     run_cmd udevadm settle
     # Dry-run mode made no partitions to check.
     dry_run || check_partitions "$DISK" || die "unexpected partition table on $DISK"
+    # The new partitions may start where old ones did: clear any old signature (a LUKS header,
+    # a btrfs superblock) inside them, so blkid sees only what is made next.
+    run_cmd wipefs -a "$ESP_PART" "$ROOT_PART"
     run_cmd mkfs.fat -F32 -n EFI "$ESP_PART"
 
     step 4 encrypt
@@ -254,18 +265,15 @@ main() {
     done
 
     step 6 manifest
-    local config_dir=$TOP/@persist/aios/config secrets=$TOP/@persist/aios/secrets text
+    local config_dir=$TOP/@persist/aios/config secrets=$TOP/@persist/aios/secrets
     run_cmd install -d -m 0755 "$TOP/@persist/aios"
     run_cmd cp -a "$DEFAULTS" "$config_dir"
     run_cmd chown -R 0:0 "$config_dir"
     run_cmd chmod -R u=rwX,go=rX "$config_dir"
     rename_home_template "$config_dir" "${CFG[USERNAME]}"
-    text=$(render_manifest "${CFG[HOSTNAME]}" "${CFG[USERNAME]}" "${CFG[TIMEZONE]}" \
-        "${CFG[EXTRA_CMDLINE]}" <"$DEFAULTS/manifest.toml")
-    printf '%s\n' "$text" | run_write "$config_dir/manifest.toml" 0644
+    printf '%s\n' "$MANIFEST_TEXT" | run_write "$config_dir/manifest.toml" 0644
     if ((!V3)); then
-        text=$(strip_v3 <"$DEFAULTS/files/pacman.conf")
-        printf '%s\n' "$text" | run_write "$config_dir/files/pacman.conf" 0644
+        printf '%s\n' "$PACMAN_TEXT" | run_write "$config_dir/files/pacman.conf" 0644
     fi
     run_cmd git -C "$config_dir" init -q -b main
     run_cmd git -C "$config_dir" add -A
@@ -315,6 +323,7 @@ main() {
 
     step 13 finish
     cleanup
+    AIOS_INSTALLED=1
     summary
     [[ -z $config_file ]] || log "delete $config_file now: it holds the passwords in clear text"
     if ((auto)); then

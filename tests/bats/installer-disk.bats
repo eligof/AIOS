@@ -19,6 +19,7 @@ setup() {
     ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$BIN/lsblk"
     ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$BIN/findmnt"
     ln -s "$BATS_TEST_DIRNAME/fakes/installer" "$BIN/curl"
+    ln -s "$BATS_TEST_DIRNAME/fakes/record" "$BIN/udevadm"
     PATH="$BIN:$PATH"
     export FAKE_SYS="$BATS_TEST_TMPDIR/sys" CALLS="$BATS_TEST_TMPDIR/calls"
     export AIOS_SYS_BLOCK="$BATS_TEST_TMPDIR/sysfs"
@@ -148,6 +149,26 @@ ldso() {
     [ "$status" -eq 0 ]
 }
 
+@test "a live medium mounted twice is traced from every source" {
+    blk sdb disk $((32 * GIB)) 0 ""
+    part sdb sdb1
+    printf '%s\n' /dev/sr0 /dev/sdb1 >"$FAKE_SYS/mnt/run/archiso/bootmnt"
+
+    run validate_disk /dev/sdb
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"/dev/sdb holds the live medium"* ]]
+}
+
+@test "a disk whose mount points cannot be listed is refused" {
+    rm "$FAKE_SYS/blk/vda/MOUNTPOINTS"
+
+    run validate_disk /dev/vda
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"error: cannot list the mount points on /dev/vda"* ]]
+}
+
 @test "a disk with mounted filesystems is refused" {
     blk vdb disk $((20 * GIB)) 0 "$(printf '\n/mnt/data\n')"
 
@@ -241,6 +262,25 @@ ldso() {
     run disk_unchanged /dev/vda 9
     [ "$status" -eq 1 ]
     [[ "$output" == *"disk changed since validation (diskseq 9, now none)"* ]]
+}
+
+@test "a busy partition table re-read (udev still probing) is retried" {
+    # This blockdev fails once, like BLKRRPART while udev's blkid has a partition open.
+    printf '#!/bin/sh\necho "blockdev $*" >>"$CALLS"\n[ -e "%s" ] && exit 0\n: >"%s"\nexit 1\n' \
+        "$BATS_TEST_TMPDIR/tried" "$BATS_TEST_TMPDIR/tried" >"$BIN/blockdev"
+    chmod +x "$BIN/blockdev"
+
+    run reread_partitions /dev/vda
+
+    [ "$status" -eq 0 ]
+    [ "$(paste -sd'|' "$CALLS")" = "blockdev --rereadpt /dev/vda|udevadm settle|blockdev --rereadpt /dev/vda" ]
+
+    # It gives up after five tries.
+    export AIOS_INSTALL_DRYRUN=1 AIOS_INSTALL_DRYRUN_FAILS="$BATS_TEST_TMPDIR/fails"
+    echo "blockdev --rereadpt /dev/vda" >"$AIOS_INSTALL_DRYRUN_FAILS"
+    run reread_partitions /dev/vda
+    [ "$status" -eq 1 ]
+    [ "$(grep -c '^DRYRUN blockdev --rereadpt /dev/vda$' <<<"$output")" -eq 5 ]
 }
 
 @test "after partitioning the disk must have exactly the two new partitions" {

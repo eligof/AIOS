@@ -125,8 +125,9 @@ key() {
     mount_tracked -o umask=0077 /dev/vda1 /efi 2>/dev/null
     mount_tracked --bind /mnt/aios-top/@persist/var/lib/sbctl /var/lib/sbctl 2>/dev/null
     mapping_open
-    mounted /var/lib/sbctl /efi /mnt/aios-top /mnt/aios-top/@home /run/x '/mnt/a b' /mnt/aios-top/@home/u/v
-    on_mapping /mnt/aios-top/@home /run/x '/mnt/a\x20b' /mnt/gone /mnt/aios-top/@home/u/v
+    mounted /var/lib/sbctl /efi /mnt/aios-top /mnt/aios-top/@home /run/x '/mnt/a b' /mnt/aios-top/@home/u/v \
+        '/mnt/back\slash'
+    on_mapping /mnt/aios-top/@home /run/x '/mnt/a\x20b' /mnt/gone /mnt/aios-top/@home/u/v '/mnt/back\x5cslash'
     : >"$CALLS"
 
     cleanup 2>/dev/null
@@ -141,6 +142,7 @@ umount -R /mnt/aios-top/@home/u/v
 umount -R /mnt/aios-top/@home
 umount -R /run/x
 umount -R /mnt/a b
+umount -R /mnt/back\slash
 cryptsetup close aios
 EOF
 }
@@ -231,6 +233,40 @@ EOF
         [ "$(grep -v '^mountpoint ' "$CALLS" | paste -sd'|')" = "cryptsetup open --key-file - /dev/vda2 aios|mount /dev/vda1 /efi|umount -R /efi|findmnt -rno TARGET -S /dev/mapper/aios|cryptsetup close aios" ] ||
             { echo "$redirect:"; cat "$CALLS"; return 1; }
     done
+}
+
+@test "the exit trap still cleans up when stderr is a pipe nobody reads any more" {
+    mounted /efi
+    mapping_open
+
+    run bash -c '
+        for f in common cleanup; do . "$1/$f.sh"; done
+        set -euo pipefail
+        trap on_exit EXIT
+        luks_open_tracked secret /dev/vda2
+        mount_tracked /dev/vda1 /efi
+        exec 2> >(:)
+        wait $!
+        exit 3
+    ' _ "$LIB"
+
+    [ "$status" -eq 3 ]
+    [ "$(grep -e '^umount ' -e '^cryptsetup close' "$CALLS" | paste -sd'|')" = "umount -R /efi|cryptsetup close aios" ]
+}
+
+@test "after a finished install, a failure says AIOS is installed" {
+    run bash -c '
+        for f in common cleanup; do . "$1/$f.sh"; done
+        trap on_exit EXIT
+        AIOS_DISK_CHANGED=1
+        step 13 finish
+        AIOS_INSTALLED=1
+        exit 1
+    ' _ "$LIB"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"AIOS is installed on the disk; only the end of step 13 failed: reboot by hand"* ]]
+    [[ "$output" != *"undefined state"* ]]
 }
 
 @test "a second interrupt does not stop the cleanup" {

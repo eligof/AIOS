@@ -337,6 +337,7 @@ All system interaction goes through `CommandRunner` and `SystemProbe`, so no uni
 - `/usr/lib/NetworkManager/conf.d/90-aios-privacy.conf`: `wifi.cloned-mac-address=stable`, `ethernet.cloned-mac-address=stable`, `wifi.scan-rand-mac-address=yes`, `ipv6.ip6-privacy=2`.
 - `/usr/lib/systemd/resolved.conf.d/90-aios-dot.conf`: `DNS=9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net 1.1.1.1#cloudflare-dns.com`, `DNSOverTLS=yes`, `DNSSEC=allow-downgrade`.
 - `/usr/lib/systemd/zram-generator.conf`: `zram-size = min(ram / 2, 8192)`, `compression-algorithm = zstd`.
+- `/usr/lib/systemd/system/usbguard.service.d/90-aios-rules.conf`: `ReadWritePaths=-/var/lib/usbguard`. The packaged unit makes `/` read-only, so without it saving a rule to the persisted rule file fails (§5.5).
 - `/usr/share/aios/defaults/manifest/`: the default manifest repo (`manifest.toml`, `files/`, `home/`). The installer copies it.
 - The default manifest's `[files]` includes:
   - `/etc/pacman.conf` (`DBPath = /usr/lib/pacman/`, CachyOS repos).
@@ -420,11 +421,11 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
   - Strict DNS over TLS (`DNSOverTLS=yes`, §4.6) can't reach a captive portal's local resolver, so captive-portal networks need DoT relaxed until login.
   - The DoT resolvers are IPv4 only, so IPv6-only networks have no DNS.
 - **USBGuard:**
-  - `usbguard-daemon.conf`: `RuleFile=/var/lib/usbguard/rules.conf` (persisted), `ImplicitPolicyTarget=block`, `PresentDevicePolicy=apply-policy`, `InsertedDevicePolicy=apply-policy`, `IPCAllowedUsers=root`, `IPCAllowedGroups=` (empty).
+  - `usbguard-daemon.conf`: `RuleFile=/var/lib/usbguard/rules.conf` (persisted), `AuditFilePath=/var/log/usbguard/usbguard-audit.log` (the unit's sandbox lets the daemon write only `/var/log/usbguard/` in `/var/log`), `ImplicitPolicyTarget=block`, `PresentDevicePolicy=apply-policy`, `InsertedDevicePolicy=apply-policy`, `IPCAllowedUsers=root`, `IPCAllowedGroups=` (empty).
   - Only root may use the daemon's IPC. Every policy change therefore goes through `run0` and its polkit prompt, and a process running as a wheel user can't allow a device on its own.
   - The installer writes `usbguard generate-policy` output, which allows devices present at install.
   - The installer then appends `block with-interface one-of { 03:*:* }` followed by `allow`, so new HID devices are blocked and other new devices are allowed.
-  - Approve a device with `run0 usbguard allow-device -p <id>`.
+  - Approve a device with `run0 usbguard allow-device -p <id>`. `-p` saves the rule to `/var/lib/usbguard/rules.conf`, which the aios-base drop-in makes writable for the daemon (§4.6).
 - **AppArmor** is enabled via `lsm=` and `apparmor.service`, with packaged profiles enforced.
 - **Swap:** zram only. No disk swap, no hibernation.
 - **Firmware:** `fwupd-refresh.timer`.

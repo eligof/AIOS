@@ -71,10 +71,14 @@ impl Run<'_> {
         }
         // No `--` before the packages: pacstrap would pass it to pacman as a package name.
         // The manifest validator rejects package names with a leading `-` instead.
+        // pacstrap runs `pacman -b ROOT/var/lib/pacman/` unless it copies the config (-P),
+        // and that beats the config's DBPath. It passes what follows the root on to pacman
+        // after its own options, so this `--dbpath` wins.
         let cmd = Cmd::new("pacstrap")
             .arg("-C")
             .arg_path(&conf)
-            .arg_path(&l.cand);
+            .arg_path(&l.cand)
+            .arg(format!("--dbpath={}/usr/lib/pacman/", l.cand.display()));
         run_ok(self.ctx.runner, &cmd.args(set.iter().cloned()))?;
         // A mask the manifest doesn't declare was only for pacstrap.
         let files = &self.ctx.manifest.files;

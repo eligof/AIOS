@@ -67,7 +67,7 @@ mount --bind {top}/@etc-cand {cand}/etc
 mount --bind {persist}/var/cache/pacman/pkg {cand}/var/cache/pacman/pkg
 mount --bind {log} {cand}/var/log
 mount --bind {persist}/aios/repo {cand}/persist/aios/repo
-pacstrap -C {run}/aios-pacstrap.conf {cand} {set}
+pacstrap -C {run}/aios-pacstrap.conf {cand} --dbpath={cand}/usr/lib/pacman/ {set}
 arch-chroot {cand} pacman-key --init
 arch-chroot {cand} pacman-key --populate archlinux cachyos
 arch-chroot {cand} pacman -Q -- linux-cachyos linux-cachyos-lts

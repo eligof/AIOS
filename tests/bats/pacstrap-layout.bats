@@ -64,6 +64,19 @@ install_into() {
         --noscriptlet --noconfirm -dd "$@" -U "$FILESYSTEM" "$PACMAN"
 }
 
+# pacstrap_into ROOT [ARGS...]: the real pacstrap as a regular user (-N), with the config
+# bootstrap writes (DBPath and HookDir in ROOT), installing both packages from their files.
+# ARGS go after the root, where bootstrap puts its --dbpath.
+pacstrap_into() {
+    local root=$1
+    shift
+    command -v pacstrap >/dev/null || skip "pacstrap is not installed"
+    printf '[options]\nDBPath = %s/usr/lib/pacman/\nHookDir = %s/etc/pacman.d/hooks/\nSigLevel = Never\n' \
+        "$root" "$root" >"$SCRATCH/pacstrap.conf"
+    run pacstrap -N -U -D -G -M -C "$SCRATCH/pacstrap.conf" "$root" "$@" --noscriptlet \
+        "$FILESYSTEM" "$PACMAN"
+}
+
 # installed ROOT NAME: the database in ROOT/usr/lib/pacman holds package NAME.
 installed() {
     compgen -G "$1/usr/lib/pacman/local/$2-[0-9]*" >/dev/null
@@ -102,4 +115,23 @@ installed() {
     # pacman may replace the root's var/lib/pacman link with a directory; harmless, since
     # DBPath points into /usr and every boot starts from @blank's link again.
     [ "$(readlink "$SCRATCH/root/bin")" = usr/bin ]
+}
+
+@test "pacstrap ignores the config's DBPath: its own -b puts the database in var/lib/pacman" {
+    empty "$SCRATCH/root"
+    pacstrap_into "$SCRATCH/root"
+    [ "$status" -eq 0 ]
+    run installed "$SCRATCH/root" filesystem
+    [ "$status" -ne 0 ]
+    compgen -G "$SCRATCH/root/var/lib/pacman/local/filesystem-[0-9]*" >/dev/null
+}
+
+@test "pacstrap with bootstrap's --dbpath puts the database in the root's /usr" {
+    empty "$SCRATCH/root"
+    pacstrap_into "$SCRATCH/root" --dbpath="$SCRATCH/root/usr/lib/pacman/"
+    [ "$status" -eq 0 ]
+    installed "$SCRATCH/root" filesystem
+    installed "$SCRATCH/root" pacman
+    run compgen -G "$SCRATCH/root/var/lib/pacman/local/*"
+    [ "$status" -ne 0 ]
 }

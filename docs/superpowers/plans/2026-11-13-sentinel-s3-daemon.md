@@ -750,6 +750,15 @@ Spec §9: `/var/log/aios/sentinel/alerts.jsonl`, rotating at 64 MiB to `alerts.<
 
 Rotation numbering: the live file is `alerts.jsonl`; on rotation it is renamed to `alerts.<n>.jsonl` with `n` one past the highest existing, so `alerts.1.jsonl` is the oldest. `verify` therefore reads `alerts.1.jsonl`, `alerts.2.jsonl`, … then `alerts.jsonl`.
 
+> **Corrections applied during execution (commit `aa90091`).** The code block in Step 3 below was written before the store had ever run, and review found four defects in it. The committed implementation is the authority; read it rather than re-deriving from the block below.
+>
+> 1. **`rotate` numbering.** The block scans upward for the first *free* slot, which contradicts the "one past the highest existing" rule stated just above. With a gap in the sequence — an admin deleting a rotated file, a partial restore — it reuses the gap, and `verify` then reports a hash-chain mismatch that reads exactly like tampering. Compute `max(existing) + 1` instead.
+> 2. **A crash-torn tail wedged `Store::open`.** `open` propagated any JSON parse error, so a half-written final line from an OOM-kill or power loss made the daemon fail to start — and since `main` exits non-zero on store failure, systemd would restart-loop it and the kernel lockdown would stay engaged for the rest of that boot. The opposite of §12's intent. `open` now tolerates exactly one torn record, and only as the final line of the live file: it truncates to the last complete line and records the fact for `Status`. A parse failure anywhere earlier, or anywhere in a rotated file, is still a hard error, and `verify` stays strict.
+> 3. **`append` silently disabled rotation.** `f.metadata().map(|m| m.len()).unwrap_or(0)` turned an `fstat` failure into "file is empty", which makes the rotation test false forever with no error and no way for `Status` to notice. The error is propagated now.
+> 4. **`open` was O(total log).** It called `read_all` — deserialising every historical record — purely to read the last record's hash, on every daemon start, with the unit ordered `Before=sysinit.target` and a 64 MiB RSS budget. It now reads only the tail of the live file, falling back to the newest rotated file, bounding the work to one file. `read_all` and `verify` still walk everything, which is their job.
+>
+> Also added there: a test for the `prev_hash` branch of `verify` (the original tamper test only reached the hash-mismatch branch), explicit error handling in the directory walk instead of `flatten()`, a doc comment recording `verify`'s one real blind spot — deleting a trailing run of whole records is undetectable by a hash chain alone, since nothing survives after them to show a broken link — and byte-level line scanning so that a torn multi-byte UTF-8 character isolates to one bad line instead of failing the whole file read.
+
 - [ ] **Step 1: Write the failing tests**
 
 Append inside the existing `tests` module in `alert.rs` (before its closing brace):

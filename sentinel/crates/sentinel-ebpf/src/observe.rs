@@ -312,3 +312,58 @@ unsafe fn try_ptrace(ctx: &LsmContext) -> Result<i32, i32> {
     e.submit(0);
     Ok(0)
 }
+
+/// `enum kernel_read_file_id`: READING_MODULE.
+const READING_MODULE: u32 = 2;
+/// READING_MODULE_COMPRESSED: `finit_module(MODULE_INIT_COMPRESSED_FILE)` (e.g. `.ko.zst`).
+const READING_MODULE_COMPRESSED: u32 = 7;
+
+#[lsm(hook = "kernel_read_file")]
+pub fn module_read(ctx: LsmContext) -> i32 {
+    match unsafe { try_module(&ctx, true) } {
+        Ok(v) => v,
+        Err(v) => v,
+    }
+}
+
+#[lsm(hook = "kernel_load_data")]
+pub fn module_data(ctx: LsmContext) -> i32 {
+    match unsafe { try_module(&ctx, false) } {
+        Ok(v) => v,
+        Err(v) => v,
+    }
+}
+
+/// kernel_read_file(file, id, contents, ret@3); kernel_load_data(id, contents, ret@2).
+unsafe fn try_module(ctx: &LsmContext, has_file: bool) -> Result<i32, i32> {
+    let ret: i64 = if has_file { ctx.arg(3) } else { ctx.arg(2) };
+    if ret != 0 {
+        return Err(ret as c_int);
+    }
+    let id: u32 = if has_file { ctx.arg(1) } else { ctx.arg(0) };
+    if id != READING_MODULE && id != READING_MODULE_COMPRESSED {
+        return Ok(0);
+    }
+    let Some(mut e) = emit::reserve() else {
+        return Ok(0);
+    };
+    let p = e.as_mut_ptr();
+    let Some(core) = facts_kern::fill_header(p, EventKind::Module as u8) else {
+        e.discard(0);
+        return Ok(0);
+    };
+    facts_kern::set_uid_facts(p, core.uid);
+    let mut i = 0;
+    while i < 64 {
+        (*p).payload.module.name[i] = 0;
+        i += 1;
+    }
+    if has_file {
+        let file: *const c_void = ctx.arg(0);
+        let _ = shim::file_name(file, (*p).payload.module.name.as_mut_ptr(), 64);
+    }
+    (*p).payload.module.read_id = id;
+    (*p).payload.module._pad = 0;
+    e.submit(0);
+    Ok(0)
+}

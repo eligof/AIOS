@@ -121,6 +121,20 @@ int shim_file_dev(const void *file, struct sentinel_file_dev *o) {
     return e;
 }
 
+/* dentry name of a struct file*, NUL-terminated into out (cap <= 64). */
+int shim_file_name(const void *file, unsigned char *out, int cap) {
+    const struct file *f = file;
+    const struct dentry *d = 0;
+    const unsigned char *name = 0;
+    int e = 0;
+    if (cap <= 0 || cap > 64) return -1;
+    e |= BPF_CORE_READ_INTO(&d, f, f_path.dentry);
+    e |= BPF_CORE_READ_INTO(&name, d, d_name.name);
+    if (e || !name) return -1;
+    bpf_core_read_str(out, cap, name);
+    return 0;
+}
+
 /* target task tgid and cred->uid */
 int shim_ptrace(const void *child, unsigned int *tgid, unsigned int *uid) {
     const struct task_struct *t = child;

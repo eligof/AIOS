@@ -244,6 +244,12 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
             pf & P_OTHER_UID != 0,
             pf & P_NON_DESCENDANT != 0
         )
+    } else if h.kind == EventKind::Module as u8 {
+        // SAFETY: for Module events the kernel side wrote the module variant.
+        let m = unsafe { ev.payload.module };
+        let end = m.name.iter().position(|b| *b == 0).unwrap_or(m.name.len());
+        let name = String::from_utf8_lossy(&m.name[..end]).replace(['"', '\\'], "?");
+        format!(",\"read_id\":{},\"module_name\":\"{}\"", m.read_id, name)
     } else if h.kind == EventKind::Memfd as u8 {
         // SAFETY: for Memfd events the kernel side wrote the memfd variant.
         let m = unsafe { ev.payload.memfd };
@@ -275,6 +281,8 @@ fn load() -> Result<()> {
     attach_lsm(&mut bpf, &btf, "listen", "socket_listen")?;
     attach_lsm(&mut bpf, &btf, "open", "file_open")?;
     attach_lsm(&mut bpf, &btf, "ptrace", "ptrace_access_check")?;
+    attach_lsm(&mut bpf, &btf, "module_read", "kernel_read_file")?;
+    attach_lsm(&mut bpf, &btf, "module_data", "kernel_load_data")?;
     attach_btf_tp(&mut bpf, &btf, "fork", "sched_process_fork")?;
     attach_btf_tp(&mut bpf, &btf, "exit", "sched_process_exit")?;
 

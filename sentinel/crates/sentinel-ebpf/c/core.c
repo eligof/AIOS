@@ -48,3 +48,16 @@ int shim_exec_info(const void *bprm, struct sentinel_exec_info *o) {
     o->is_memfd = (o->name[0]=='m'&&o->name[1]=='e'&&o->name[2]=='m'&&o->name[3]=='f'&&o->name[4]=='d'&&o->name[5]==':');
     return e;
 }
+
+int shim_task_tgid(const void *task, unsigned int *out) {
+    const struct task_struct *t = task;
+    int v = 0;
+    int e = BPF_CORE_READ_INTO(&v, t, tgid);
+    *out = (unsigned int)v;
+    return e;
+}
+
+int shim_task_exit_code(const void *task, int *out) {
+    const struct task_struct *t = task;
+    return BPF_CORE_READ_INTO(out, t, exit_code);
+}

@@ -1,5 +1,9 @@
 use crate::{emit, facts_kern, shim};
-use aya_ebpf::{cty::c_int, macros::lsm, programs::LsmContext};
+use aya_ebpf::{
+    cty::c_int,
+    macros::{btf_tracepoint, lsm},
+    programs::{BtfTracePointContext, LsmContext},
+};
 use core::ffi::c_void;
 use sentinel_common::event::EventKind;
 use sentinel_common::facts::*;
@@ -47,4 +51,40 @@ unsafe fn try_exec(ctx: &LsmContext) -> Result<i32, i32> {
     }
     e.submit(0);
     Ok(0) // deny decided in Phase D
+}
+
+#[btf_tracepoint(function = "sched_process_fork")]
+pub fn fork(ctx: BtfTracePointContext) -> i32 {
+    unsafe { proc_event(&ctx, EventKind::Fork) }
+}
+
+#[btf_tracepoint(function = "sched_process_exit")]
+pub fn exit(ctx: BtfTracePointContext) -> i32 {
+    unsafe { proc_event(&ctx, EventKind::Exit) }
+}
+
+/// fork: arg0 parent task, arg1 child task. exit: arg0 task. Observe only.
+unsafe fn proc_event(ctx: &BtfTracePointContext, kind: EventKind) -> i32 {
+    let Some(mut e) = emit::reserve() else {
+        return 0;
+    };
+    let p = e.as_mut_ptr();
+    if facts_kern::fill_header(p, kind as u8).is_none() {
+        e.discard(0);
+        return 0;
+    }
+    match kind {
+        EventKind::Fork => {
+            let child: *const c_void = ctx.arg(1);
+            (*p).payload.proc_.child_pid = shim::task_tgid(child).unwrap_or(0);
+            (*p).payload.proc_.exit_code = 0;
+        }
+        _ => {
+            let task: *const c_void = ctx.arg(0);
+            (*p).payload.proc_.child_pid = 0;
+            (*p).payload.proc_.exit_code = shim::task_exit_code(task).unwrap_or(0);
+        }
+    }
+    e.submit(0);
+    0
 }

@@ -161,19 +161,42 @@ fn attach_lsm(bpf: &mut aya::Ebpf, btf: &aya::Btf, name: &str, hook: &str) -> Re
     Ok(())
 }
 
+/// Attach one BTF tracepoint program (`name`) to tracepoint `tp`.
+fn attach_btf_tp(bpf: &mut aya::Ebpf, btf: &aya::Btf, name: &str, tp: &str) -> Result<()> {
+    let prog: &mut aya::programs::BtfTracePoint = bpf
+        .program_mut(name)
+        .ok_or_else(|| anyhow::anyhow!("program {name} missing"))?
+        .try_into()?;
+    prog.load(tp, btf)?;
+    prog.attach()?;
+    Ok(())
+}
+
 /// Render one decoded event as a single JSON line. Payload fields are added
 /// per kind by later observers.
 fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
+    use sentinel_common::event::EventKind;
     use sentinel_common::facts::{F_DELETED, F_MEMFD, G_FLAGS};
     let h = &ev.hdr;
     let facts = h.facts.map(|f| f.to_string()).join(",");
     let flags = h.facts[G_FLAGS];
+    let proc_json = if h.kind == EventKind::Fork as u8 || h.kind == EventKind::Exit as u8 {
+        // SAFETY: for Fork/Exit events the kernel side wrote the proc_ variant.
+        let p = unsafe { ev.payload.proc_ };
+        format!(
+            ",\"child_pid\":{},\"exit_code\":{}",
+            p.child_pid, p.exit_code
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "{{\"kind\":{},\"pid\":{},\"tid\":{},\"ppid\":{},\"uid\":{},\"euid\":{},\"cgroup\":{},\"ts_ns\":{},\"matched_rule\":{},\"kverdict\":{},\"facts\":[{}],\"flags_memfd\":{},\"flags_deleted\":{}}}",
+        "{{\"kind\":{},\"pid\":{},\"tid\":{},\"ppid\":{},\"uid\":{},\"euid\":{},\"cgroup\":{},\"ts_ns\":{},\"matched_rule\":{},\"kverdict\":{},\"facts\":[{}],\"flags_memfd\":{},\"flags_deleted\":{}{}}}",
         h.kind, h.pid, h.tid, h.ppid, h.uid, h.euid, h.cgroup_id, h.ts_ns,
         h.matched_rule, h.kverdict, facts,
         flags & F_MEMFD != 0,
         flags & F_DELETED != 0,
+        proc_json,
     )
 }
 
@@ -185,6 +208,8 @@ fn load() -> Result<()> {
     let mut bpf = aya::Ebpf::load(data)?;
     let btf = aya::Btf::from_sys_fs()?;
     attach_lsm(&mut bpf, &btf, "exec", "bprm_check_security")?;
+    attach_btf_tp(&mut bpf, &btf, "fork", "sched_process_fork")?;
+    attach_btf_tp(&mut bpf, &btf, "exit", "sched_process_exit")?;
 
     let mut ring = aya::maps::RingBuf::try_from(
         bpf.take_map("EVENTS")

@@ -13,6 +13,7 @@ typedef __u16 __sum16; typedef __u32 __wsum;
 #pragma clang attribute push (__attribute__((preserve_access_index)), apply_to = record)
 struct task_struct {
     int pid; int tgid;
+    int exit_code;
     struct task_struct *real_parent;
     const struct cred *cred;
 };

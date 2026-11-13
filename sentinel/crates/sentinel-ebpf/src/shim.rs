@@ -23,6 +23,8 @@ pub struct ExecInfo {
 unsafe extern "C" {
     fn shim_current_core(task: *const c_void, out: *mut TaskCore) -> i32;
     fn shim_exec_info(bprm: *const c_void, out: *mut ExecInfo) -> i32;
+    fn shim_task_tgid(task: *const c_void, out: *mut u32) -> i32;
+    fn shim_task_exit_code(task: *const c_void, out: *mut i32) -> i32;
 }
 
 /// Core ids of the current task (pid/tid/ppid/uid/euid + cgroup id).
@@ -42,6 +44,26 @@ pub unsafe fn exec_info(bprm: *const c_void) -> Option<ExecInfo> {
     let mut o: ExecInfo = core::mem::zeroed();
     if shim_exec_info(bprm, &mut o) == 0 {
         Some(o)
+    } else {
+        None
+    }
+}
+
+/// Thread-group id of an arbitrary `task_struct*`.
+pub unsafe fn task_tgid(task: *const c_void) -> Option<u32> {
+    let mut v: u32 = 0;
+    if shim_task_tgid(task, &mut v) == 0 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// `task->exit_code` of an arbitrary `task_struct*`.
+pub unsafe fn task_exit_code(task: *const c_void) -> Option<i32> {
+    let mut v: i32 = 0;
+    if shim_task_exit_code(task, &mut v) == 0 {
+        Some(v)
     } else {
         None
     }

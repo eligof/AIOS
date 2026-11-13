@@ -94,3 +94,24 @@ pub fn evaluate(kind: u8, facts: &Facts) -> Verdict {
     }
     c.v
 }
+
+/// Record the verdict on the event; return Some(-EPERM) when the kernel must
+/// deny (rule is Deny+Enforce AND the global CFG_ENFORCE gate is set).
+pub fn apply_verdict(p: *mut sentinel_common::wire::RawEvent, v: &Verdict) -> Option<i32> {
+    let enforce = CONFIG
+        .get(0)
+        .map(|c| c.flags & sentinel_common::wire::CFG_ENFORCE != 0)
+        .unwrap_or(false);
+    unsafe {
+        (*p).hdr.matched_rule = v.matched;
+        if v.deny && enforce {
+            (*p).hdr.kverdict = sentinel_common::wire::KVerdict::Denied as u8;
+            Some(-1) // -EPERM
+        } else {
+            if v.would_deny {
+                (*p).hdr.kverdict = sentinel_common::wire::KVerdict::WouldDeny as u8;
+            }
+            None
+        }
+    }
+}

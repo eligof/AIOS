@@ -31,7 +31,11 @@ enum Cmd {
     HeartbeatSelftest,
     /// Attach the observers and stream every ring-buffer event as a JSON line
     /// on stdout until SIGINT/SIGTERM.
-    Load,
+    Load {
+        /// Set CFG_ENFORCE so Deny+Enforce kernel rules actually block.
+        #[arg(long)]
+        enforce: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -44,7 +48,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::HeartbeatSelftest => heartbeat_selftest(),
-        Cmd::Load => load(),
+        Cmd::Load { enforce } => load(enforce),
         Cmd::Maps => {
             let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/sentinel-ebpf"));
             let bpf = aya::Ebpf::load(data)?;
@@ -339,7 +343,7 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
     )
 }
 
-fn load() -> Result<()> {
+fn load(enforce: bool) -> Result<()> {
     use std::io::Write;
     use std::sync::atomic::Ordering;
 
@@ -350,7 +354,11 @@ fn load() -> Result<()> {
         let cfg = sentinel_common::wire::KConfig {
             lockdown_after_ns: 5_000_000_000,
             sentineld_tgid: std::process::id(),
-            flags: 0,
+            flags: if enforce {
+                sentinel_common::wire::CFG_ENFORCE
+            } else {
+                0
+            },
         };
         let mut config = aya::maps::Array::<_, PodConfig>::try_from(
             bpf.map_mut("CONFIG")

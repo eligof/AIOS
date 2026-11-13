@@ -50,9 +50,13 @@ unsafe fn try_exec(ctx: &LsmContext) -> Result<i32, i32> {
         }
         // env_ld / stdio_socket: 0 here; S3: enrich from /proc
     }
-    (*p).hdr.matched_rule = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts)).matched;
+    let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
+    let deny = crate::engine::apply_verdict(p, &v);
     e.submit(0);
-    Ok(0) // deny decided in Phase D
+    match deny {
+        Some(err) => Err(err),
+        None => Ok(0),
+    }
 }
 
 const AF_UNIX: u16 = 1;
@@ -106,9 +110,13 @@ unsafe fn try_connect(ctx: &LsmContext) -> Result<i32, i32> {
     (*p).payload.net._pad = 0;
     facts_kern::set_dest_facts(p, &a);
     facts_kern::set_port_facts(p, port);
-    (*p).hdr.matched_rule = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts)).matched;
+    let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
+    let deny = crate::engine::apply_verdict(p, &v);
     e.submit(0);
-    Ok(0)
+    match deny {
+        Some(err) => Err(err),
+        None => Ok(0),
+    }
 }
 
 #[lsm(hook = "socket_listen")]
@@ -147,9 +155,13 @@ unsafe fn try_listen(ctx: &LsmContext) -> Result<i32, i32> {
     (*p).payload.net.port = port;
     (*p).payload.net._pad = 0;
     (*p).hdr.facts[G_FLAGS] |= F_LISTEN_NON_LOOPBACK;
-    (*p).hdr.matched_rule = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts)).matched;
+    let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
+    let deny = crate::engine::apply_verdict(p, &v);
     e.submit(0);
-    Ok(0)
+    match deny {
+        Some(err) => Err(err),
+        None => Ok(0),
+    }
 }
 
 #[btf_tracepoint(function = "sched_process_fork")]
@@ -232,9 +244,13 @@ unsafe fn try_open(ctx: &LsmContext) -> Result<i32, i32> {
         i += 1;
     }
     (*p).hdr.facts[G_DEVICE] |= bit;
-    (*p).hdr.matched_rule = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts)).matched;
+    let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
+    let deny = crate::engine::apply_verdict(p, &v);
     e.submit(0);
-    Ok(0)
+    match deny {
+        Some(err) => Err(err),
+        None => Ok(0),
+    }
 }
 
 /// sys_enter_memfd_create: args[0] = name (user ptr) at offset 16, args[1] = flags at 24.
@@ -314,9 +330,13 @@ unsafe fn try_ptrace(ctx: &LsmContext) -> Result<i32, i32> {
     (*p).payload.ptrace.target_uid = uid;
     (*p).payload.ptrace.mode = mode;
     (*p).payload.ptrace._pad = 0;
-    (*p).hdr.matched_rule = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts)).matched;
+    let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
+    let deny = crate::engine::apply_verdict(p, &v);
     e.submit(0);
-    Ok(0)
+    match deny {
+        Some(err) => Err(err),
+        None => Ok(0),
+    }
 }
 
 /// `enum kernel_read_file_id`: READING_MODULE.
@@ -409,9 +429,13 @@ unsafe fn try_bpf(ctx: &LsmContext) -> Result<i32, i32> {
     } else {
         0
     };
-    (*p).hdr.matched_rule = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts)).matched;
+    let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
+    let deny = crate::engine::apply_verdict(p, &v);
     e.submit(0);
-    Ok(0)
+    match deny {
+        Some(err) => Err(err),
+        None => Ok(0),
+    }
 }
 
 #[lsm(hook = "task_kill")]
@@ -452,9 +476,13 @@ unsafe fn try_signal(ctx: &LsmContext) -> Result<i32, i32> {
     facts_kern::set_uid_facts(p, core.uid);
     (*p).payload.signal.target_pid = target_tgid;
     (*p).payload.signal.sig = sig;
-    (*p).hdr.matched_rule = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts)).matched;
+    let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
+    let deny = crate::engine::apply_verdict(p, &v);
     e.submit(0);
-    Ok(0)
+    match deny {
+        Some(err) => Err(err),
+        None => Ok(0),
+    }
 }
 
 /// -EROFS as an ERR_PTR-encoded `struct file *`.

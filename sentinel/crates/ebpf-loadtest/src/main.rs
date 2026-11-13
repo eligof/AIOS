@@ -230,6 +230,20 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
             ",\"dev_class\":{},\"device\":\"{}\",\"name\":\"{}\"",
             o.dev_class, label, name
         )
+    } else if h.kind == EventKind::Ptrace as u8 {
+        use sentinel_common::facts::{G_PTRACE, P_ANY, P_NON_DESCENDANT, P_OTHER_UID};
+        // SAFETY: for Ptrace events the kernel side wrote the ptrace variant.
+        let t = unsafe { ev.payload.ptrace };
+        let pf = h.facts[G_PTRACE];
+        format!(
+            ",\"target_pid\":{},\"target_uid\":{},\"mode\":{},\"p_any\":{},\"p_other_uid\":{},\"p_non_descendant\":{}",
+            t.target_pid,
+            t.target_uid,
+            t.mode,
+            pf & P_ANY != 0,
+            pf & P_OTHER_UID != 0,
+            pf & P_NON_DESCENDANT != 0
+        )
     } else if h.kind == EventKind::Memfd as u8 {
         // SAFETY: for Memfd events the kernel side wrote the memfd variant.
         let m = unsafe { ev.payload.memfd };
@@ -260,6 +274,7 @@ fn load() -> Result<()> {
     attach_lsm(&mut bpf, &btf, "connect", "socket_connect")?;
     attach_lsm(&mut bpf, &btf, "listen", "socket_listen")?;
     attach_lsm(&mut bpf, &btf, "open", "file_open")?;
+    attach_lsm(&mut bpf, &btf, "ptrace", "ptrace_access_check")?;
     attach_btf_tp(&mut bpf, &btf, "fork", "sched_process_fork")?;
     attach_btf_tp(&mut bpf, &btf, "exit", "sched_process_exit")?;
 

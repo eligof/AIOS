@@ -120,3 +120,29 @@ int shim_file_dev(const void *file, struct sentinel_file_dev *o) {
     o->name_len = bpf_core_read_str(o->name, sizeof(o->name), name);
     return e;
 }
+
+/* target task tgid and cred->uid */
+int shim_ptrace(const void *child, unsigned int *tgid, unsigned int *uid) {
+    const struct task_struct *t = child;
+    int v = 0, e = 0;
+    e |= BPF_CORE_READ_INTO(&v, t, tgid);
+    *tgid = (unsigned int)v;
+    e |= BPF_CORE_READ_INTO(uid, t, cred, uid.val);
+    return e;
+}
+
+/* 1 if any ancestor (real_parent chain, bounded) of child has tgid == ancestor_tgid. */
+int shim_is_descendant(const void *child, unsigned int ancestor_tgid) {
+    const struct task_struct *t = child;
+    for (int i = 0; i < 32; i++) {
+        const struct task_struct *p = 0;
+        int tg = 0;
+        if (BPF_CORE_READ_INTO(&p, t, real_parent)) return 0;
+        if (!p || p == t) return 0;
+        if (BPF_CORE_READ_INTO(&tg, p, tgid)) return 0;
+        if ((unsigned int)tg == ancestor_tgid) return 1;
+        if (tg <= 1) return 0;
+        t = p;
+    }
+    return 0;
+}

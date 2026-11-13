@@ -41,6 +41,8 @@ unsafe extern "C" {
     fn shim_current_core(task: *const c_void, out: *mut TaskCore) -> i32;
     fn shim_exec_info(bprm: *const c_void, out: *mut ExecInfo) -> i32;
     fn shim_file_dev(file: *const c_void, out: *mut FileDev) -> i32;
+    fn shim_ptrace(child: *const c_void, tgid: *mut u32, uid: *mut u32) -> i32;
+    fn shim_is_descendant(child: *const c_void, ancestor_tgid: u32) -> i32;
     fn shim_task_tgid(task: *const c_void, out: *mut u32) -> i32;
     fn shim_task_exit_code(task: *const c_void, out: *mut i32) -> i32;
 }
@@ -115,4 +117,19 @@ pub unsafe fn file_dev(file: *const c_void) -> Option<FileDev> {
     } else {
         None
     }
+}
+
+/// Target `(tgid, uid)` of a ptrace `child` task.
+pub unsafe fn ptrace_target(child: *const c_void) -> Option<(u32, u32)> {
+    let (mut tgid, mut uid) = (0u32, 0u32);
+    if shim_ptrace(child, &mut tgid, &mut uid) == 0 {
+        Some((tgid, uid))
+    } else {
+        None
+    }
+}
+
+/// True if `ancestor_tgid` is on `child`'s real_parent chain (bounded walk).
+pub unsafe fn is_descendant(child: *const c_void, ancestor_tgid: u32) -> bool {
+    shim_is_descendant(child, ancestor_tgid) == 1
 }

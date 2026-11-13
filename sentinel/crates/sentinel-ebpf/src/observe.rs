@@ -265,3 +265,50 @@ unsafe fn try_memfd(ctx: &TracePointContext) -> u32 {
     e.submit(0);
     0
 }
+
+#[lsm(hook = "ptrace_access_check")]
+pub fn ptrace(ctx: LsmContext) -> i32 {
+    match unsafe { try_ptrace(&ctx) } {
+        Ok(v) => v,
+        Err(v) => v,
+    }
+}
+
+unsafe fn try_ptrace(ctx: &LsmContext) -> Result<i32, i32> {
+    let ret: i64 = ctx.arg(2);
+    if ret != 0 {
+        return Err(ret as c_int);
+    }
+    let child: *const c_void = ctx.arg(0);
+    let mode: u32 = ctx.arg(1);
+    let Some((tgid, uid)) = shim::ptrace_target(child) else {
+        return Ok(0);
+    };
+    let Some(mut e) = emit::reserve() else {
+        return Ok(0);
+    };
+    let p = e.as_mut_ptr();
+    let Some(core) = facts_kern::fill_header(p, EventKind::Ptrace as u8) else {
+        e.discard(0);
+        return Ok(0);
+    };
+    if tgid == core.pid {
+        e.discard(0); // self-ptrace
+        return Ok(0);
+    }
+    facts_kern::set_uid_facts(p, core.uid);
+    let mut bits = P_ANY;
+    if uid != core.uid {
+        bits |= P_OTHER_UID;
+    }
+    if !shim::is_descendant(child, core.pid) {
+        bits |= P_NON_DESCENDANT;
+    }
+    (*p).hdr.facts[G_PTRACE] |= bits;
+    (*p).payload.ptrace.target_pid = tgid;
+    (*p).payload.ptrace.target_uid = uid;
+    (*p).payload.ptrace.mode = mode;
+    (*p).payload.ptrace._pad = 0;
+    e.submit(0);
+    Ok(0)
+}

@@ -254,6 +254,10 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
         // SAFETY: for Bpf events the kernel side wrote the bpf variant.
         let b = unsafe { ev.payload.bpf };
         format!(",\"bpf_cmd\":{},\"prog_type\":{}", b.cmd, b.prog_type)
+    } else if h.kind == EventKind::Signal as u8 {
+        // SAFETY: for Signal events the kernel side wrote the signal variant.
+        let s = unsafe { ev.payload.signal };
+        format!(",\"target_pid\":{},\"sig\":{}", s.target_pid, s.sig)
     } else if h.kind == EventKind::Memfd as u8 {
         // SAFETY: for Memfd events the kernel side wrote the memfd variant.
         let m = unsafe { ev.payload.memfd };
@@ -280,6 +284,18 @@ fn load() -> Result<()> {
     let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/sentinel-ebpf"));
     let mut bpf = aya::Ebpf::load(data)?;
     let btf = aya::Btf::from_sys_fs()?;
+    {
+        let cfg = sentinel_common::wire::KConfig {
+            lockdown_after_ns: 5_000_000_000,
+            sentineld_tgid: std::process::id(),
+            flags: 0,
+        };
+        let mut config = aya::maps::Array::<_, PodConfig>::try_from(
+            bpf.map_mut("CONFIG")
+                .ok_or_else(|| anyhow::anyhow!("CONFIG missing"))?,
+        )?;
+        config.set(0, &PodConfig(cfg), 0)?;
+    }
     attach_lsm(&mut bpf, &btf, "exec", "bprm_check_security")?;
     attach_lsm(&mut bpf, &btf, "connect", "socket_connect")?;
     attach_lsm(&mut bpf, &btf, "listen", "socket_listen")?;
@@ -287,6 +303,7 @@ fn load() -> Result<()> {
     attach_lsm(&mut bpf, &btf, "ptrace", "ptrace_access_check")?;
     attach_lsm(&mut bpf, &btf, "module_read", "kernel_read_file")?;
     attach_lsm(&mut bpf, &btf, "module_data", "kernel_load_data")?;
+    attach_lsm(&mut bpf, &btf, "signal", "task_kill")?;
     attach_btf_tp(&mut bpf, &btf, "fork", "sched_process_fork")?;
     attach_btf_tp(&mut bpf, &btf, "exit", "sched_process_exit")?;
 

@@ -405,3 +405,45 @@ unsafe fn try_bpf(ctx: &LsmContext) -> Result<i32, i32> {
     e.submit(0);
     Ok(0)
 }
+
+#[lsm(hook = "task_kill")]
+pub fn signal(ctx: LsmContext) -> i32 {
+    match unsafe { try_signal(&ctx) } {
+        Ok(v) => v,
+        Err(v) => v,
+    }
+}
+
+/// task_kill(struct task_struct *p, struct kernel_siginfo *info, int sig, const struct cred *cred, ret@4).
+/// Only signals aimed at sentineld are reported (keeps the ring quiet).
+unsafe fn try_signal(ctx: &LsmContext) -> Result<i32, i32> {
+    let ret: i64 = ctx.arg(4);
+    if ret != 0 {
+        return Err(ret as c_int);
+    }
+    let target: *const c_void = ctx.arg(0);
+    let sig: u32 = ctx.arg(2);
+    let Some(target_tgid) = shim::task_tgid(target) else {
+        return Ok(0);
+    };
+    let Some(cfg) = crate::maps::CONFIG.get(0) else {
+        return Ok(0);
+    };
+    let sentineld = cfg.sentineld_tgid;
+    if sentineld == 0 || target_tgid != sentineld {
+        return Ok(0);
+    }
+    let Some(mut e) = emit::reserve() else {
+        return Ok(0);
+    };
+    let p = e.as_mut_ptr();
+    let Some(core) = facts_kern::fill_header(p, EventKind::Signal as u8) else {
+        e.discard(0);
+        return Ok(0);
+    };
+    facts_kern::set_uid_facts(p, core.uid);
+    (*p).payload.signal.target_pid = target_tgid;
+    (*p).payload.signal.sig = sig;
+    e.submit(0);
+    Ok(0)
+}

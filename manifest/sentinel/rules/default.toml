@@ -1,0 +1,119 @@
+# AIOS Sentinel default rule pack (spec §5.5).
+# Copied to /etc/aios/sentinel/rules.d/ by the installer, like the other defaults.
+
+[[rule]]
+id       = "exec-memfd"
+desc     = "Fileless execution from a memfd"
+on       = "exec"
+severity = "critical"
+action   = "deny"
+match    = { exe_memfd = true }
+
+[[rule]]
+id       = "exec-deleted"
+desc     = "Execution of a deleted (unlinked) file"
+on       = "exec"
+severity = "high"
+action   = "deny"
+match    = { exe_deleted = true }
+
+[[rule]]
+id       = "exec-shm"
+desc     = "Execution from /dev/shm"
+on       = "exec"
+severity = "high"
+action   = "deny"
+match    = { exe_on = ["/dev/shm"] }
+
+[[rule]]
+id       = "exec-tmp"
+desc     = "Execution from /tmp or /var/tmp"
+on       = "exec"
+severity = "medium"
+action   = "deny"
+mode     = "audit"
+match    = { exe_on = ["/tmp", "/var/tmp"] }
+
+[[rule]]
+id       = "reverse-shell"
+desc     = "Shell or interpreter with stdio on a socket"
+on       = "exec"
+severity = "high"
+action   = "freeze"
+match    = { exe = ["/usr/bin/{bash,sh,zsh,dash}", "/usr/bin/python3*"], stdio_socket = true }
+except   = { ancestors = ["/usr/bin/sshd"] }
+
+[[rule]]
+id       = "ld-preload"
+desc     = "LD_PRELOAD or LD_LIBRARY_PATH in a new process environment"
+on       = "exec"
+severity = "medium"
+action   = "alert"
+match    = { env_ld = true }
+
+[[rule]]
+id       = "ptrace-other"
+desc     = "ptrace of a non-descendant process"
+on       = "ptrace"
+severity = "high"
+action   = "alert"
+match    = { ptrace_target = "non-descendant" }
+except   = { exe = ["/usr/bin/{gdb,lldb,strace}"] }
+
+[[rule]]
+id       = "camera-open"
+desc     = "A process opened the camera"
+on       = "open"
+severity = "low"
+action   = "alert"
+match    = { device = "camera" }
+
+[[rule]]
+id       = "mic-open"
+desc     = "A process opened the microphone"
+on       = "open"
+severity = "low"
+action   = "alert"
+match    = { device = "mic" }
+except   = { exe = ["/usr/bin/pipewire", "/usr/bin/wireplumber"] }
+
+[[rule]]
+id       = "input-read"
+desc     = "A process read input devices (possible keylogger)"
+on       = "open"
+severity = "high"
+action   = "alert"
+match    = { device = "input" }
+except   = { exe = ["/usr/lib/systemd/systemd-logind"] }
+
+[[rule]]
+id       = "uinput-open"
+desc     = "A process opened uinput (possible input injection)"
+on       = "open"
+severity = "high"
+action   = "alert"
+match    = { device = "uinput" }
+
+[[rule]]
+id       = "module-load"
+desc     = "A kernel module was loaded"
+on       = "module"
+severity = "medium"
+action   = "alert"
+match    = { any = true }
+
+[[rule]]
+id       = "user-listener"
+desc     = "A user process opened a non-loopback listener"
+on       = "listen"
+severity = "medium"
+action   = "alert"
+match    = { uid = "user", listen_scope = "non-loopback" }
+
+[[rule]]
+id       = "persistence-write"
+desc     = "Write attempt on a manifest-managed home file"
+on       = "write_refused"
+severity = "medium"
+action   = "alert"
+match    = { managed_home = true }

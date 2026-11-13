@@ -7,3 +7,7 @@
 pub mod event;
 pub mod facts;
 pub mod rule;
+
+pub use event::{Action, EventKind, Mode, Severity};
+pub use facts::*;
+pub use rule::{eval, KRule, MAX_CIDRS, MAX_MOUNTS, MAX_PORT_SETS, MAX_RULES, MAX_UID_LITERALS};

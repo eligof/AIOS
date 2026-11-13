@@ -56,6 +56,11 @@ pub fn canonical(v: &serde_json::Value) -> String {
     out
 }
 
+// Recursion here is unbounded by construction. That's fine: `event` and
+// `context` are built by the daemon from fixed-shape eBPF payloads, not
+// parsed from untrusted input, and `serde_json`'s own deserialiser enforces
+// a recursion limit (default 128) when a stored record is parsed back into
+// a `Value` in Task 4's `verify` walk. Do not add a depth guard here.
 fn write_canonical(v: &serde_json::Value, out: &mut String) {
     match v {
         serde_json::Value::Object(map) => {
@@ -66,7 +71,7 @@ fn write_canonical(v: &serde_json::Value, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
-                out.push_str(&serde_json::Value::String((*k).clone()).to_string());
+                out.push_str(&serde_json::to_string(*k).expect("String key serialises"));
                 out.push(':');
                 write_canonical(&map[*k], out);
             }
@@ -89,6 +94,14 @@ fn write_canonical(v: &serde_json::Value, out: &mut String) {
 impl Alert {
     /// SHA-256, hex, over the canonical record with `hash` removed (spec §9).
     pub fn compute_hash(&self) -> String {
+        // `serde_json::to_value` only fails when a `Serialize` impl errors,
+        // which in practice means a non-finite f64 or a non-string map key.
+        // `Alert` has no raw float fields, and `serde_json::Value` cannot
+        // hold a non-finite number by construction (`Number::from_f64`
+        // returns `None` for NaN/Infinity), so this cannot panic today. If
+        // you add an `f64` field (e.g. a confidence score) to `Alert` or
+        // `ProcRef`, you are reintroducing this panic path — route it
+        // through a finite check or `Number::from_f64` first.
         let mut v = serde_json::to_value(self).expect("Alert serialises");
         if let Some(map) = v.as_object_mut() {
             map.remove("hash");
@@ -179,5 +192,59 @@ mod tests {
         b.seal(&a.hash);
         assert_eq!(b.prev_hash, a.hash);
         assert_eq!(b.hash, b.compute_hash());
+    }
+
+    // This is the property `sentinel verify` (Task 4) relies on: a record
+    // written to disk, read back, and rehashed must match the hash it was
+    // sealed with — even though the omitted-when-empty fields (`message`,
+    // `context`) are missing from the JSON on the wire and have to be
+    // restored by `#[serde(default)]` on deserialisation.
+    #[test]
+    fn hash_survives_a_json_round_trip_with_omitted_empty_fields() {
+        let mut a = sample();
+        a.message = String::new();
+        a.context = vec![];
+        a.seal(GENESIS);
+
+        let line = serde_json::to_string(&a).expect("Alert serialises");
+        // Prove the omission actually happens, so this test cannot pass
+        // vacuously if `skip_serializing_if` is later removed.
+        assert!(!line.contains("\"message\""), "line: {line}");
+        assert!(!line.contains("\"context\""), "line: {line}");
+
+        let restored: Alert = serde_json::from_str(&line).expect("Alert deserialises");
+        assert_eq!(restored.message, "");
+        assert_eq!(restored.context, Vec::<serde_json::Value>::new());
+        assert_eq!(restored.compute_hash(), a.hash);
+    }
+
+    // `exe`/`argv`/`message` come straight from observed process data (a
+    // reverse shell's argv, for instance), so they can contain quotes,
+    // backslashes, newlines and non-ASCII. Nothing but serde_json's own
+    // escaping protects the canonical form from breaking on that; this pins
+    // that escaping is in fact happening and stays stable across a round
+    // trip.
+    #[test]
+    fn hash_is_stable_across_a_round_trip_of_tricky_characters() {
+        let mut a = sample();
+        a.message = "quote \" backslash \\ newline \n emoji \u{1F600} end".to_string();
+        if let Some(p) = a.process.as_mut() {
+            p.argv = "sh -c \"echo \\\"hi\\\"\"\nbash".to_string();
+        }
+        a.seal(GENESIS);
+
+        // The canonical form must still be valid, parseable JSON.
+        let v = serde_json::to_value(&a).expect("Alert serialises");
+        let reparsed: serde_json::Value =
+            serde_json::from_str(&canonical(&v)).expect("canonical output is valid JSON");
+        assert_eq!(
+            reparsed["message"],
+            serde_json::Value::String(a.message.clone())
+        );
+
+        let line = serde_json::to_string(&a).expect("Alert serialises");
+        let restored: Alert = serde_json::from_str(&line).expect("Alert deserialises");
+        assert_eq!(restored.message, a.message);
+        assert_eq!(restored.compute_hash(), a.hash);
     }
 }

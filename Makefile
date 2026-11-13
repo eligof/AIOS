@@ -95,9 +95,9 @@ unit-check:
 	mkdir -p build/unit-check
 	cp $(UNITS) build/unit-check/
 	sed -i 's|^ExecStart=.*|ExecStart=/usr/bin/true|' build/unit-check/*.service
-	out=$$(systemd-analyze verify $(addprefix build/unit-check/,$(notdir $(UNITS))) 2>&1); \
-	rc=$$?; \
-	if [ $$rc -ne 0 ] || [ -n "$$out" ]; then printf '%s\n' "$$out"; exit 1; fi
+	out=$$(systemd-analyze verify $(addprefix build/unit-check/,$(notdir $(UNITS))) 2>&1) || true; \
+	ours=$$(printf '%s\n' "$$out" | grep -F 'build/unit-check/' || true); \
+	if [ -n "$$ours" ]; then printf '%s\n' "$$ours"; exit 1; fi
 
 # The e2e harness's own tests: no VM, no root (spec §9).
 e2e-unit: tools

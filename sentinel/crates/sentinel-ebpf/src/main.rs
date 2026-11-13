@@ -3,8 +3,13 @@
 
 use aya_ebpf::{macros::tracepoint, programs::TracePointContext};
 
+mod shim;
+
 #[tracepoint]
-pub fn probe(_ctx: TracePointContext) -> u32 { 0 }
+pub fn probe(_ctx: TracePointContext) -> u32 {
+    let _ = unsafe { shim::task_ids(core::ptr::null()) };
+    0
+}
 
 #[cfg(not(test))]
 #[panic_handler]

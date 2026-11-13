@@ -21,6 +21,14 @@ pub struct ExecInfo {
 }
 
 #[repr(C)]
+pub struct FileDev {
+    pub mode: u32,
+    pub rdev: u32,
+    pub name_len: i32,
+    pub name: [u8; 64],
+}
+
+#[repr(C)]
 pub struct SockAddr {
     pub family: u16,
     pub port_be: u16,
@@ -32,6 +40,7 @@ unsafe extern "C" {
     fn shim_sock_laddr(sock: *const c_void, out: *mut SockAddr) -> i32;
     fn shim_current_core(task: *const c_void, out: *mut TaskCore) -> i32;
     fn shim_exec_info(bprm: *const c_void, out: *mut ExecInfo) -> i32;
+    fn shim_file_dev(file: *const c_void, out: *mut FileDev) -> i32;
     fn shim_task_tgid(task: *const c_void, out: *mut u32) -> i32;
     fn shim_task_exit_code(task: *const c_void, out: *mut i32) -> i32;
 }
@@ -92,6 +101,16 @@ pub unsafe fn sockaddr(address: *const c_void) -> Option<SockAddr> {
 pub unsafe fn sock_laddr(sock: *const c_void) -> Option<SockAddr> {
     let mut o: SockAddr = core::mem::zeroed();
     if shim_sock_laddr(sock, &mut o) == 0 {
+        Some(o)
+    } else {
+        None
+    }
+}
+
+/// Mode, raw `i_rdev` and dentry name (first 64 bytes) of a `struct file*`.
+pub unsafe fn file_dev(file: *const c_void) -> Option<FileDev> {
+    let mut o: FileDev = core::mem::zeroed();
+    if shim_file_dev(file, &mut o) == 0 {
         Some(o)
     } else {
         None

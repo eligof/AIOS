@@ -213,6 +213,23 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
                 n.family, addr, n.port
             )
         }
+    } else if h.kind == EventKind::Open as u8 {
+        // SAFETY: for Open events the kernel side wrote the open variant.
+        let o = unsafe { ev.payload.open };
+        let label = match o.dev_class {
+            1 => "camera",
+            2 => "mic",
+            3 => "input",
+            4 => "uinput",
+            5 => "hidraw",
+            _ => "none",
+        };
+        let n = (o.path_len as usize).min(64);
+        let name = String::from_utf8_lossy(&o.path[..n]).replace(['"', '\\'], "?");
+        format!(
+            ",\"dev_class\":{},\"device\":\"{}\",\"name\":\"{}\"",
+            o.dev_class, label, name
+        )
     } else {
         String::new()
     };
@@ -236,6 +253,7 @@ fn load() -> Result<()> {
     attach_lsm(&mut bpf, &btf, "exec", "bprm_check_security")?;
     attach_lsm(&mut bpf, &btf, "connect", "socket_connect")?;
     attach_lsm(&mut bpf, &btf, "listen", "socket_listen")?;
+    attach_lsm(&mut bpf, &btf, "open", "file_open")?;
     attach_btf_tp(&mut bpf, &btf, "fork", "sched_process_fork")?;
     attach_btf_tp(&mut bpf, &btf, "exit", "sched_process_exit")?;
 

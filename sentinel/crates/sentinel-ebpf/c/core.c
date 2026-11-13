@@ -104,3 +104,19 @@ int shim_sock_laddr(const void *sock, struct sentinel_addr *o) {
     }
     return e;
 }
+
+/* file->f_inode i_mode / i_rdev and dentry name (first 64 bytes). */
+int shim_file_dev(const void *file, struct sentinel_file_dev *o) {
+    const struct file *f = file;
+    const struct dentry *d = 0;
+    const unsigned char *name = 0;
+    unsigned short mode = 0;
+    int e = 0;
+    e |= BPF_CORE_READ_INTO(&mode, f, f_inode, i_mode);
+    e |= BPF_CORE_READ_INTO(&o->rdev, f, f_inode, i_rdev);
+    o->mode = mode;
+    e |= BPF_CORE_READ_INTO(&d, f, f_path.dentry);
+    e |= BPF_CORE_READ_INTO(&name, d, d_name.name);
+    o->name_len = bpf_core_read_str(o->name, sizeof(o->name), name);
+    return e;
+}

@@ -183,3 +183,51 @@ unsafe fn proc_event(ctx: &BtfTracePointContext, kind: EventKind) -> i32 {
     e.submit(0);
     0
 }
+
+#[lsm(hook = "file_open")]
+pub fn open(ctx: LsmContext) -> i32 {
+    match unsafe { try_open(&ctx) } {
+        Ok(v) => v,
+        Err(v) => v,
+    }
+}
+
+unsafe fn try_open(ctx: &LsmContext) -> Result<i32, i32> {
+    let ret: i64 = ctx.arg(1);
+    if ret != 0 {
+        return Err(ret as c_int);
+    }
+    let file: *const c_void = ctx.arg(0);
+    let Some(d) = shim::file_dev(file) else {
+        return Ok(0);
+    };
+    if d.mode & 0o170000 != 0o020000 {
+        return Ok(0); // not S_ISCHR
+    }
+    let major = d.rdev >> 20;
+    let len = if d.name_len > 0 { (d.name_len - 1) as usize & 63 } else { 0 };
+    let Some((class, bit)) = facts_kern::device_class(major, &d.name, len) else {
+        return Ok(0);
+    };
+    let Some(mut e) = emit::reserve() else {
+        return Ok(0);
+    };
+    let p = e.as_mut_ptr();
+    let Some(core) = facts_kern::fill_header(p, EventKind::Open as u8) else {
+        e.discard(0);
+        return Ok(0);
+    };
+    facts_kern::set_uid_facts(p, core.uid);
+    (*p).payload.open.dev_class = class;
+    (*p).payload.open._pad = 0;
+    (*p).payload.open.mode = d.mode;
+    (*p).payload.open.path_len = len as u16;
+    let mut i = 0;
+    while i < 64 {
+        (*p).payload.open.path[i] = d.name[i];
+        i += 1;
+    }
+    (*p).hdr.facts[G_DEVICE] |= bit;
+    e.submit(0);
+    Ok(0)
+}

@@ -45,3 +45,30 @@ pub fn set_dest_facts(_ev: *mut RawEvent, _a: &shim::SockAddr) {
 pub fn set_port_facts(_ev: *mut RawEvent, _port: u16) {
     // Task 21: CIDRS/PORTS lookup
 }
+
+fn name_ends_with(name: &[u8; 64], len: usize, c: u8) -> bool {
+    len > 0 && len <= 64 && name[(len - 1) & 63] == c
+}
+
+fn starts_with(name: &[u8; 64], pre: &[u8]) -> bool {
+    let mut i = 0;
+    while i < pre.len() {
+        if name[i] != pre[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Device class of a char device by major / dentry name: (OpenPayload.dev_class, D_* bit).
+pub fn device_class(major: u32, name: &[u8; 64], len: usize) -> Option<(u8, u32)> {
+    match major {
+        81 => Some((1, D_CAMERA)),
+        13 => Some((3, D_INPUT)),
+        116 if name_ends_with(name, len, b'c') => Some((2, D_MIC)),
+        _ if starts_with(name, b"uinput") => Some((4, D_UINPUT)),
+        _ if starts_with(name, b"hidraw") => Some((5, D_HIDRAW)),
+        _ => None,
+    }
+}

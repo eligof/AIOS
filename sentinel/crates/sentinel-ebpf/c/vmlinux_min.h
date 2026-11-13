@@ -23,7 +23,7 @@ struct cred { kuid_t uid; kuid_t euid; };
 /* exec-file info. mount.mnt_id confirmed in host BTF. */
 struct qstr { const unsigned char *name; };
 struct dentry { struct qstr d_name; };
-struct inode { unsigned int i_nlink; };
+struct inode { unsigned short i_mode; unsigned int i_nlink; unsigned int i_rdev; };
 struct vfsmount {};
 struct path { struct vfsmount *mnt; struct dentry *dentry; };
 struct file { struct inode *f_inode; struct path f_path; };

@@ -92,3 +92,47 @@ pub fn guard_truncate(ctx: LsmContext) -> i32 {
         deny_guarded().unwrap_or(0)
     }
 }
+
+/// True when the current task's cgroup v2 id is in QUARANTINE.
+pub fn quarantined() -> bool {
+    let cg = unsafe { aya_ebpf::helpers::bpf_get_current_cgroup_id() };
+    unsafe { crate::maps::QUARANTINE.get(&cg).is_some() }
+}
+
+/// Count the denial and emit a Connect event with kverdict=Denied (zeroed
+/// destination). Always yields -EPERM; emission is best-effort.
+pub unsafe fn deny_quarantined(hook: u32) -> i32 {
+    crate::engine::count_lockdown(hook);
+    if let Some(mut e) = emit::reserve() {
+        let p = e.as_mut_ptr();
+        if let Some(core) = facts_kern::fill_header(p, EventKind::Connect as u8) {
+            facts_kern::set_uid_facts(p, core.uid);
+            (*p).payload.net.family = 0;
+            (*p).payload.net.proto = 0;
+            (*p).payload.net.addr = [0; 16];
+            (*p).payload.net.port = 0;
+            (*p).payload.net._pad = 0;
+            (*p).hdr.kverdict = sentinel_common::wire::KVerdict::Denied as u8;
+            e.submit(0);
+        } else {
+            e.discard(0);
+        }
+    }
+    -1 // -EPERM
+}
+
+/// socket_sendmsg(sock, msg, size, ret@3): quarantined cgroups cannot send
+/// (closes connectionless UDP during the SOCK_DESTROY race).
+#[lsm(hook = "socket_sendmsg")]
+pub fn sendmsg(ctx: LsmContext) -> i32 {
+    unsafe {
+        let ret: i64 = ctx.arg(3);
+        if ret != 0 {
+            return ret as i32;
+        }
+        if quarantined() {
+            return deny_quarantined(2);
+        }
+        0
+    }
+}

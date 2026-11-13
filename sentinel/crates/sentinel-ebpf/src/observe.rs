@@ -92,6 +92,9 @@ unsafe fn try_connect(ctx: &LsmContext) -> Result<i32, i32> {
     if ret != 0 {
         return Err(ret as c_int);
     }
+    if crate::guard::quarantined() {
+        return Err(crate::guard::deny_quarantined(0));
+    }
     let address: *const c_void = ctx.arg(1);
     let Some(a) = shim::sockaddr(address) else {
         return Ok(0);

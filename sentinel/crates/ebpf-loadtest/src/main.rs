@@ -29,6 +29,9 @@ enum Cmd {
     Maps,
     /// Single-process heartbeat/lockdown check (fresh -> stale).
     HeartbeatSelftest,
+    /// Single-process quarantine check: a forked child in a quarantined
+    /// cgroup gets EPERM on connect, the parent does not.
+    QuarantineSelftest,
     /// Attach the observers and stream every ring-buffer event as a JSON line
     /// on stdout until SIGINT/SIGTERM.
     Load {
@@ -54,6 +57,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::HeartbeatSelftest => heartbeat_selftest(),
+        Cmd::QuarantineSelftest => quarantine_selftest(),
         Cmd::Load {
             enforce,
             selfguard,
@@ -336,6 +340,94 @@ fn heartbeat_selftest() -> Result<()> {
     Ok(())
 }
 
+/// connect() to a non-loopback address; returns errno (0 if it succeeded).
+fn probe_connect() -> i32 {
+    unsafe {
+        let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_NONBLOCK, 0);
+        if fd < 0 {
+            return -1;
+        }
+        let mut sa: libc::sockaddr_in = std::mem::zeroed();
+        sa.sin_family = libc::AF_INET as u16;
+        sa.sin_port = 9u16.to_be();
+        sa.sin_addr.s_addr = u32::from_ne_bytes([10, 0, 2, 2]);
+        let r = libc::connect(
+            fd,
+            &sa as *const _ as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in>() as u32,
+        );
+        let e = if r == 0 { 0 } else { *libc::__errno_location() };
+        libc::close(fd);
+        e
+    }
+}
+
+fn quarantine_selftest() -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/sentinel-ebpf"));
+    let mut bpf = aya::Ebpf::load(data)?;
+    let btf = aya::Btf::from_sys_fs()?;
+    {
+        let cfg = sentinel_common::wire::KConfig {
+            lockdown_after_ns: 0,
+            sentineld_tgid: std::process::id(),
+            flags: sentinel_common::wire::CFG_ENFORCE,
+            usr_mnt_id: 0,
+            _pad: 0,
+        };
+        let mut config = aya::maps::Array::<_, PodConfig>::try_from(
+            bpf.map_mut("CONFIG")
+                .ok_or_else(|| anyhow::anyhow!("CONFIG missing"))?,
+        )?;
+        config.set(0, &PodConfig(cfg), 0)?;
+    }
+    // HEARTBEAT stays 0 => lockdown inactive (lockdown_after_ns irrelevant).
+    attach_lsm(&mut bpf, &btf, "connect", "socket_connect")?;
+    attach_lsm(&mut bpf, &btf, "sendmsg", "socket_sendmsg")?;
+
+    let cg = "/sys/fs/cgroup/q";
+    let _ = std::fs::create_dir(cg);
+    let cgid = std::fs::metadata(cg)?.ino();
+    {
+        let mut q = aya::maps::HashMap::<_, u64, u8>::try_from(
+            bpf.map_mut("QUARANTINE")
+                .ok_or_else(|| anyhow::anyhow!("QUARANTINE missing"))?,
+        )?;
+        q.insert(&cgid, &1u8, 0)?;
+    }
+    eprintln!("quarantine: cgroup id {cgid}");
+
+    let pid = unsafe { libc::fork() };
+    if pid < 0 {
+        anyhow::bail!("fork failed");
+    }
+    if pid == 0 {
+        let code =
+            match std::fs::write(format!("{cg}/cgroup.procs"), std::process::id().to_string()) {
+                Ok(()) => probe_connect(),
+                Err(_) => 255,
+            };
+        unsafe { libc::_exit(code) };
+    }
+    let mut status = 0;
+    unsafe { libc::waitpid(pid, &mut status, 0) };
+    let child = if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        -1
+    };
+    let parent = probe_connect();
+    let _ = std::fs::remove_dir(cg);
+    println!("quarantine: child errno {child}, parent errno {parent}");
+    if child == libc::EPERM && parent != libc::EPERM {
+        println!("quarantine: PASS");
+        Ok(())
+    } else {
+        println!("quarantine: FAIL");
+        std::process::exit(1);
+    }
+}
+
 static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 extern "C" fn on_signal(_: libc::c_int) {
@@ -557,6 +649,7 @@ fn load(enforce: bool, selfguard: bool, guard_dir: Option<std::path::PathBuf>) -
     }
     attach_lsm(&mut bpf, &btf, "exec", "bprm_check_security")?;
     attach_lsm(&mut bpf, &btf, "connect", "socket_connect")?;
+    attach_lsm(&mut bpf, &btf, "sendmsg", "socket_sendmsg")?;
     attach_lsm(&mut bpf, &btf, "listen", "socket_listen")?;
     attach_lsm(&mut bpf, &btf, "open", "file_open")?;
     attach_lsm(&mut bpf, &btf, "ptrace", "ptrace_access_check")?;

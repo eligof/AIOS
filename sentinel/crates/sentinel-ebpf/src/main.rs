@@ -3,6 +3,8 @@
 
 use aya_ebpf::{macros::tracepoint, programs::TracePointContext};
 
+mod emit;
+mod maps;
 mod shim;
 
 #[tracepoint]

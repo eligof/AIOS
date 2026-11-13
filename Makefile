@@ -47,10 +47,10 @@ ISO_RM_WORK = $(if $(SUDO),$(SUDO),unshare --map-auto --map-root-user) rm -rf --
 	echo "If it reported 'Permission denied', clear it with the same mode that built it (sudo, or SUDO= for unprivileged)."; \
 	exit 1; } >&2
 
-.PHONY: check rust-check release-check shell-check bats-check unit-check e2e-unit tools repo \
+.PHONY: check rust-check sentinel-check release-check shell-check bats-check unit-check e2e-unit tools repo \
 	keys iso-build iso iso-check clean-iso e2e FORCE
 
-check: rust-check shell-check bats-check unit-check e2e-unit
+check: rust-check sentinel-check shell-check bats-check unit-check e2e-unit
 
 # The CLI tests need the `test-hooks` feature (AIOS_* overrides, AIOS_FAKE_RUNNER), hence
 # --all-features. The shipped configuration (no features) is linted too, and its release
@@ -62,6 +62,13 @@ rust-check:
 	cd aios-cli && $(CARGO) test --workspace --all-features
 	cd aios-cli && $(CARGO) build --release --locked -p aios
 	$(check-release-bin)
+
+# Sentinel's own workspace (sentinel/) pins a nightly toolchain via rust-toolchain.toml.
+# S1 covers the three pure crates; S2 extends this to build the eBPF object too.
+sentinel-check:
+	cd sentinel && $(CARGO) fmt --all -- --check
+	cd sentinel && $(CARGO) clippy --workspace --all-targets -- -D warnings
+	cd sentinel && $(CARGO) test --workspace
 
 # The shipped binary reads no AIOS_* variable at all, so any AIOS_ string in it means an
 # override leaked into the release build. Only grep's "no match" (status 1) passes: a read

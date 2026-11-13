@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sentinel-common",
+    "crates/sentinel-rules",
+    "crates/sentinel-detect",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+globset = "0.4.21"
+ipnet = "2.12"
+psl = "2.1.252"
+tempfile = "3"
+sentinel-common = { path = "crates/sentinel-common" }

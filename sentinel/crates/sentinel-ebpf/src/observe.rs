@@ -1,8 +1,9 @@
 use crate::{emit, facts_kern, shim};
 use aya_ebpf::{
     cty::c_int,
-    macros::{btf_tracepoint, lsm},
-    programs::{BtfTracePointContext, LsmContext},
+    helpers::bpf_probe_read_user_str_bytes,
+    macros::{btf_tracepoint, lsm, tracepoint},
+    programs::{BtfTracePointContext, LsmContext, TracePointContext},
 };
 use core::ffi::c_void;
 use sentinel_common::event::EventKind;
@@ -230,4 +231,37 @@ unsafe fn try_open(ctx: &LsmContext) -> Result<i32, i32> {
     (*p).hdr.facts[G_DEVICE] |= bit;
     e.submit(0);
     Ok(0)
+}
+
+/// sys_enter_memfd_create: args[0] = name (user ptr) at offset 16, args[1] = flags at 24.
+#[tracepoint(category = "syscalls", name = "sys_enter_memfd_create")]
+pub fn memfd(ctx: TracePointContext) -> u32 {
+    unsafe { try_memfd(&ctx) }
+}
+
+unsafe fn try_memfd(ctx: &TracePointContext) -> u32 {
+    let name_ptr = ctx.read_at::<u64>(16).unwrap_or(0);
+    let flags = ctx.read_at::<u64>(24).unwrap_or(0);
+    let Some(mut e) = emit::reserve() else {
+        return 0;
+    };
+    let p = e.as_mut_ptr();
+    let Some(core) = facts_kern::fill_header(p, EventKind::Memfd as u8) else {
+        e.discard(0);
+        return 0;
+    };
+    facts_kern::set_uid_facts(p, core.uid);
+    let mut i = 0;
+    while i < 64 {
+        (*p).payload.memfd.name[i] = 0;
+        i += 1;
+    }
+    if name_ptr != 0 {
+        let buf = core::slice::from_raw_parts_mut((*p).payload.memfd.name.as_mut_ptr(), 64);
+        let _ = bpf_probe_read_user_str_bytes(name_ptr as *const u8, buf);
+    }
+    (*p).payload.memfd.flags = flags as u32;
+    (*p).payload.memfd._pad = 0;
+    e.submit(0);
+    0
 }

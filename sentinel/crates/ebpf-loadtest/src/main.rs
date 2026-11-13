@@ -230,6 +230,12 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
             ",\"dev_class\":{},\"device\":\"{}\",\"name\":\"{}\"",
             o.dev_class, label, name
         )
+    } else if h.kind == EventKind::Memfd as u8 {
+        // SAFETY: for Memfd events the kernel side wrote the memfd variant.
+        let m = unsafe { ev.payload.memfd };
+        let end = m.name.iter().position(|b| *b == 0).unwrap_or(m.name.len());
+        let name = String::from_utf8_lossy(&m.name[..end]).replace(['"', '\\'], "?");
+        format!(",\"memfd_name\":\"{}\",\"memfd_flags\":{}", name, m.flags)
     } else {
         String::new()
     };
@@ -256,6 +262,15 @@ fn load() -> Result<()> {
     attach_lsm(&mut bpf, &btf, "open", "file_open")?;
     attach_btf_tp(&mut bpf, &btf, "fork", "sched_process_fork")?;
     attach_btf_tp(&mut bpf, &btf, "exit", "sched_process_exit")?;
+
+    {
+        let prog: &mut aya::programs::TracePoint = bpf
+            .program_mut("memfd")
+            .ok_or_else(|| anyhow::anyhow!("program memfd missing"))?
+            .try_into()?;
+        prog.load()?;
+        prog.attach("syscalls", "sys_enter_memfd_create")?;
+    }
 
     let mut ring = aya::maps::RingBuf::try_from(
         bpf.take_map("EVENTS")

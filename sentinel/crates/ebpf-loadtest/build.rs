@@ -30,13 +30,19 @@ fn main() -> anyhow::Result<()> {
     // aya-build runs `cargo build --package` in the current directory, which must therefore
     // be inside the (separate) sentinel-ebpf workspace rather than the host workspace.
     std::env::set_current_dir(&root)?;
+    // Pin the eBPF object to the project's nightly rather than aya-build's default
+    // (`Toolchain::Nightly` == rolling `nightly`). `Toolchain::Nightly` is passed to
+    // `rustup run nightly`, which does NOT auto-install, so it builds only where a
+    // generic `nightly` happens to be installed (dev boxes) and fails on a clean CI
+    // runner that carries only the pinned toolchain. Keep this in sync with the
+    // `nightly-2026-11-03` channel in sentinel/{,crates/sentinel-ebpf/}rust-toolchain.toml.
     build_ebpf(
         [Package {
             name: "sentinel-ebpf",
             root_dir: &root,
             ..Default::default()
         }],
-        Toolchain::default(),
+        Toolchain::Custom("nightly-2026-11-03"),
     )?;
     Ok(())
 }

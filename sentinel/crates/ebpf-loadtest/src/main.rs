@@ -84,9 +84,128 @@ struct PodRule(sentinel_common::rule::KRule);
 // SAFETY: KRule is repr(C), Copy, and fully initialised plain data.
 unsafe impl aya::Pod for PodRule {}
 
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct PodCidr(sentinel_common::wire::CidrEntry);
+// SAFETY: CidrEntry is repr(C), Copy, plain data with no padding.
+unsafe impl aya::Pod for PodCidr {}
+
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct PodPort(sentinel_common::wire::PortRange);
+// SAFETY: PortRange is repr(C), Copy, explicit padding field.
+unsafe impl aya::Pod for PodPort {}
+
+/// Mount id of the mount whose mount point is exactly `path`, from
+/// /proc/self/mountinfo (field 1 = mount id, field 5 = mount point). When
+/// several mounts share a mount point the last (topmost) one wins.
+fn mount_id_for(path: &str) -> Result<Option<u64>> {
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+    let canon = canon.to_string_lossy().into_owned();
+    let info = std::fs::read_to_string("/proc/self/mountinfo")?;
+    let mut found = None;
+    for line in info.lines() {
+        let f: Vec<&str> = line.split(' ').collect();
+        if f.len() < 5 {
+            continue;
+        }
+        // mountinfo escapes space as \040.
+        let mp = f[4].replace("\\040", " ");
+        if mp == canon {
+            found = f[0].parse::<u64>().ok();
+        }
+    }
+    Ok(found)
+}
+
+/// Write the runtime-resolved MOUNTS and the static CIDRS/PORTS/UID_LITERALS.
+fn populate_lookups(bpf: &mut aya::Ebpf, t: &sentinel_rules::compile::Tables) -> Result<()> {
+    use sentinel_common::facts::slot_bit;
+    use sentinel_common::rule::{MAX_CIDRS, MAX_PORT_SETS, MAX_UID_LITERALS};
+    use sentinel_common::wire::{CidrEntry, PortRange};
+    {
+        let mut m = aya::maps::HashMap::<_, u64, u32>::try_from(
+            bpf.map_mut("MOUNTS")
+                .ok_or_else(|| anyhow::anyhow!("MOUNTS missing"))?,
+        )?;
+        for (slot, path) in t.mounts.iter().enumerate() {
+            match mount_id_for(path)? {
+                Some(id) => {
+                    let cur = m.get(&id, 0).unwrap_or(0);
+                    m.insert(&id, &(cur | slot_bit(slot)), 0)?;
+                    eprintln!("mount slot {slot}: {path} -> mnt_id {id}");
+                }
+                None => eprintln!(
+                    "warning: exe_on path {path} is not a mount point; rules on it cannot match"
+                ),
+            }
+        }
+    }
+    {
+        let mut a = aya::maps::Array::<_, PodCidr>::try_from(
+            bpf.map_mut("CIDRS")
+                .ok_or_else(|| anyhow::anyhow!("CIDRS missing"))?,
+        )?;
+        anyhow::ensure!(t.cidrs.len() <= MAX_CIDRS, "too many CIDRs");
+        for (slot, net) in t.cidrs.iter().enumerate() {
+            let mut e = CidrEntry {
+                addr: [0; 16],
+                prefix: net.prefix_len(),
+                family: 0,
+                slot: slot as u8,
+                used: 1,
+            };
+            match net.network() {
+                std::net::IpAddr::V4(v) => {
+                    e.addr[..4].copy_from_slice(&v.octets());
+                    e.family = 2;
+                }
+                std::net::IpAddr::V6(v) => {
+                    e.addr = v.octets();
+                    e.family = 10;
+                }
+            }
+            a.set(slot as u32, &PodCidr(e), 0)?;
+        }
+    }
+    {
+        let mut a = aya::maps::Array::<_, PodPort>::try_from(
+            bpf.map_mut("PORTS")
+                .ok_or_else(|| anyhow::anyhow!("PORTS missing"))?,
+        )?;
+        let mut idx = 0u32;
+        for (slot, set) in t.port_sets.iter().enumerate() {
+            for &(lo, hi) in set {
+                anyhow::ensure!((idx as usize) < MAX_PORT_SETS, "too many port ranges");
+                let r = PortRange {
+                    lo,
+                    hi,
+                    slot: slot as u8,
+                    used: 1,
+                    _pad: [0; 2],
+                };
+                a.set(idx, &PodPort(r), 0)?;
+                idx += 1;
+            }
+        }
+    }
+    {
+        let mut a = aya::maps::Array::<_, u32>::try_from(
+            bpf.map_mut("UID_LITERALS")
+                .ok_or_else(|| anyhow::anyhow!("UID_LITERALS missing"))?,
+        )?;
+        for i in 0..MAX_UID_LITERALS {
+            // u32::MAX marks an unused slot (array default would be uid 0 = root).
+            let v = t.uid_lits.get(i).copied().unwrap_or(u32::MAX);
+            a.set(i as u32, &v, 0)?;
+        }
+    }
+    Ok(())
+}
+
 /// Compile the rule pack (a directory of *.toml, default: the repo pack) with
 /// the S1 `sentinel-rules` crate and write the kernel rules into RULES and
-/// RULE_COUNT. Lookup tables (CIDRS/PORTS/MOUNTS/UID_LITERALS) are Task 21.
+/// RULE_COUNT, then populate the lookup tables.
 fn populate_rules(bpf: &mut aya::Ebpf) -> Result<()> {
     let dir = std::env::var("SENTINEL_RULES_DIR").unwrap_or_else(|_| {
         concat!(
@@ -123,6 +242,7 @@ fn populate_rules(bpf: &mut aya::Ebpf) -> Result<()> {
             eprintln!("rule {} -> {}", i, rules[kr.index as usize].id);
         }
     }
+    populate_lookups(bpf, &tables)?;
     {
         let mut cnt = aya::maps::Array::<_, u32>::try_from(
             bpf.map_mut("RULE_COUNT")

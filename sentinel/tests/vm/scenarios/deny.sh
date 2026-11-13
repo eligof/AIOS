@@ -26,12 +26,6 @@ cat /tmp/ev.jsonl
 [ "$RC" -ne 0 ] || { echo "ASSERT FAIL: memfd exec not denied"; exit 1; }
 grep -F '"kind":0,' /tmp/ev.jsonl | grep -qF '"kverdict":1' || { echo "ASSERT FAIL: no Denied exec event"; exit 1; }
 [ "$RC2" -eq 0 ] || { echo "ASSERT FAIL: /tmp/t did not run (exit $RC2)"; exit 1; }
-# exec-tmp is an audit rule keyed on exe_on(/tmp); the MOUNTS table that
-# resolves mnt_id -> /tmp is populated in Task 21, so until then the WouldDeny
-# event cannot be produced. Assert it once available; never a Denied for /tmp.
-if grep -F '"kind":0,' /tmp/ev.jsonl | grep -qF '"kverdict":2'; then
-  echo "WouldDeny exec event present"
-else
-  echo "NOTE: no WouldDeny exec event (exe_on MOUNTS populated in Task 21)"
-fi
+# exec-tmp is an audit rule keyed on exe_on(/tmp): runs, but is a WouldDeny.
+grep -F '"kind":0,' /tmp/ev.jsonl | grep -qF '"kverdict":2' || { echo "ASSERT FAIL: no WouldDeny exec event"; exit 1; }
 echo "deny: PASS"

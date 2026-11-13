@@ -56,10 +56,11 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
-      # clang compiles the C CO-RE shim; llvm/libelf-dev back the eBPF build. `make tools`
-      # installs bpf-linker (pinned), whose first uncached build adds a few minutes to CI.
+      # clang compiles the C CO-RE shim; libbpf-dev supplies its bpf/bpf_helpers.h and
+      # bpf_core_read.h; llvm/libelf-dev back the eBPF build. `make tools` installs
+      # bpf-linker (pinned), whose first uncached build adds a few minutes to CI.
       - name: Install clang + bpf prerequisites
-        run: sudo apt-get update && sudo apt-get install -y clang llvm libelf-dev
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libelf-dev libbpf-dev
 
       - name: Fetch pinned tools (shellcheck, bats, pytest venv)
         run: make tools

@@ -119,6 +119,8 @@ tools: $(SHELLCHECK) $(BATS) $(filter build/venv/bin/pytest,$(PYTEST)) build/too
 
 build/tools/.bpf-linker-$(BPF_LINKER_VERSION):
 	command -v clang >/dev/null || { echo "clang required for the C CO-RE shim" >&2; exit 1; }
+	echo '#include <bpf/bpf_helpers.h>' | clang -target bpfel -E -x c - >/dev/null 2>&1 \
+		|| { echo "libbpf headers (bpf/bpf_helpers.h) required for the C CO-RE shim: install libbpf (Arch) / libbpf-dev (Debian)" >&2; exit 1; }
 	$(CARGO) install bpf-linker --version $(BPF_LINKER_VERSION) --locked
 	mkdir -p build/tools && touch $@
 

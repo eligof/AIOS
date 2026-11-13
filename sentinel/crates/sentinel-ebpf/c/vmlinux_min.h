@@ -45,6 +45,11 @@ struct sock_common {
 };
 struct sock { struct sock_common __sk_common; };
 struct socket { struct sock *sk; };
+/* do_filp_open args. In newer kernels filename.name sits in an anonymous
+ * __filename_head; CO-RE matches the member by name through it. */
+struct filename { const char *name; };
+struct nameidata { struct filename *name; };
+struct open_flags { int open_flag; __u16 mode; int acc_mode; int intent; int lookup_flags; };
 /* bpf_attr: BPF_PROG_LOAD's anonymous struct has __u32 prog_type first (matched by name). */
 union bpf_attr { struct { __u32 prog_type; }; };
 #pragma clang attribute pop

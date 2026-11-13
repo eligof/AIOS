@@ -2,8 +2,8 @@ use crate::{emit, facts_kern, shim};
 use aya_ebpf::{
     cty::c_int,
     helpers::bpf_probe_read_user_str_bytes,
-    macros::{btf_tracepoint, lsm, tracepoint},
-    programs::{BtfTracePointContext, LsmContext, TracePointContext},
+    macros::{btf_tracepoint, fexit, lsm, tracepoint},
+    programs::{BtfTracePointContext, FExitContext, LsmContext, TracePointContext},
 };
 use core::ffi::c_void;
 use sentinel_common::event::EventKind;
@@ -446,4 +446,62 @@ unsafe fn try_signal(ctx: &LsmContext) -> Result<i32, i32> {
     (*p).payload.signal.sig = sig;
     e.submit(0);
     Ok(0)
+}
+
+/// -EROFS as an ERR_PTR-encoded `struct file *`.
+const EROFS_RET: i64 = -30;
+const O_ACCMODE: i32 = 3;
+const O_CREAT: i32 = 0o100;
+const O_TRUNC: i32 = 0o1000;
+
+/// Hook choice: `do_filp_open` is not BTF-attachable (absent from vmlinux
+/// BTF, inlined), so this is the documented fallback `path_openat`. fexit sees
+/// the final -EROFS; a write to a read-only mount fails in the VFS before
+/// `file_open`, so the LSM hook cannot see it.
+#[fexit(function = "path_openat")]
+pub fn write_refused(ctx: FExitContext) -> i32 {
+    unsafe {
+        let _ = try_write_refused(&ctx);
+    }
+    0
+}
+
+/// path_openat(struct nameidata *nd, const struct open_flags *op, unsigned flags) -> struct file *@3.
+unsafe fn try_write_refused(ctx: &FExitContext) -> Result<(), ()> {
+    let ret: i64 = ctx.arg(3);
+    if ret != EROFS_RET {
+        return Err(());
+    }
+    let op: *const c_void = ctx.arg(1);
+    let flags = shim::open_flag(op).ok_or(())?;
+    if (flags & O_ACCMODE) == 0 && (flags & (O_CREAT | O_TRUNC)) == 0 {
+        return Err(());
+    }
+    let nd: *const c_void = ctx.arg(0);
+    let mut e = emit::reserve().ok_or(())?;
+    let p = e.as_mut_ptr();
+    let Some(core) = facts_kern::fill_header(p, EventKind::WriteRefused as u8) else {
+        e.discard(0);
+        return Err(());
+    };
+    facts_kern::set_uid_facts(p, core.uid);
+    let path = &mut (*p).payload.open;
+    let mut i = 0;
+    while i < path.path.len() {
+        path.path[i] = 0;
+        i += 1;
+    }
+    path.path_len = 0;
+    path.dev_class = 0;
+    path._pad = 0;
+    path.mode = 0;
+    if shim::nd_filename(nd, path.path.as_mut_ptr(), path.path.len() as i32) {
+        let mut n = 0;
+        while n < path.path.len() && path.path[n] != 0 {
+            n += 1;
+        }
+        path.path_len = n as u16;
+    }
+    e.submit(0);
+    Ok(())
 }

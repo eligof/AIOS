@@ -42,6 +42,9 @@ unsafe extern "C" {
     fn shim_exec_info(bprm: *const c_void, out: *mut ExecInfo) -> i32;
     fn shim_file_dev(file: *const c_void, out: *mut FileDev) -> i32;
     fn shim_file_name(file: *const c_void, out: *mut u8, cap: i32) -> i32;
+    fn shim_filename(filename: *const c_void, out: *mut u8, cap: i32) -> i32;
+    fn shim_nd_filename(nd: *const c_void, out: *mut u8, cap: i32) -> i32;
+    fn shim_open_flag(op: *const c_void, out: *mut i32) -> i32;
     fn shim_ptrace(child: *const c_void, tgid: *mut u32, uid: *mut u32) -> i32;
     fn shim_is_descendant(child: *const c_void, ancestor_tgid: u32) -> i32;
     fn shim_bpf_prog_type(attr: *const c_void, out: *mut u32) -> i32;
@@ -149,4 +152,24 @@ pub unsafe fn bpf_prog_type(attr: *const c_void) -> Option<u32> {
     } else {
         None
     }
+}
+
+/// Copy `filename->name` of a `struct filename*` into `out` (NUL-terminated).
+pub unsafe fn filename(filename: *const c_void, out: *mut u8, cap: i32) -> bool {
+    shim_filename(filename, out, cap) == 0
+}
+
+/// `op->open_flag` of a `struct open_flags*`.
+pub unsafe fn open_flag(op: *const c_void) -> Option<i32> {
+    let mut v: i32 = 0;
+    if shim_open_flag(op, &mut v) == 0 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// Copy `nd->name->name` of a `struct nameidata*` into `out` (NUL-terminated).
+pub unsafe fn nd_filename(nd: *const c_void, out: *mut u8, cap: i32) -> bool {
+    shim_nd_filename(nd, out, cap) == 0
 }

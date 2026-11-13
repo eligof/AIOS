@@ -230,6 +230,12 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
             ",\"dev_class\":{},\"device\":\"{}\",\"name\":\"{}\"",
             o.dev_class, label, name
         )
+    } else if h.kind == EventKind::WriteRefused as u8 {
+        // SAFETY: for WriteRefused events the kernel side wrote the open variant.
+        let o = unsafe { ev.payload.open };
+        let n = (o.path_len as usize).min(o.path.len());
+        let path = String::from_utf8_lossy(&o.path[..n]).replace(['"', '\\'], "?");
+        format!(",\"path\":\"{}\"", path)
     } else if h.kind == EventKind::Ptrace as u8 {
         use sentinel_common::facts::{G_PTRACE, P_ANY, P_NON_DESCENDANT, P_OTHER_UID};
         // SAFETY: for Ptrace events the kernel side wrote the ptrace variant.
@@ -307,6 +313,14 @@ fn load() -> Result<()> {
     attach_btf_tp(&mut bpf, &btf, "fork", "sched_process_fork")?;
     attach_btf_tp(&mut bpf, &btf, "exit", "sched_process_exit")?;
 
+    {
+        let prog: &mut aya::programs::FExit = bpf
+            .program_mut("write_refused")
+            .ok_or_else(|| anyhow::anyhow!("program write_refused missing"))?
+            .try_into()?;
+        prog.load("path_openat", &btf)?;
+        prog.attach()?;
+    }
     {
         let prog: &mut aya::programs::TracePoint = bpf
             .program_mut("memfd")

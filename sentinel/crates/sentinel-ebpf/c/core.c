@@ -166,3 +166,26 @@ int shim_bpf_prog_type(const void *attr, unsigned int *out) {
     const union bpf_attr *a = attr;
     return BPF_CORE_READ_INTO(out, a, prog_type);
 }
+
+/* struct filename->name (kernel string) into out, NUL-terminated (cap <= 256). */
+int shim_filename(const void *filename, unsigned char *out, int cap) {
+    const struct filename *f = filename;
+    const unsigned char *name = 0;
+    if (cap <= 0 || cap > 256) return -1;
+    if (BPF_CORE_READ_INTO(&name, f, name) || !name) return -1;
+    return bpf_core_read_str(out, cap, name) < 0 ? -1 : 0;
+}
+
+/* nameidata->name->name (path_openat's requested path). */
+int shim_nd_filename(const void *nd, unsigned char *out, int cap) {
+    const struct nameidata *n = nd;
+    const struct filename *f = 0;
+    if (BPF_CORE_READ_INTO(&f, n, name) || !f) return -1;
+    return shim_filename(f, out, cap);
+}
+
+/* struct open_flags->open_flag */
+int shim_open_flag(const void *op, int *out) {
+    const struct open_flags *o = op;
+    return BPF_CORE_READ_INTO(out, o, open_flag);
+}

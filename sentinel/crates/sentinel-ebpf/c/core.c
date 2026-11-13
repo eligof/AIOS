@@ -160,3 +160,9 @@ int shim_is_descendant(const void *child, unsigned int ancestor_tgid) {
     }
     return 0;
 }
+
+/* BPF_PROG_LOAD attr->prog_type (kernel copy of bpf_attr) */
+int shim_bpf_prog_type(const void *attr, unsigned int *out) {
+    const union bpf_attr *a = attr;
+    return BPF_CORE_READ_INTO(out, a, prog_type);
+}

@@ -45,5 +45,7 @@ struct sock_common {
 };
 struct sock { struct sock_common __sk_common; };
 struct socket { struct sock *sk; };
+/* bpf_attr: BPF_PROG_LOAD's anonymous struct has __u32 prog_type first (matched by name). */
+union bpf_attr { struct { __u32 prog_type; }; };
 #pragma clang attribute pop
 #endif

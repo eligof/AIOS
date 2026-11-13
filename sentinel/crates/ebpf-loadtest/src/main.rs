@@ -250,6 +250,10 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
         let end = m.name.iter().position(|b| *b == 0).unwrap_or(m.name.len());
         let name = String::from_utf8_lossy(&m.name[..end]).replace(['"', '\\'], "?");
         format!(",\"read_id\":{},\"module_name\":\"{}\"", m.read_id, name)
+    } else if h.kind == EventKind::Bpf as u8 {
+        // SAFETY: for Bpf events the kernel side wrote the bpf variant.
+        let b = unsafe { ev.payload.bpf };
+        format!(",\"bpf_cmd\":{},\"prog_type\":{}", b.cmd, b.prog_type)
     } else if h.kind == EventKind::Memfd as u8 {
         // SAFETY: for Memfd events the kernel side wrote the memfd variant.
         let m = unsafe { ev.payload.memfd };
@@ -299,6 +303,9 @@ fn load() -> Result<()> {
         bpf.take_map("EVENTS")
             .ok_or_else(|| anyhow::anyhow!("EVENTS missing"))?,
     )?;
+
+    // Attach last so the loader's own setup bpf() calls are not observed.
+    attach_lsm(&mut bpf, &btf, "bpf", "bpf")?;
 
     // SAFETY: the handler only stores to an atomic (async-signal-safe).
     unsafe {

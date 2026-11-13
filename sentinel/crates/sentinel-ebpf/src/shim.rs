@@ -44,6 +44,7 @@ unsafe extern "C" {
     fn shim_file_name(file: *const c_void, out: *mut u8, cap: i32) -> i32;
     fn shim_ptrace(child: *const c_void, tgid: *mut u32, uid: *mut u32) -> i32;
     fn shim_is_descendant(child: *const c_void, ancestor_tgid: u32) -> i32;
+    fn shim_bpf_prog_type(attr: *const c_void, out: *mut u32) -> i32;
     fn shim_task_tgid(task: *const c_void, out: *mut u32) -> i32;
     fn shim_task_exit_code(task: *const c_void, out: *mut i32) -> i32;
 }
@@ -138,4 +139,14 @@ pub unsafe fn is_descendant(child: *const c_void, ancestor_tgid: u32) -> bool {
 /// Copy the dentry name of a `struct file*` into `out` (NUL-terminated).
 pub unsafe fn file_name(file: *const c_void, out: *mut u8, cap: i32) -> bool {
     shim_file_name(file, out, cap) == 0
+}
+
+/// `attr->prog_type` of a kernel `union bpf_attr*` (BPF_PROG_LOAD layout).
+pub unsafe fn bpf_prog_type(attr: *const c_void) -> Option<u32> {
+    let mut v: u32 = 0;
+    if shim_bpf_prog_type(attr, &mut v) == 0 {
+        Some(v)
+    } else {
+        None
+    }
 }

@@ -367,3 +367,41 @@ unsafe fn try_module(ctx: &LsmContext, has_file: bool) -> Result<i32, i32> {
     e.submit(0);
     Ok(0)
 }
+
+/// `enum bpf_cmd`: BPF_PROG_LOAD.
+const BPF_PROG_LOAD: u32 = 5;
+
+#[lsm(hook = "bpf")]
+pub fn bpf(ctx: LsmContext) -> i32 {
+    match unsafe { try_bpf(&ctx) } {
+        Ok(v) => v,
+        Err(v) => v,
+    }
+}
+
+/// bpf(int cmd, union bpf_attr *attr, unsigned int size, bool kernel, ret@4).
+unsafe fn try_bpf(ctx: &LsmContext) -> Result<i32, i32> {
+    let ret: i64 = ctx.arg(4);
+    if ret != 0 {
+        return Err(ret as c_int);
+    }
+    let cmd: u32 = ctx.arg(0);
+    let attr: *const c_void = ctx.arg(1);
+    let Some(mut e) = emit::reserve() else {
+        return Ok(0);
+    };
+    let p = e.as_mut_ptr();
+    let Some(core) = facts_kern::fill_header(p, EventKind::Bpf as u8) else {
+        e.discard(0);
+        return Ok(0);
+    };
+    facts_kern::set_uid_facts(p, core.uid);
+    (*p).payload.bpf.cmd = cmd;
+    (*p).payload.bpf.prog_type = if cmd == BPF_PROG_LOAD {
+        shim::bpf_prog_type(attr).unwrap_or(0)
+    } else {
+        0
+    };
+    e.submit(0);
+    Ok(0)
+}

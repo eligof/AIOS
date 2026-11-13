@@ -69,6 +69,7 @@ sentinel-check:
 	cd sentinel && $(CARGO) fmt --all -- --check
 	cd sentinel && $(CARGO) clippy --workspace --all-targets -- -D warnings
 	cd sentinel && $(CARGO) test --workspace
+	cd sentinel && PATH="$$HOME/.cargo/bin:$$PATH" $(CARGO) build -p ebpf-loadtest
 
 # The shipped binary reads no AIOS_* variable at all, so any AIOS_ string in it means an
 # override leaked into the release build. Only grep's "no match" (status 1) passes: a read
@@ -110,7 +111,16 @@ unit-check:
 e2e-unit: tools
 	$(PYTEST) -p no:cacheprovider -q tests/e2e/test_harness_unit.py
 
-tools: $(SHELLCHECK) $(BATS) $(filter build/venv/bin/pytest,$(PYTEST))
+# bpf-linker links the eBPF object; clang compiles the C CO-RE shim. cargo install lands in
+# ~/.cargo/bin (on PATH above) and is a quick no-op when this version is already installed.
+BPF_LINKER_VERSION ?= 0.9.13
+
+tools: $(SHELLCHECK) $(BATS) $(filter build/venv/bin/pytest,$(PYTEST)) build/tools/.bpf-linker-$(BPF_LINKER_VERSION)
+
+build/tools/.bpf-linker-$(BPF_LINKER_VERSION):
+	command -v clang >/dev/null || { echo "clang required for the C CO-RE shim" >&2; exit 1; }
+	$(CARGO) install bpf-linker --version $(BPF_LINKER_VERSION) --locked
+	mkdir -p build/tools && touch $@
 
 build/tools/shellcheck:
 	mkdir -p build/tools

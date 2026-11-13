@@ -2,6 +2,18 @@ use aya_build::{build_ebpf, Package, Toolchain};
 use cargo_metadata::MetadataCommand;
 
 fn main() -> anyhow::Result<()> {
+    // Rebuild the embedded object whenever any kernel or shared-contract source changes,
+    // not just this build script (sentinel-ebpf is outside the host workspace).
+    let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for rel in [
+        "../sentinel-ebpf/src",
+        "../sentinel-ebpf/c",
+        "../sentinel-ebpf/Cargo.toml",
+        "../sentinel-ebpf/build.rs",
+        "../sentinel-common/src",
+    ] {
+        println!("cargo:rerun-if-changed={}", here.join(rel).display());
+    }
     // sentinel-ebpf is excluded from the workspace, so query its manifest directly.
     let manifest =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../sentinel-ebpf/Cargo.toml");

@@ -87,7 +87,9 @@ impl Table {
             if parent == 0 || !seen.insert(parent) {
                 break;
             }
-            let Some(pp) = self.procs.get(&parent) else { break };
+            let Some(pp) = self.procs.get(&parent) else {
+                break;
+            };
             out.push(pp.clone());
             if parent == 1 {
                 break;
@@ -267,7 +269,11 @@ mod tests {
         let mut t = Table::default();
         t.insert(p(10, 1, "/a"));
         t.record_context(10, serde_json::json!({"on": "connect"}), 0);
-        t.record_context(10, serde_json::json!({"on": "listen"}), CONTEXT_WINDOW_MS + 1);
+        t.record_context(
+            10,
+            serde_json::json!({"on": "listen"}),
+            CONTEXT_WINDOW_MS + 1,
+        );
         let ctx = t.context_for(10, CONTEXT_WINDOW_MS + 2);
         assert_eq!(ctx.len(), 1);
         assert_eq!(ctx[0]["on"], "listen");

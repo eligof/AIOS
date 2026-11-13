@@ -7,7 +7,12 @@
 pub mod event;
 pub mod facts;
 pub mod rule;
+pub mod wire;
 
 pub use event::{Action, EventKind, Mode, Severity};
 pub use facts::*;
 pub use rule::{eval, KRule, MAX_CIDRS, MAX_MOUNTS, MAX_PORT_SETS, MAX_RULES, MAX_UID_LITERALS};
+pub use wire::{
+    CidrEntry, EventHeader, EventPayload, KConfig, KVerdict, PortRange, RawEvent, ARGV_LEN,
+    CFG_ENFORCE, CFG_SELFGUARD, EXE_LEN, NAME_LEN, PATH_LEN,
+};

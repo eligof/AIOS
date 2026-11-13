@@ -71,6 +71,10 @@ fn write_canonical(v: &serde_json::Value, out: &mut String) {
                 if i > 0 {
                     out.push(',');
                 }
+                // A bare `String` key can only fail to serialise if its
+                // `Serialize` impl errors, which (as in `compute_hash`
+                // below) means a non-finite f64 or a non-string map key —
+                // neither applies to a `&String`, so this cannot panic.
                 out.push_str(&serde_json::to_string(*k).expect("String key serialises"));
                 out.push(':');
                 write_canonical(&map[*k], out);
@@ -143,12 +147,18 @@ fn err<T>(msg: impl Into<String>) -> Result<T, StoreError> {
 }
 
 /// The hash-chained alert log (spec §9).
+#[derive(Debug)]
 pub struct Store {
     dir: PathBuf,
     live: PathBuf,
     last: String,
     /// Bytes after which the live file rotates. Public so tests can shrink it.
     pub rotate_at: u64,
+    /// Set by `open` when it dropped an incomplete final record left by a
+    /// crash mid-append — a torn write that was never sealed onto the chain
+    /// (spec §12: a store problem degrades the store, it does not stop
+    /// alerting). `None` means the live file's tail was intact.
+    pub recovered_tail: Option<String>,
 }
 
 impl Store {
@@ -163,11 +173,9 @@ impl Store {
             live,
             last: GENESIS.to_string(),
             rotate_at: ROTATE_AT,
+            recovered_tail: None,
         };
-        s.last = match s.read_all()?.last() {
-            Some(a) => a.hash.clone(),
-            None => GENESIS.to_string(),
-        };
+        s.last = s.recover_last_hash()?;
         Ok(s)
     }
 
@@ -176,14 +184,125 @@ impl Store {
         self.last.clone()
     }
 
-    /// The rotated files, oldest first, then the live file.
-    fn files(&self) -> Result<Vec<PathBuf>, StoreError> {
+    /// Recover the chain head without reading the whole log: only the live
+    /// file, or — when it is missing or has nothing usable — the newest
+    /// rotated file. This bounds the cost of `open` to one file (at most
+    /// `rotate_at` bytes) rather than the store's total history, which can
+    /// span an unbounded number of rotated files (spec §13's RSS budget;
+    /// the daemon's unit also orders `Before=sysinit.target`, so `open`'s
+    /// latency matters). `read_all` and `verify` remain the operations that
+    /// walk the full chain; this one deliberately does not.
+    fn recover_last_hash(&mut self) -> Result<String, StoreError> {
+        if self.live.exists() {
+            let live = self.live.clone();
+            if let Some(h) = self.recover_from_file(&live, true)? {
+                return Ok(h);
+            }
+        }
+        if let Some((_, path)) = self.rotated()?.into_iter().next_back() {
+            if let Some(h) = self.recover_from_file(&path, false)? {
+                return Ok(h);
+            }
+        }
+        Ok(GENESIS.to_string())
+    }
+
+    /// Read `path` looking only for its last record's hash. A parse failure
+    /// on any line other than the final one, or any parse failure at all
+    /// when `tolerate_torn_tail` is false (a rotated file: it was only
+    /// renamed into place after a complete, synced write, so it should
+    /// never have a torn tail), is tampering or corruption — a hard error.
+    ///
+    /// A parse failure on the FINAL line when `tolerate_torn_tail` is true
+    /// (the live file) is instead treated as a crash mid-append: that
+    /// record was never completed, so nothing was ever chained from it —
+    /// dropping it leaves the chain intact. The file is truncated back to
+    /// the end of the last complete line and `recovered_tail` is set so a
+    /// later task can surface this in `Status` and as an alert.
+    fn recover_from_file(
+        &mut self,
+        path: &Path,
+        tolerate_torn_tail: bool,
+    ) -> Result<Option<String>, StoreError> {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => return err(format!("cannot read {}: {e}", path.display())),
+        };
+        // Byte ranges of each non-empty line, found by scanning for `\n`
+        // directly rather than `read_to_string` + `BufRead::lines`, so a
+        // crash that tears a multi-byte UTF-8 character mid-write is still
+        // just a bad final line rather than a whole-file read failure.
+        let mut lines: Vec<(usize, &[u8])> = Vec::new();
+        let mut start = 0usize;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\n' {
+                let line = &bytes[start..i];
+                if !line.iter().all(u8::is_ascii_whitespace) {
+                    lines.push((start, line));
+                }
+                start = i + 1;
+            }
+        }
+        if start < bytes.len() {
+            let line = &bytes[start..];
+            if !line.iter().all(u8::is_ascii_whitespace) {
+                lines.push((start, line));
+            }
+        }
+
+        let last_index = lines.len().saturating_sub(1);
+        let mut last_hash: Option<String> = None;
+        for (i, &(line_start, line)) in lines.iter().enumerate() {
+            match serde_json::from_slice::<Alert>(line) {
+                Ok(a) => last_hash = Some(a.hash),
+                Err(e) => {
+                    if tolerate_torn_tail && i == last_index {
+                        let f = match OpenOptions::new().write(true).open(path) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                return err(format!(
+                                    "cannot open {} to drop a torn final record: {e}",
+                                    path.display()
+                                ));
+                            }
+                        };
+                        if let Err(e) = f.set_len(line_start as u64) {
+                            return err(format!("cannot truncate {}: {e}", path.display()));
+                        }
+                        self.recovered_tail = Some(format!(
+                            "{}: dropped an incomplete final record (line {}): {e}",
+                            path.display(),
+                            i + 1
+                        ));
+                        return Ok(last_hash);
+                    }
+                    return err(format!("{}: line {}: {e}", path.display(), i + 1));
+                }
+            }
+        }
+        Ok(last_hash)
+    }
+
+    /// Parsed `alerts.<n>.jsonl` entries in this directory, sorted by `n`
+    /// ascending. Directory-iteration errors are surfaced rather than
+    /// silently skipped (`flatten`-ing them would make `verify` miss a
+    /// whole file and misreport a real I/O problem as a broken chain).
+    fn rotated(&self) -> Result<Vec<(u32, PathBuf)>, StoreError> {
         let mut rotated: Vec<(u32, PathBuf)> = Vec::new();
         let rd = match std::fs::read_dir(&self.dir) {
             Ok(rd) => rd,
             Err(e) => return err(format!("cannot read {}: {e}", self.dir.display())),
         };
-        for ent in rd.flatten() {
+        for ent in rd {
+            let ent = match ent {
+                Ok(ent) => ent,
+                Err(e) => {
+                    return err(format!(
+                        "cannot read an entry in {}: {e}",
+                        self.dir.display()
+                    ));
+                }
+            };
             let name = ent.file_name().to_string_lossy().into_owned();
             if let Some(n) = name
                 .strip_prefix("alerts.")
@@ -194,7 +313,12 @@ impl Store {
             }
         }
         rotated.sort_by_key(|(n, _)| *n);
-        let mut out: Vec<PathBuf> = rotated.into_iter().map(|(_, p)| p).collect();
+        Ok(rotated)
+    }
+
+    /// The rotated files, oldest first, then the live file.
+    fn files(&self) -> Result<Vec<PathBuf>, StoreError> {
+        let mut out: Vec<PathBuf> = self.rotated()?.into_iter().map(|(_, p)| p).collect();
         if self.live.exists() {
             out.push(self.live.clone());
         }
@@ -246,29 +370,60 @@ impl Store {
             return err(format!("cannot write {}: {e}", self.live.display()));
         }
         self.last = a.hash.clone();
-        let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+        // Propagated rather than defaulted to 0: defaulting would make
+        // `size >= rotate_at` silently and permanently false after one
+        // failed `fstat`, disabling rotation forever with no error for
+        // `Status` to report.
+        let size = match f.metadata() {
+            Ok(m) => m.len(),
+            Err(e) => return err(format!("cannot stat {}: {e}", self.live.display())),
+        };
         if size >= self.rotate_at {
             self.rotate()?;
         }
         Ok(a.hash)
     }
 
-    /// Rename the live file to the next free `alerts.<n>.jsonl`. The next
-    /// record keeps chaining from `self.last`, so the chain spans the rename.
+    /// Rename the live file to the next free `alerts.<n>.jsonl`, `n` one
+    /// past the HIGHEST EXISTING rotated file — not the first free slot.
+    /// A rotated file can be missing (an admin's cleanup, a partial
+    /// restore) without that being tamper evidence; reusing the gap would
+    /// make a later `verify` misreport that ordinary deletion as a broken
+    /// hash chain instead of just a shorter one. The next record keeps
+    /// chaining from `self.last`, so the chain spans the rename.
     fn rotate(&mut self) -> Result<(), StoreError> {
-        let mut n = 1u32;
-        while self.dir.join(format!("alerts.{n}.jsonl")).exists() {
-            n += 1;
-        }
-        let to = self.dir.join(format!("alerts.{n}.jsonl"));
+        let next = self
+            .rotated()?
+            .into_iter()
+            .map(|(n, _)| n)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let to = self.dir.join(format!("alerts.{next}.jsonl"));
         if let Err(e) = std::fs::rename(&self.live, &to) {
-            return err(format!("cannot rotate to {}: {e}", to.display()));
+            return err(format!(
+                "cannot rotate {} to {}: {e}",
+                self.live.display(),
+                to.display()
+            ));
         }
         Ok(())
     }
 
-    /// Walk the whole chain. Returns the number of records, or an error naming
-    /// the index of the first bad one.
+    /// Walk the whole chain. Returns the number of records, or an error
+    /// naming the index of the first bad one.
+    ///
+    /// Blind spot: deleting a whole suffix of trailing records (complete
+    /// records, including the very last one — not a partial line) leaves
+    /// no surviving record to show a broken link, so `verify` reports the
+    /// shorter chain as intact. Deleting, inserting, or reordering a
+    /// record anywhere else breaks a hash or a `prev_hash` link and is
+    /// caught. A hash chain alone cannot close this gap; the mitigation
+    /// here is operational, not cryptographic: the journal and TTY mirror
+    /// (spec §12) hold an independent copy of each alert as it is raised,
+    /// and the store directory is meant to be writable only by `sentineld`
+    /// itself, which keeps other writers from truncating it in the first
+    /// place.
     pub fn verify(&self) -> Result<usize, StoreError> {
         let all = self.read_all()?;
         let mut prev = GENESIS.to_string();
@@ -500,5 +655,179 @@ mod tests {
         assert_eq!(s.last_hash(), h1);
         s.append(store_alert("a2")).unwrap();
         assert_eq!(s.verify().unwrap(), 2);
+    }
+
+    // Review finding 1: `rotate` must number past the HIGHEST existing
+    // rotated file, not just find the first free slot. A missing rotated
+    // file (an admin's cleanup, a partial restore) is not tamper evidence;
+    // reusing its number would make a later `verify` misreport that
+    // ordinary deletion as a broken hash chain.
+    #[test]
+    fn rotate_numbers_past_the_highest_existing_even_with_a_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::open(dir.path()).unwrap();
+        s.rotate_at = 1;
+        for i in 0..5 {
+            s.append(store_alert(&format!("a{i}"))).unwrap();
+        }
+        for n in 1..=5 {
+            assert!(dir.path().join(format!("alerts.{n}.jsonl")).exists());
+        }
+
+        // Simulate an admin deleting a middle rotated file.
+        std::fs::remove_file(dir.path().join("alerts.2.jsonl")).unwrap();
+
+        s.append(store_alert("a5")).unwrap();
+        assert!(
+            dir.path().join("alerts.6.jsonl").exists(),
+            "must number past the highest existing file (5), not reuse the gap left at 2"
+        );
+        assert!(!dir.path().join("alerts.2.jsonl").exists());
+    }
+
+    // Review finding 2: a crash that tears the live file's final write in
+    // half must not wedge `open` — the daemon would otherwise exit, be
+    // restarted by systemd, and fail to open again forever.
+    #[test]
+    fn a_torn_final_line_in_the_live_file_is_recovered_and_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let h1 = {
+            let mut s = Store::open(dir.path()).unwrap();
+            let h1 = s.append(store_alert("a1")).unwrap();
+            s.append(store_alert("a2")).unwrap();
+            h1
+        };
+        // Simulate a crash mid-write: chop the last line's closing bytes.
+        let path = dir.path().join("alerts.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let torn_len = text.trim_end_matches('\n').len() - 10;
+        std::fs::write(&path, &text.as_bytes()[..torn_len]).unwrap();
+
+        let s = Store::open(dir.path()).unwrap();
+        assert!(
+            s.recovered_tail.is_some(),
+            "a torn final line must be flagged, not silently accepted"
+        );
+        assert_eq!(
+            s.last_hash(),
+            h1,
+            "the head must fall back to the last COMPLETE record"
+        );
+
+        let repaired = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            repaired.lines().count(),
+            1,
+            "the torn record must actually be dropped from the file on disk"
+        );
+        assert_eq!(s.verify().unwrap(), 1);
+    }
+
+    // Review finding 2: tolerance is for the FINAL line only. A parse
+    // failure earlier in the live file is corruption or tampering, not a
+    // torn write, and must still be a hard error even though the file has
+    // a valid-looking last line after it.
+    #[test]
+    fn a_torn_line_in_the_middle_of_the_live_file_still_hard_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut s = Store::open(dir.path()).unwrap();
+            for i in 0..3 {
+                s.append(store_alert(&format!("a{i}"))).unwrap();
+            }
+        }
+        let path = dir.path().join("alerts.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+        // Corrupt the middle line only; the third line stays intact.
+        let cut = lines[1].len() - 10;
+        lines[1].truncate(cut);
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let err = Store::open(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("line 2"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // Review finding 2: a rotated file was only renamed into place after a
+    // complete, synced write, so it should never have a torn tail. Even a
+    // bad FINAL line there is corruption, not a crash-torn write, and must
+    // still be a hard error.
+    #[test]
+    fn a_torn_line_in_a_rotated_file_still_hard_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut s = Store::open(dir.path()).unwrap();
+            s.rotate_at = 1;
+            s.append(store_alert("a1")).unwrap();
+        }
+        assert!(dir.path().join("alerts.1.jsonl").exists());
+        assert!(!dir.path().join("alerts.jsonl").exists());
+
+        let path = dir.path().join("alerts.1.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let torn_len = text.trim_end_matches('\n').len() - 10;
+        std::fs::write(&path, &text.as_bytes()[..torn_len]).unwrap();
+
+        let err = Store::open(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("line 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // Review finding 4: `open` must recover the head from the newest
+    // ROTATED file when the live file does not exist yet — the state right
+    // after a rotation and before the next append — without reading the
+    // rest of the store's history.
+    #[test]
+    fn reopening_right_after_a_rotation_recovers_the_head_from_the_rotated_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let h1 = {
+            let mut s = Store::open(dir.path()).unwrap();
+            s.rotate_at = 1;
+            s.append(store_alert("a1")).unwrap()
+        };
+        assert!(!dir.path().join("alerts.jsonl").exists());
+        assert!(dir.path().join("alerts.1.jsonl").exists());
+
+        let mut s = Store::open(dir.path()).unwrap();
+        assert_eq!(s.last_hash(), h1);
+        s.append(store_alert("a2")).unwrap();
+        assert_eq!(s.verify().unwrap(), 2);
+    }
+
+    // Review finding 5(a): the existing tamper test only ever reaches
+    // `verify`'s hash-mismatch branch (it edits a field in place). Deleting
+    // a whole middle record instead must trip the `prev_hash` chain-link
+    // branch, at the index of the record that now chains from the wrong
+    // predecessor.
+    #[test]
+    fn a_deleted_middle_record_fails_verification_on_the_chain_link() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut s = Store::open(dir.path()).unwrap();
+            for i in 0..3 {
+                s.append(store_alert(&format!("a{i}"))).unwrap();
+            }
+        }
+        let path = dir.path().join("alerts.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+        lines.remove(1); // Delete record 1 (a1) outright, not just a field.
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let s = Store::open(dir.path()).unwrap();
+        let err = s.verify().unwrap_err();
+        assert!(
+            err.to_string().contains("record 1"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.to_string().contains("chains from"),
+            "expected the prev_hash chain-link branch, got: {err}"
+        );
     }
 }

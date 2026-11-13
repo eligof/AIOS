@@ -7,7 +7,9 @@
 pub mod classify;
 pub mod compile;
 pub mod config;
+pub mod matcher;
 pub mod model;
+pub mod window;
 
 use std::fmt;
 use std::path::Path;

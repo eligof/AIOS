@@ -1,0 +1,38 @@
+[package]
+name = "sentineld"
+description = "AIOS Sentinel daemon: loads the eBPF object, dispatches rules, acts, alerts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "sentineld"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sentineld"
+path = "src/main.rs"
+
+[dependencies]
+sentinel-common.workspace = true
+sentinel-rules.workspace = true
+sentinel-detect.workspace = true
+aya.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ulid.workspace = true
+globset.workspace = true
+ipnet.workspace = true
+
+[build-dependencies]
+aya-build.workspace = true
+cargo_metadata.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

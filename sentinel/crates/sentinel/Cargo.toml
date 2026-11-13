@@ -1,0 +1,19 @@
+[package]
+name = "sentinel"
+description = "AIOS Sentinel CLI: a varlink client for io.aios.Sentinel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+sentinel-common.workspace = true
+sentinel-rules.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

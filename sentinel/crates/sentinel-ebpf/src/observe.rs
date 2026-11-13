@@ -445,11 +445,29 @@ unsafe fn try_bpf(ctx: &LsmContext) -> Result<i32, i32> {
     };
     let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
     let deny = crate::engine::apply_verdict(p, &v);
+    // Self-guard: refuse blinding-capable program loads from anyone but the daemon / PID 1.
+    // S3: map detach / *_GET_FD_BY_ID / map-update against Sentinel's objects needs object-id tracking.
+    if crate::guard::selfguard_on()
+        && cmd == BPF_PROG_LOAD
+        && is_hostile_prog_type((*p).payload.bpf.prog_type)
+        && core.pid != 1
+        && core.pid != crate::guard::daemon_tgid()
+    {
+        (*p).hdr.kverdict = sentinel_common::wire::KVerdict::Denied as u8;
+        e.submit(0);
+        return Err(-1); // -EPERM
+    }
     e.submit(0);
     match deny {
         Some(err) => Err(err),
         None => Ok(0),
     }
+}
+
+/// Program types able to observe or blind the system: kprobe, tracepoint, perf event,
+/// raw tracepoint (+writable), tracing (fentry/fexit/iter), extension, LSM.
+fn is_hostile_prog_type(t: u32) -> bool {
+    matches!(t, 2 | 5 | 7 | 17 | 24 | 26 | 28 | 29)
 }
 
 #[lsm(hook = "task_kill")]

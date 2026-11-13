@@ -50,20 +50,29 @@ fn out_of_range_values_are_rejected() {
     assert!(validate(&c).iter().any(|m| m.contains("lockdown_after")));
 
     let c = SentinelConfig {
-        beacon: Beacon { max_cov: 2.0, ..Default::default() }, // > 1.0
+        beacon: Beacon {
+            max_cov: 2.0,
+            ..Default::default()
+        }, // > 1.0
         ..Default::default()
     };
     assert!(validate(&c).iter().any(|m| m.contains("max_cov")));
 
     let c = SentinelConfig {
-        beacon: Beacon { allow: vec!["not a cidr or /glob".into()], ..Default::default() },
+        beacon: Beacon {
+            allow: vec!["not a cidr or /glob".into()],
+            ..Default::default()
+        },
         ..Default::default()
     };
     assert!(validate(&c).iter().any(|m| m.contains("allow")));
 
     let c = SentinelConfig {
         // detectors never deny (§5.4)
-        beacon: Beacon { action: "deny".into(), ..Default::default() },
+        beacon: Beacon {
+            action: "deny".into(),
+            ..Default::default()
+        },
         ..Default::default()
     };
     assert!(validate(&c).iter().any(|m| m.contains("action")));

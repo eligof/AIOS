@@ -4,10 +4,9 @@
 use ipnet::IpNet;
 use sentinel_common::{
     slot_bit, uid_literal_bit, Action, KRule, Mode, D_CAMERA, D_HIDRAW, D_INPUT, D_MIC, D_UINPUT,
-    F_ENV_LD, F_DELETED, F_LISTEN_NON_LOOPBACK, F_MEMFD, F_OUTSIDE_USR, F_STDIO_SOCKET, G_DEST,
-    G_DEVICE, G_FLAGS, G_MOUNT, G_PORT, G_PTRACE, G_UID, NGROUPS, P_ANY, P_NON_DESCENDANT,
-    P_OTHER_UID, U_SYSTEM, U_USER, MAX_CIDRS, MAX_MOUNTS, MAX_PORT_SETS, MAX_RULES,
-    MAX_UID_LITERALS,
+    F_DELETED, F_ENV_LD, F_LISTEN_NON_LOOPBACK, F_MEMFD, F_OUTSIDE_USR, F_STDIO_SOCKET, G_DEST,
+    G_DEVICE, G_FLAGS, G_MOUNT, G_PORT, G_PTRACE, G_UID, MAX_CIDRS, MAX_MOUNTS, MAX_PORT_SETS,
+    MAX_RULES, MAX_UID_LITERALS, NGROUPS, P_ANY, P_NON_DESCENDANT, P_OTHER_UID, U_SYSTEM, U_USER,
 };
 
 use crate::classify::{classify, Kind};
@@ -128,7 +127,9 @@ pub fn build_masks(
         }
     }
     if let Some(v) = &m.port {
-        all[G_PORT] |= t.intern_portset(normalize_ports(v)).ok_or("too many port sets")?;
+        all[G_PORT] |= t
+            .intern_portset(normalize_ports(v))
+            .ok_or("too many port sets")?;
     }
     if let Some(v) = &m.device {
         for d in v.to_vec() {
@@ -157,7 +158,9 @@ pub fn build_masks(
         }
     }
     if let Some(v) = &except.port {
-        ex[G_PORT] |= t.intern_portset(normalize_ports(v)).ok_or("too many port sets")?;
+        ex[G_PORT] |= t
+            .intern_portset(normalize_ports(v))
+            .ok_or("too many port sets")?;
     }
     if let Some(v) = &except.device {
         for d in v.to_vec() {
@@ -256,7 +259,10 @@ pub fn compile_kernel(rules: &[Rule]) -> Result<Tables, Vec<RuleError>> {
         errors.push(RuleError {
             file: String::new(),
             rule: None,
-            message: format!("{} kernel rules exceed the limit of {MAX_RULES}", t.rules.len()),
+            message: format!(
+                "{} kernel rules exceed the limit of {MAX_RULES}",
+                t.rules.len()
+            ),
         });
     }
     if errors.is_empty() {

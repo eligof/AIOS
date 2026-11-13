@@ -11,7 +11,11 @@ pub struct WindowState {
 
 impl WindowState {
     pub fn new(count: u32, within_ms: u64) -> WindowState {
-        WindowState { count, within_ms, keys: HashMap::new() }
+        WindowState {
+            count,
+            within_ms,
+            keys: HashMap::new(),
+        }
     }
 
     /// Record one matching event for `key` at `now_ms`. Returns true when at

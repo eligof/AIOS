@@ -9,7 +9,15 @@ pub enum Kind {
 }
 
 /// The user-space-only predicates, in the order we report them.
-const USER_PREDS: &[&str] = &["exe", "argv", "parent", "ancestors", "unit", "path", "managed_home"];
+const USER_PREDS: &[&str] = &[
+    "exe",
+    "argv",
+    "parent",
+    "ancestors",
+    "unit",
+    "path",
+    "managed_home",
+];
 
 /// First user-space-only predicate set in `m`, if any.
 pub fn first_user_pred(m: &Match) -> Option<&'static str> {

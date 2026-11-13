@@ -1,12 +1,14 @@
 mod common;
-use sentinel_common::{eval, Facts, EventKind};
-use sentinel_common::{G_FLAGS, G_MOUNT, G_UID, G_DEST, F_MEMFD, U_USER, slot_bit};
+use sentinel_common::{eval, EventKind, Facts};
+use sentinel_common::{slot_bit, F_MEMFD, G_DEST, G_FLAGS, G_MOUNT, G_UID, U_USER};
 use sentinel_rules::compile::compile_kernel;
 use sentinel_rules::model::parse;
 
 fn rules(raw: &str) -> Vec<sentinel_rules::model::Rule> {
     let mut rs = parse(raw).unwrap().rules;
-    for r in &mut rs { r.source = "t.toml".into(); }
+    for r in &mut rs {
+        r.source = "t.toml".into();
+    }
     rs
 }
 
@@ -76,7 +78,9 @@ match={ dest=["10.0.0.0/8"] }
 fn too_many_rules_is_an_error() {
     let mut raw = String::new();
     for i in 0..65 {
-        raw.push_str(&format!("[[rule]]\nid=\"r{i}\"\non=\"exec\"\nseverity=\"low\"\nmatch={{any=true}}\n"));
+        raw.push_str(&format!(
+            "[[rule]]\nid=\"r{i}\"\non=\"exec\"\nseverity=\"low\"\nmatch={{any=true}}\n"
+        ));
     }
     assert!(compile_kernel(&rules(&raw)).is_err());
 }

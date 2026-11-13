@@ -100,7 +100,11 @@ impl GlobPart {
         if self.argv.as_ref().is_some_and(|s| s.is_match(ev.argv)) {
             return true;
         }
-        if self.parent.as_ref().is_some_and(|s| s.is_match(ev.parent_exe)) {
+        if self
+            .parent
+            .as_ref()
+            .is_some_and(|s| s.is_match(ev.parent_exe))
+        {
             return true;
         }
         if self
@@ -174,13 +178,25 @@ pub fn compile_all(rules: &[Rule]) -> Result<(Tables, Vec<UserRule>), Vec<RuleEr
 
     for (i, r) in rules.iter().enumerate() {
         let on = parse_on(&r.on).expect("validated");
-        let action = r.action.as_deref().and_then(parse_action).unwrap_or(sentinel_common::Action::Alert);
-        let mode = r.mode.as_deref().and_then(parse_mode).unwrap_or(sentinel_common::Mode::Enforce);
+        let action = r
+            .action
+            .as_deref()
+            .and_then(parse_action)
+            .unwrap_or(sentinel_common::Action::Alert);
+        let mode = r
+            .mode
+            .as_deref()
+            .and_then(parse_mode)
+            .unwrap_or(sentinel_common::Mode::Enforce);
 
         let (all, any, ex) = match build_masks(&r.match_, &r.except, &mut t) {
             Ok(v) => v,
             Err(msg) => {
-                errors.push(RuleError { file: r.source.clone(), rule: Some(r.id.clone()), message: msg });
+                errors.push(RuleError {
+                    file: r.source.clone(),
+                    rule: Some(r.id.clone()),
+                    message: msg,
+                });
                 continue;
             }
         };

@@ -61,7 +61,10 @@ pub fn parse_duration_ms(s: &str) -> Result<u64, String> {
         s.find(|c: char| c.is_ascii_alphabetic())
             .ok_or_else(|| format!("{s:?} has no unit"))?,
     );
-    let n: u64 = num.trim().parse().map_err(|_| format!("{s:?} has a bad number"))?;
+    let n: u64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("{s:?} has a bad number"))?;
     let mult = match unit {
         "ms" => 1,
         "s" => 1000,
@@ -91,7 +94,10 @@ pub fn validate(rules: &[Rule]) -> Vec<RuleError> {
         };
 
         if !id_ok(&r.id) {
-            errors.push(err(format!("id {:?} must match [a-z0-9-]+ and be non-empty", r.id)));
+            errors.push(err(format!(
+                "id {:?} must match [a-z0-9-]+ and be non-empty",
+                r.id
+            )));
         }
         if let Some(_prev) = seen.insert(r.id.as_str(), 0) {
             errors.push(err(format!("duplicate rule id {:?}", r.id)));
@@ -130,7 +136,9 @@ pub fn validate(rules: &[Rule]) -> Vec<RuleError> {
         validate_match(&r.except, on, true, &err, &mut errors);
 
         if is_empty(&r.match_) {
-            errors.push(err("match has no predicates (use any = true to match every event)".into()));
+            errors.push(err(
+                "match has no predicates (use any = true to match every event)".into(),
+            ));
         }
 
         let (kind, offending) = classify(&r.match_, &r.except, r.window.is_some());
@@ -149,7 +157,10 @@ pub fn validate(rules: &[Rule]) -> Vec<RuleError> {
                 errors.push(err(format!("window.within: {m}")));
             }
             if !matches!(w.by.as_str(), "exe" | "uid" | "unit" | "dest") {
-                errors.push(err(format!("window.by {:?} must be exe|uid|unit|dest", w.by)));
+                errors.push(err(format!(
+                    "window.by {:?} must be exe|uid|unit|dest",
+                    w.by
+                )));
             }
         }
     }
@@ -159,15 +170,47 @@ pub fn validate(rules: &[Rule]) -> Vec<RuleError> {
 /// Is this match empty (no predicate at all)?
 pub fn is_empty(m: &Match) -> bool {
     let Match {
-        exe_memfd, exe_deleted, exe_outside_usr, stdio_socket, env_ld, exe_on, uid, dest, port,
-        listen_scope, device, ptrace_target, any, managed_home, exe, argv, parent, ancestors, unit,
+        exe_memfd,
+        exe_deleted,
+        exe_outside_usr,
+        stdio_socket,
+        env_ld,
+        exe_on,
+        uid,
+        dest,
+        port,
+        listen_scope,
+        device,
+        ptrace_target,
+        any,
+        managed_home,
+        exe,
+        argv,
+        parent,
+        ancestors,
+        unit,
         path,
     } = m;
-    exe_memfd.is_none() && exe_deleted.is_none() && exe_outside_usr.is_none() && stdio_socket.is_none()
-        && env_ld.is_none() && exe_on.is_none() && uid.is_none() && dest.is_none() && port.is_none()
-        && listen_scope.is_none() && device.is_none() && ptrace_target.is_none() && any.is_none()
-        && managed_home.is_none() && exe.is_none() && argv.is_none() && parent.is_none()
-        && ancestors.is_none() && unit.is_none() && path.is_none()
+    exe_memfd.is_none()
+        && exe_deleted.is_none()
+        && exe_outside_usr.is_none()
+        && stdio_socket.is_none()
+        && env_ld.is_none()
+        && exe_on.is_none()
+        && uid.is_none()
+        && dest.is_none()
+        && port.is_none()
+        && listen_scope.is_none()
+        && device.is_none()
+        && ptrace_target.is_none()
+        && any.is_none()
+        && managed_home.is_none()
+        && exe.is_none()
+        && argv.is_none()
+        && parent.is_none()
+        && ancestors.is_none()
+        && unit.is_none()
+        && path.is_none()
 }
 
 /// Which event kinds a predicate applies to; `None` = all 8.
@@ -204,7 +247,13 @@ fn on_name(k: EventKind) -> &'static str {
     }
 }
 
-fn check_applies(pred: &str, on: EventKind, except: bool, err: &dyn Fn(String) -> RuleError, out: &mut Vec<RuleError>) {
+fn check_applies(
+    pred: &str,
+    on: EventKind,
+    except: bool,
+    err: &dyn Fn(String) -> RuleError,
+    out: &mut Vec<RuleError>,
+) {
     if let Some(kinds) = applies_to(pred) {
         if !kinds.contains(&on) {
             let where_ = if except { "except" } else { "match" };
@@ -216,7 +265,12 @@ fn check_applies(pred: &str, on: EventKind, except: bool, err: &dyn Fn(String) -
     }
 }
 
-fn check_globs(pred: &str, v: &crate::model::OneOrMany<String>, err: &dyn Fn(String) -> RuleError, out: &mut Vec<RuleError>) {
+fn check_globs(
+    pred: &str,
+    v: &crate::model::OneOrMany<String>,
+    err: &dyn Fn(String) -> RuleError,
+    out: &mut Vec<RuleError>,
+) {
     for g in v.to_vec() {
         if Glob::new(&g).is_err() {
             out.push(err(format!("{pred}: glob {g:?} does not compile")));
@@ -224,7 +278,13 @@ fn check_globs(pred: &str, v: &crate::model::OneOrMany<String>, err: &dyn Fn(Str
     }
 }
 
-fn validate_match(m: &Match, on: EventKind, except: bool, err: &dyn Fn(String) -> RuleError, out: &mut Vec<RuleError>) {
+fn validate_match(
+    m: &Match,
+    on: EventKind,
+    except: bool,
+    err: &dyn Fn(String) -> RuleError,
+    out: &mut Vec<RuleError>,
+) {
     // applicability for every set predicate
     macro_rules! appl {
         ($field:ident, $name:literal) => {
@@ -280,7 +340,9 @@ fn validate_match(m: &Match, on: EventKind, except: bool, err: &dyn Fn(String) -
                 }
                 PortSpec::Range(s) => {
                     if parse_port_range(&s).is_none() {
-                        out.push(err(format!("port: range {s:?} is not start-end in 1..=65535")));
+                        out.push(err(format!(
+                            "port: range {s:?} is not start-end in 1..=65535"
+                        )));
                     }
                 }
             }
@@ -297,17 +359,24 @@ fn validate_match(m: &Match, on: EventKind, except: bool, err: &dyn Fn(String) -
                     n += 1;
                 }
                 UidItem::Kw(k) if k == "user" || k == "system" => {}
-                UidItem::Kw(k) => out.push(err(format!("uid: {k:?} must be a number, \"user\" or \"system\""))),
+                UidItem::Kw(k) => out.push(err(format!(
+                    "uid: {k:?} must be a number, \"user\" or \"system\""
+                ))),
             }
         }
         if n > sentinel_common::MAX_UID_LITERALS {
-            out.push(err(format!("uid: at most {} literal uids", sentinel_common::MAX_UID_LITERALS)));
+            out.push(err(format!(
+                "uid: at most {} literal uids",
+                sentinel_common::MAX_UID_LITERALS
+            )));
         }
     }
     if let Some(v) = &m.device {
         for d in v.to_vec() {
             if !matches!(d.as_str(), "camera" | "mic" | "input" | "uinput" | "hidraw") {
-                out.push(err(format!("device: {d:?} is not camera|mic|input|uinput|hidraw")));
+                out.push(err(format!(
+                    "device: {d:?} is not camera|mic|input|uinput|hidraw"
+                )));
             }
         }
     }
@@ -318,7 +387,9 @@ fn validate_match(m: &Match, on: EventKind, except: bool, err: &dyn Fn(String) -
     }
     if let Some(s) = &m.ptrace_target {
         if !matches!(s.as_str(), "other-uid" | "non-descendant" | "any") {
-            out.push(err(format!("ptrace_target: {s:?} must be other-uid|non-descendant|any")));
+            out.push(err(format!(
+                "ptrace_target: {s:?} must be other-uid|non-descendant|any"
+            )));
         }
     }
 }

@@ -102,7 +102,10 @@ pub fn validate(c: &SentinelConfig) -> Vec<String> {
 
     match parse_duration_ms(&c.lockdown_after) {
         Ok(ms) if (2000..=30000).contains(&ms) => {}
-        Ok(_) => e.push(format!("lockdown_after {:?} must be 2s..=30s", c.lockdown_after)),
+        Ok(_) => e.push(format!(
+            "lockdown_after {:?} must be 2s..=30s",
+            c.lockdown_after
+        )),
         Err(m) => e.push(format!("lockdown_after: {m}")),
     }
     if c.storm_brake < 1 {
@@ -116,24 +119,34 @@ pub fn validate(c: &SentinelConfig) -> Vec<String> {
 
     // beacon
     if !(0.0..=1.0).contains(&c.beacon.max_cov) {
-        e.push(format!("beacon.max_cov {} must be 0.0..=1.0", c.beacon.max_cov));
+        e.push(format!(
+            "beacon.max_cov {} must be 0.0..=1.0",
+            c.beacon.max_cov
+        ));
     }
     if c.beacon.min_connects < 2 {
         e.push("beacon.min_connects must be >= 2".to_string());
     }
     for a in &c.beacon.allow {
         // a CIDR, or a `/`-prefixed executable glob
-        let ok = a.parse::<ipnet::IpNet>().is_ok()
-            || (a.starts_with('/') && Glob::new(a).is_ok());
+        let ok = a.parse::<ipnet::IpNet>().is_ok() || (a.starts_with('/') && Glob::new(a).is_ok());
         if !ok {
-            e.push(format!("beacon.allow {a:?} must be a CIDR or a /-prefixed exe glob"));
+            e.push(format!(
+                "beacon.allow {a:?} must be a CIDR or a /-prefixed exe glob"
+            ));
         }
     }
     if parse_severity(&c.beacon.severity).is_none() {
-        e.push(format!("beacon.severity {:?} is not a severity", c.beacon.severity));
+        e.push(format!(
+            "beacon.severity {:?} is not a severity",
+            c.beacon.severity
+        ));
     }
     if !detector_action_ok(&c.beacon.action) {
-        e.push(format!("beacon.action {:?} must be alert|freeze|kill", c.beacon.action));
+        e.push(format!(
+            "beacon.action {:?} must be alert|freeze|kill",
+            c.beacon.action
+        ));
     }
 
     // dns_tunnel
@@ -141,16 +154,25 @@ pub fn validate(c: &SentinelConfig) -> Vec<String> {
         e.push("dns_tunnel.label_len must be >= 1".to_string());
     }
     if !(0.0..=8.0).contains(&c.dns_tunnel.entropy) {
-        e.push(format!("dns_tunnel.entropy {} must be 0.0..=8.0", c.dns_tunnel.entropy));
+        e.push(format!(
+            "dns_tunnel.entropy {} must be 0.0..=8.0",
+            c.dns_tunnel.entropy
+        ));
     }
     if c.dns_tunnel.unique_per_min < 1 {
         e.push("dns_tunnel.unique_per_min must be >= 1".to_string());
     }
     if parse_severity(&c.dns_tunnel.severity).is_none() {
-        e.push(format!("dns_tunnel.severity {:?} is not a severity", c.dns_tunnel.severity));
+        e.push(format!(
+            "dns_tunnel.severity {:?} is not a severity",
+            c.dns_tunnel.severity
+        ));
     }
     if !detector_action_ok(&c.dns_tunnel.action) {
-        e.push(format!("dns_tunnel.action {:?} must be alert|freeze|kill", c.dns_tunnel.action));
+        e.push(format!(
+            "dns_tunnel.action {:?} must be alert|freeze|kill",
+            c.dns_tunnel.action
+        ));
     }
 
     e

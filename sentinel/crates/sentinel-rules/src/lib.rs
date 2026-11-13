@@ -60,7 +60,11 @@ pub fn load_dir(dir: &Path) -> Result<Vec<Rule>, Vec<RuleError>> {
         let raw = match std::fs::read_to_string(p) {
             Ok(s) => s,
             Err(e) => {
-                errors.push(RuleError { file: name, rule: None, message: format!("cannot read: {e}") });
+                errors.push(RuleError {
+                    file: name,
+                    rule: None,
+                    message: format!("cannot read: {e}"),
+                });
                 continue;
             }
         };
@@ -71,7 +75,11 @@ pub fn load_dir(dir: &Path) -> Result<Vec<Rule>, Vec<RuleError>> {
                     rules.push(r);
                 }
             }
-            Err(msg) => errors.push(RuleError { file: name, rule: None, message: msg }),
+            Err(msg) => errors.push(RuleError {
+                file: name,
+                rule: None,
+                message: msg,
+            }),
         }
     }
     if !errors.is_empty() {

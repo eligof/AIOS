@@ -2,3 +2,4 @@
 //! drive synthetic timelines without a clock (spec §14).
 
 pub mod beacon;
+pub mod dns_tunnel;

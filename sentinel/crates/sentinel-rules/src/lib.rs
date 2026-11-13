@@ -4,6 +4,7 @@
 //! Pure: no I/O except `load_dir`, no clock. Builds on stable so `aios-cli`
 //! can path-depend on it (S4).
 
+pub mod classify;
 pub mod config;
 pub mod model;
 
@@ -82,3 +83,4 @@ pub fn load_dir(dir: &Path) -> Result<Vec<Rule>, Vec<RuleError>> {
 }
 
 pub mod validate;
+pub use validate::parse_duration_ms;

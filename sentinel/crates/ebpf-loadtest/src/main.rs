@@ -38,6 +38,9 @@ enum Cmd {
         /// Set CFG_SELFGUARD: refuse user signals aimed at the daemon.
         #[arg(long)]
         selfguard: bool,
+        /// Seed GUARDED_INODES from this dir and the files directly inside it.
+        #[arg(long)]
+        guard_dir: Option<std::path::PathBuf>,
     },
 }
 
@@ -51,7 +54,11 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::HeartbeatSelftest => heartbeat_selftest(),
-        Cmd::Load { enforce, selfguard } => load(enforce, selfguard),
+        Cmd::Load {
+            enforce,
+            selfguard,
+            guard_dir,
+        } => load(enforce, selfguard, guard_dir),
         Cmd::Maps => {
             let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/sentinel-ebpf"));
             let bpf = aya::Ebpf::load(data)?;
@@ -466,7 +473,7 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
     )
 }
 
-fn load(enforce: bool, selfguard: bool) -> Result<()> {
+fn load(enforce: bool, selfguard: bool, guard_dir: Option<std::path::PathBuf>) -> Result<()> {
     use std::io::Write;
     use std::sync::atomic::Ordering;
 
@@ -494,6 +501,17 @@ fn load(enforce: bool, selfguard: bool) -> Result<()> {
         config.set(0, &PodConfig(cfg), 0)?;
     }
     populate_rules(&mut bpf)?;
+    if let Some(dir) = guard_dir {
+        use std::os::unix::fs::MetadataExt;
+        let mut inodes = aya::maps::HashMap::<_, u64, u8>::try_from(
+            bpf.map_mut("GUARDED_INODES")
+                .ok_or_else(|| anyhow::anyhow!("GUARDED_INODES missing"))?,
+        )?;
+        inodes.insert(&std::fs::metadata(&dir)?.ino(), &1u8, 0)?;
+        for ent in std::fs::read_dir(&dir)? {
+            inodes.insert(&std::fs::metadata(ent?.path())?.ino(), &1u8, 0)?;
+        }
+    }
     attach_lsm(&mut bpf, &btf, "exec", "bprm_check_security")?;
     attach_lsm(&mut bpf, &btf, "connect", "socket_connect")?;
     attach_lsm(&mut bpf, &btf, "listen", "socket_listen")?;
@@ -502,6 +520,9 @@ fn load(enforce: bool, selfguard: bool) -> Result<()> {
     attach_lsm(&mut bpf, &btf, "module_read", "kernel_read_file")?;
     attach_lsm(&mut bpf, &btf, "module_data", "kernel_load_data")?;
     attach_lsm(&mut bpf, &btf, "signal", "task_kill")?;
+    attach_lsm(&mut bpf, &btf, "guard_unlink", "inode_unlink")?;
+    attach_lsm(&mut bpf, &btf, "guard_rename", "inode_rename")?;
+    attach_lsm(&mut bpf, &btf, "guard_truncate", "path_truncate")?;
     attach_btf_tp(&mut bpf, &btf, "fork", "sched_process_fork")?;
     attach_btf_tp(&mut bpf, &btf, "exit", "sched_process_exit")?;
 

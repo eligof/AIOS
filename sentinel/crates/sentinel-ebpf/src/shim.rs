@@ -41,6 +41,9 @@ unsafe extern "C" {
     fn shim_current_core(task: *const c_void, out: *mut TaskCore) -> i32;
     fn shim_exec_info(bprm: *const c_void, out: *mut ExecInfo) -> i32;
     fn shim_file_dev(file: *const c_void, out: *mut FileDev) -> i32;
+    fn shim_file_ino(file: *const c_void, ino: *mut u64, fmode: *mut u32) -> i32;
+    fn shim_dentry_ino(dentry: *const c_void, ino: *mut u64) -> i32;
+    fn shim_path_ino(path: *const c_void, ino: *mut u64) -> i32;
     fn shim_file_name(file: *const c_void, out: *mut u8, cap: i32) -> i32;
     fn shim_filename(filename: *const c_void, out: *mut u8, cap: i32) -> i32;
     fn shim_nd_filename(nd: *const c_void, out: *mut u8, cap: i32) -> i32;
@@ -119,6 +122,36 @@ pub unsafe fn file_dev(file: *const c_void) -> Option<FileDev> {
     let mut o: FileDev = core::mem::zeroed();
     if shim_file_dev(file, &mut o) == 0 {
         Some(o)
+    } else {
+        None
+    }
+}
+
+/// `(i_ino, f_mode)` of a `struct file*`.
+pub unsafe fn file_ino(file: *const c_void) -> Option<(u64, u32)> {
+    let (mut ino, mut mode) = (0u64, 0u32);
+    if shim_file_ino(file, &mut ino, &mut mode) == 0 {
+        Some((ino, mode))
+    } else {
+        None
+    }
+}
+
+/// Inode number behind a `struct dentry*`.
+pub unsafe fn dentry_ino(dentry: *const c_void) -> Option<u64> {
+    let mut ino = 0u64;
+    if shim_dentry_ino(dentry, &mut ino) == 0 {
+        Some(ino)
+    } else {
+        None
+    }
+}
+
+/// Inode number behind a `struct path*`.
+pub unsafe fn path_ino(path: *const c_void) -> Option<u64> {
+    let mut ino = 0u64;
+    if shim_path_ino(path, &mut ino) == 0 {
+        Some(ino)
     } else {
         None
     }

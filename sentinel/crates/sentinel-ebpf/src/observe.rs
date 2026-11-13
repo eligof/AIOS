@@ -214,6 +214,16 @@ unsafe fn try_open(ctx: &LsmContext) -> Result<i32, i32> {
         return Err(ret as c_int);
     }
     let file: *const c_void = ctx.arg(0);
+    // Self-guard: deny write-intent opens of Sentinel's own files (FMODE_WRITE = 2).
+    if crate::guard::selfguard_on() {
+        if let Some((ino, fmode)) = shim::file_ino(file) {
+            if fmode & 2 != 0 && crate::maps::GUARDED_INODES.get(&ino).is_some() {
+                if let Some(r) = crate::guard::deny_guarded() {
+                    return Err(r);
+                }
+            }
+        }
+    }
     let Some(d) = shim::file_dev(file) else {
         return Ok(0);
     };

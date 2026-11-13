@@ -121,6 +121,30 @@ int shim_file_dev(const void *file, struct sentinel_file_dev *o) {
     return e;
 }
 
+/* i_ino and f_mode of a struct file*. */
+int shim_file_ino(const void *file, unsigned long long *ino, unsigned int *fmode) {
+    const struct file *f = file;
+    int e = 0;
+    *ino = 0;
+    e |= BPF_CORE_READ_INTO(ino, f, f_inode, i_ino);
+    e |= BPF_CORE_READ_INTO(fmode, f, f_mode);
+    return e;
+}
+
+/* i_ino of dentry->d_inode. */
+int shim_dentry_ino(const void *dentry, unsigned long long *ino) {
+    const struct dentry *d = dentry;
+    *ino = 0;
+    return BPF_CORE_READ_INTO(ino, d, d_inode, i_ino);
+}
+
+/* i_ino of path->dentry->d_inode. */
+int shim_path_ino(const void *path, unsigned long long *ino) {
+    const struct path *p = path;
+    *ino = 0;
+    return BPF_CORE_READ_INTO(ino, p, dentry, d_inode, i_ino);
+}
+
 /* dentry name of a struct file*, NUL-terminated into out (cap <= 64). */
 int shim_file_name(const void *file, unsigned char *out, int cap) {
     const struct file *f = file;

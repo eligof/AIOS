@@ -36,7 +36,7 @@ pub struct Rule {
 }
 
 /// Every predicate, all optional. `deny_unknown_fields` rejects typos.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Match {
     // kernel-evaluable flags (§5.2)
@@ -64,7 +64,7 @@ pub struct Match {
 }
 
 /// Optional sliding-window qualifier (§5.1). Having one makes a rule user-space.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Window {
     pub count: u32,
@@ -73,7 +73,7 @@ pub struct Window {
 }
 
 /// A scalar or a list of `T`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum OneOrMany<T> {
     One(T),
@@ -90,7 +90,7 @@ impl<T: Clone> OneOrMany<T> {
 }
 
 /// A `uid` list item: a keyword (`"user"`/`"system"`) or a numeric uid.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum UidItem {
     Num(i64),
@@ -98,7 +98,7 @@ pub enum UidItem {
 }
 
 /// A `port` list item: a number or a `"start-end"` range.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum PortSpec {
     Num(i64),

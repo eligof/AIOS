@@ -7,6 +7,7 @@
 pub mod classify;
 pub mod compile;
 pub mod config;
+pub mod diff;
 pub mod matcher;
 pub mod model;
 pub mod window;

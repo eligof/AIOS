@@ -6,7 +6,7 @@ use serde::Deserialize;
 
 use crate::validate::{parse_duration_ms, parse_severity};
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct SentinelConfig {
     pub enable: bool,
@@ -37,7 +37,7 @@ impl Default for SentinelConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Beacon {
     pub min_connects: u32,
@@ -63,7 +63,7 @@ impl Default for Beacon {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct DnsTunnel {
     pub label_len: u32,

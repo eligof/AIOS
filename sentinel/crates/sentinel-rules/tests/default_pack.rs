@@ -24,10 +24,26 @@ fn default_pack_loads_validates_and_compiles() {
     assert!(rules
         .iter()
         .any(|r| r.id == "module-load" && r.match_.any == Some(true)));
-    assert!(user
+    let user_ids: Vec<&str> = user
         .iter()
-        .any(|u| rules[u.index as usize].id == "persistence-write"));
-    assert!(user
-        .iter()
-        .any(|u| rules[u.index as usize].id == "reverse-shell"));
+        .map(|u| rules[u.index as usize].id.as_str())
+        .collect();
+    assert!(
+        user_ids.contains(&"persistence-write"),
+        "user rules were {user_ids:?}"
+    );
+    // reverse-shell was already a user rule before amendment 8 (its `exe`
+    // glob alone forces that); kept here as a regression guard, not as
+    // evidence of this fix.
+    assert!(
+        user_ids.contains(&"reverse-shell"),
+        "user rules were {user_ids:?}"
+    );
+    // ld-preload (match = { env_ld = true }) is the rule amendment 8 fixes:
+    // before it, this landed in the kernel table, whose F_ENV_LD bit the
+    // kernel never sets (spec §17.7), so the rule could never fire.
+    assert!(
+        user_ids.contains(&"ld-preload"),
+        "user rules were {user_ids:?}"
+    );
 }

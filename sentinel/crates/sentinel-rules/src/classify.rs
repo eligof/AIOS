@@ -24,6 +24,9 @@ pub fn first_user_pred(m: &Match) -> Option<&'static str> {
     // Spec amendment 8: S2 cannot fill F_ENV_LD or F_STDIO_SOCKET in the
     // kernel (spec §17.7) — reading env and fd 0/1/2 socket-ness both need
     // user space — so both predicates are user-space-only, not kernel facts.
+    // Checked first so the reported name is deterministic when a rule also
+    // sets a USER_PREDS predicate; that name surfaces verbatim in the
+    // deny-on-user-rule validation error (validate.rs).
     if m.env_ld.is_some() {
         return Some("env_ld");
     }
@@ -63,6 +66,7 @@ pub fn classify(match_: &Match, except: &Match, has_window: bool) -> (Kind, Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::OneOrMany;
 
     #[test]
     fn env_ld_alone_is_a_user_rule() {
@@ -93,5 +97,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(classify(&m, &Match::default(), false).0, Kind::Kernel);
+    }
+
+    #[test]
+    fn combined_predicates_report_the_user_space_fact_first() {
+        let m = Match {
+            exe: Some(OneOrMany::One("/usr/bin/bash".into())),
+            stdio_socket: Some(true),
+            ..Default::default()
+        };
+        let (kind, pred) = classify(&m, &Match::default(), false);
+        assert_eq!(kind, Kind::User);
+        assert_eq!(pred, Some("stdio_socket"));
     }
 }

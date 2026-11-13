@@ -397,3 +397,29 @@ Recorded during S1 (plan `docs/superpowers/plans/2026-11-13-sentinel-s1-core-cra
 5. **New predicate `managed_home = true` (§5.2, §5.5 `persistence-write`).** The protected home files are known only to `sentineld` (it fills the list from the rendered home binds). `managed_home = true` is a user-space predicate on `write_refused` that holds when the resolved path is one of them.
 
 6. **`exe_on` matches by mount id (§5.2).** Btrfs subvolumes share one `s_dev`, so `exe_on` is matched on the VFS mount's `mnt_id`, not on `s_dev` or path text. `sentineld` resolves each `exe_on` path to its mount at load time and warns when a path is not a mount point (the rule would then never match).
+
+### 17.7 S2 outcomes (eBPF kernel object)
+
+Recorded at the end of S2 (plan `docs/superpowers/plans/2026-11-13-sentinel-s2-ebpf.md`). The kernel ABI S3 inherits is documented in `sentinel/crates/sentinel-ebpf/README.md`.
+
+**Deferred to S3 (`sentineld`):**
+
+- Exec `exe`/`argv` strings are **not** filled in-kernel; S3 resolves them from `/proc/<pid>/exe` and `/proc/<pid>/cmdline`. The kernel-critical facts (memfd, deleted, `exe_on` mount) are complete in the event header.
+- The `env_ld` / `stdio_socket` facts are computed in user space (S3) for the alert/freeze rules that use them.
+- Self-guard's BPF map-detach / `*_GET_FD_BY_ID` clause and the `SOCK_DESTROY` half of freeze (§17.2) are S3. S2 implemented the program-load self-guard (`bpf` LSM, `task_kill`, guarded-inode unlink/rename/truncate) and the QUARANTINE `socket_connect`/`socket_sendmsg` deny.
+
+**Settled implementation choices:**
+
+- `write_refused` uses `#[fexit(function = "path_openat")]` filtering on `-EROFS`. `do_filp_open` is not in this kernel's BTF, so it cannot be used.
+- Chained LSM verdicts (the previous program's return value) must be read as `i64`; a deny is detected by the sign of `-EPERM`.
+- `Lsm::load` takes the **kernel hook name** (e.g. `bprm_check_security`), not the program name.
+- `security_bpf` and `task_kill` are 4-argument hooks: the chained verdict is at `arg(4)`.
+- The kernel rule walk uses `bpf_loop`; an inlined matcher over `MAX_RULES` exceeded the verifier instruction limit.
+- Module loads on this kernel report `READING_MODULE_COMPRESSED = 7` for `.ko.zst`.
+- `exe_on` mount resolution requires an **exact** mount-point match (longest-prefix would map everything to `/`).
+- `UID_LITERALS` unused slots are padded with `u32::MAX` (an unwritten Array slot reads 0, which would match root).
+
+**Cleanups and unexercised paths for S3:**
+
+- An unused `shim_filename` dead-code warning remains in the eBPF build.
+- The `socket_sendmsg` quarantine deny and the "daemon can still write guarded files" path were not exercised in the VM suite (behavior is by construction, mirroring the tested `socket_connect` / self-guard paths).

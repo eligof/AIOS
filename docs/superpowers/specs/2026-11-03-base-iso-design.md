@@ -246,7 +246,7 @@ Each step aborts on failure (or panic). Abort unmounts and deletes the candidate
    - `pacman -Rns --noconfirm -- <removed set>` (if any)
    - `pacman -D --asexplicit -- <install set>`
    - Remove orphans: `pacman -Qdtq`, piped to `pacman -Rns --noconfirm --` if non-empty.
-   - Bootstrap instead runs `pacstrap -C /run/aios/aios-pacstrap.conf /run/aios/cand <install set>` on the host. pacman takes `DBPath` and `HookDir` from that config as they are, not below the new root, so the config is the manifest's `pacman.conf` rewritten: `DBPath = /run/aios/cand/usr/lib/pacman/` and `HookDir = /run/aios/cand/etc/pacman.d/hooks/` right after `[options]` (added at the top if missing), replacing the manifest's own; no `LogFile`, which then defaults to the new root's `/var/log/pacman.log` (the `@log` bind); and `file:///persist/` servers pointed at the candidate's bind of the local repo. `/run/aios/cand/usr/lib/pacman` is created first. The config stays in `/run/aios` (tmpfs) for inspection.
+   - Bootstrap instead runs `pacstrap -C /run/aios/aios-pacstrap.conf /run/aios/cand --dbpath=/run/aios/cand/usr/lib/pacman/ <install set>` on the host. pacstrap itself passes pacman `-b <root>/var/lib/pacman/` (unless `-P`), which beats the config's `DBPath`; the `--dbpath` after the root reaches pacman after that and wins. pacman takes `DBPath` and `HookDir` from that config as they are, not below the new root, so the config is the manifest's `pacman.conf` rewritten: `DBPath = /run/aios/cand/usr/lib/pacman/` and `HookDir = /run/aios/cand/etc/pacman.d/hooks/` right after `[options]` (added at the top if missing), replacing the manifest's own; no `LogFile`, which then defaults to the new root's `/var/log/pacman.log` (the `@log` bind); and `file:///persist/` servers pointed at the candidate's bind of the local repo. `/run/aios/cand/usr/lib/pacman` is created first. The config stays in `/run/aios` (tmpfs) for inspection.
    - While pacstrap runs, the candidate's `/etc/pacman.d/hooks/90-mkinitcpio-install.hook`, `60-mkinitcpio-remove.hook` and `zz-sbctl.hook` are symlinks to `/dev/null`, so it builds no throwaway initramfs and sbctl's hook (`sbctl sign-all`, with no keys in the candidate) can't fail. Afterwards, those the manifest's `[files]` doesn't declare are removed again.
    - Bootstrap then runs the keyring step: `arch-chroot /run/aios/cand pacman-key --init`, then `pacman-key --populate archlinux cachyos`. pacstrap copied the live system's keyring (§6.2 step 9) into the candidate's `/etc/pacman.d/gnupg`; this makes sure it has a local master key and trusts the Arch and CachyOS keys from the keyring packages it just installed.
    - In the chroot, the same three hooks are masked through `[files]` symlinks to `/dev/null` (the default manifest declares all three), so pacman never writes `/boot` or the ESP and never runs `sbctl sign-all`, which finds no keys there (the UKIs are signed on the host, step 9).
@@ -337,6 +337,7 @@ All system interaction goes through `CommandRunner` and `SystemProbe`, so no uni
 - `/usr/lib/NetworkManager/conf.d/90-aios-privacy.conf`: `wifi.cloned-mac-address=stable`, `ethernet.cloned-mac-address=stable`, `wifi.scan-rand-mac-address=yes`, `ipv6.ip6-privacy=2`.
 - `/usr/lib/systemd/resolved.conf.d/90-aios-dot.conf`: `DNS=9.9.9.9#dns.quad9.net 149.112.112.112#dns.quad9.net 1.1.1.1#cloudflare-dns.com`, `DNSOverTLS=yes`, `DNSSEC=allow-downgrade`.
 - `/usr/lib/systemd/zram-generator.conf`: `zram-size = min(ram / 2, 8192)`, `compression-algorithm = zstd`.
+- `/usr/lib/systemd/system/usbguard.service.d/90-aios-rules.conf`: `ReadWritePaths=-/var/lib/usbguard`. The packaged unit makes `/` read-only, so without it saving a rule to the persisted rule file fails (§5.5).
 - `/usr/share/aios/defaults/manifest/`: the default manifest repo (`manifest.toml`, `files/`, `home/`). The installer copies it.
 - The default manifest's `[files]` includes:
   - `/etc/pacman.conf` (`DBPath = /usr/lib/pacman/`, CachyOS repos).
@@ -420,11 +421,11 @@ The renderer adds `lockdown=integrity` when `kernel.lockdown = "integrity"`, and
   - Strict DNS over TLS (`DNSOverTLS=yes`, §4.6) can't reach a captive portal's local resolver, so captive-portal networks need DoT relaxed until login.
   - The DoT resolvers are IPv4 only, so IPv6-only networks have no DNS.
 - **USBGuard:**
-  - `usbguard-daemon.conf`: `RuleFile=/var/lib/usbguard/rules.conf` (persisted), `ImplicitPolicyTarget=block`, `PresentDevicePolicy=apply-policy`, `InsertedDevicePolicy=apply-policy`, `IPCAllowedUsers=root`, `IPCAllowedGroups=` (empty).
+  - `usbguard-daemon.conf`: `RuleFile=/var/lib/usbguard/rules.conf` (persisted), `AuditFilePath=/var/log/usbguard/usbguard-audit.log` (the unit's sandbox lets the daemon write only `/var/log/usbguard/` in `/var/log`), `ImplicitPolicyTarget=block`, `PresentDevicePolicy=apply-policy`, `InsertedDevicePolicy=apply-policy`, `IPCAllowedUsers=root`, `IPCAllowedGroups=` (empty).
   - Only root may use the daemon's IPC. Every policy change therefore goes through `run0` and its polkit prompt, and a process running as a wheel user can't allow a device on its own.
   - The installer writes `usbguard generate-policy` output, which allows devices present at install.
   - The installer then appends `block with-interface one-of { 03:*:* }` followed by `allow`, so new HID devices are blocked and other new devices are allowed.
-  - Approve a device with `run0 usbguard allow-device -p <id>`.
+  - Approve a device with `run0 usbguard allow-device -p <id>`. `-p` saves the rule to `/var/lib/usbguard/rules.conf`, which the aios-base drop-in makes writable for the daemon (§4.6).
 - **AppArmor** is enabled via `lsm=` and `apparmor.service`, with packaged profiles enforced.
 - **Swap:** zram only. No disk swap, no hibernation.
 - **Firmware:** `fwupd-refresh.timer`.

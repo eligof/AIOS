@@ -178,11 +178,14 @@ def test_01_unattended_install_from_the_iso(machine: Machine) -> None:
 
 def test_02_gen1_boots_with_secure_boot_and_plan_is_clean(machine: Machine) -> None:
     """(c) aios plan reports no changes on a fresh install. Also: gen-1 is booted, healthy,
-    and Secure Boot is on with the installer's keys."""
+    every unit started, and Secure Boot is on with the installer's keys."""
     shell = machine.boot()
 
     assert machine.gen() == 1
     assert shell.check("systemctl is-active aios-health.service") == "active"
+    # A hardening service that fails to start (USBGuard did) leaves the system degraded.
+    state = shell.run("systemctl is-system-running --wait", 300)
+    assert state.output == "running", shell.run("systemctl --failed --no-legend").output
     assert "enabled (user)" in shell.check("bootctl status 2>/dev/null | grep -i 'secure boot'")
     plan = shell.run("aios plan", 300)
     assert plan.rc == 0, plan.output
@@ -191,11 +194,14 @@ def test_02_gen1_boots_with_secure_boot_and_plan_is_clean(machine: Machine) -> N
 
 def test_03_runtime_state_is_ephemeral_and_declared_state_persists(machine: Machine) -> None:
     """(a) runtime writes to /etc, /var/tmp and /root vanish at reboot, /usr is read-only;
-    (b) /persist and /home survive; (g, part 1) plant a symlink where ~/.ssh/authorized_keys
-    is bind-mounted, by moving the protected ~/.ssh away (spec §4.4)."""
+    (b) /persist and /home survive, and so does a USBGuard rule added at runtime (spec §5.5);
+    (g, part 1) plant a symlink where ~/.ssh/authorized_keys is bind-mounted, by moving the
+    protected ~/.ssh away (spec §4.4)."""
     shell = machine.shell
     assert shell is not None
     shell.check("echo e2e | tee /etc/aios-e2e /var/tmp/aios-e2e /root/aios-e2e /persist/aios-e2e")
+    # Saved to the rule file in /var/lib/usbguard, as `usbguard allow-device -p` would be.
+    shell.check("usbguard append-rule 'block id dead:beef'")
     machine.as_user(f"echo e2e > /home/{USER}/aios-e2e")
     erofs = shell.run("touch /usr/aios-e2e")
     assert erofs.rc != 0
@@ -214,6 +220,7 @@ def test_03_runtime_state_is_ephemeral_and_declared_state_persists(machine: Mach
         assert shell.run(f"test -e {gone}").rc == 1, f"{gone} survived the reboot"
     assert shell.check("cat /persist/aios-e2e") == "e2e"
     assert shell.check(f"cat /home/{USER}/aios-e2e") == "e2e"
+    assert "block id dead:beef" in shell.check("usbguard list-rules")
 
 
 def test_04_a_planted_symlink_does_not_redirect_the_home_bind(machine: Machine) -> None:
@@ -232,7 +239,8 @@ def test_04_a_planted_symlink_does_not_redirect_the_home_bind(machine: Machine) 
     # "<unit>: Mount path <path> is not canonical (contains a symlink)."
     assert "authorized_keys" in shell.check("journalctl -b --no-pager | grep -F 'not canonical'")
     machine.assert_ro_bind(f"{keys}2")
-    assert shell.check("systemctl is-active nftables.service") == "active"
+    # A oneshot without RemainAfterExit: inactive once it has loaded the ruleset.
+    assert shell.check("systemctl show -p Result --value nftables.service") == "success"
     assert "policy drop" in shell.check("nft list chain inet filter input")
     # The managed file is intact (sha256sum: base has no cmp).
     assert shell.check("sha256sum </etc/nftables.conf") == shell.check(

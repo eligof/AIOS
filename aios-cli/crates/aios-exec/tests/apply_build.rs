@@ -541,7 +541,7 @@ fn bootstrap_pacstraps_with_a_rewritten_conf_and_inits_the_keyring() {
         span(&fx, "pacstrap", "arch-chroot {cand} pacman-key --populate"),
         fx.expand(
             "
-            pacstrap -C {run}/aios-pacstrap.conf {cand} {set}
+            pacstrap -C {run}/aios-pacstrap.conf {cand} --dbpath={cand}/usr/lib/pacman/ {set}
             arch-chroot {cand} pacman-key --init
             arch-chroot {cand} pacman-key --populate archlinux cachyos
             "

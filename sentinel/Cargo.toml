@@ -5,6 +5,7 @@ members = [
     "crates/sentinel-rules",
     "crates/sentinel-detect",
     "crates/ebpf-loadtest",
+    "xtask",
 ]
 exclude = ["crates/sentinel-ebpf"]
 

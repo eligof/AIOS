@@ -332,12 +332,26 @@ unsafe fn try_ptrace(ctx: &LsmContext) -> Result<i32, i32> {
     (*p).payload.ptrace._pad = 0;
     let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
     let deny = crate::engine::apply_verdict(p, &v);
+    if crate::guard::selfguard_on() {
+        let d = crate::guard::daemon_tgid();
+        if tgid == d && d != 0 {
+            let is_attach = (mode & PTRACE_MODE_ATTACH) != 0;
+            if is_attach || core.pid != 1 {
+                (*p).hdr.kverdict = sentinel_common::wire::KVerdict::Denied as u8;
+                e.submit(0);
+                return Err(-1); // -EPERM
+            }
+        }
+    }
     e.submit(0);
     match deny {
         Some(err) => Err(err),
         None => Ok(0),
     }
 }
+
+/// `PTRACE_MODE_ATTACH` bit of the `mode` argument.
+const PTRACE_MODE_ATTACH: u32 = 0x02;
 
 /// `enum kernel_read_file_id`: READING_MODULE.
 const READING_MODULE: u32 = 2;

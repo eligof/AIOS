@@ -409,8 +409,14 @@ fn real_runner_children_read_dev_null_by_default() {
 fn interactive_commands_inherit_all_three_streams() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("fds");
+    // Read each inherited fd and write the result through fd 3, so the log
+    // redirection never touches fds 0/1/2 while we read them. `readlink` runs
+    // in a command substitution, so its own stdout is a capture pipe, but
+    // `/proc/$$/fd/N` still refers to this shell's inherited streams. (A plain
+    // `readlink ... >> log` makes fd 1 read back as the log under dash, where
+    // `sh` is not bash.)
     let script = format!(
-        "for fd in 0 1 2; do readlink /proc/$$/fd/$fd >> '{}'; done",
+        "exec 3>> '{}'; for fd in 0 1 2; do printf '%s\\n' \"$(readlink /proc/$$/fd/$fd)\" >&3; done",
         log.display()
     );
     let cmd = Cmd::new("sh").args(["-c", &script]).interactive();

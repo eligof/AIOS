@@ -68,5 +68,11 @@ jobs:
       - name: Audit aios-cli dependencies
         run: cd aios-cli && cargo audit
 
+      # sentinel/ only exists on branches that carry the Sentinel work.
       - name: Audit sentinel dependencies
-        run: cd sentinel && cargo audit
+        run: |
+          if [ -d sentinel ]; then
+            (cd sentinel && cargo audit)
+          else
+            echo "sentinel/ is not on this branch — skipping"
+          fi

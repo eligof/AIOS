@@ -35,5 +35,15 @@ struct in6_addr { __u8 s6_addr[16]; };
 struct sockaddr { sa_family_t sa_family; };
 struct sockaddr_in { sa_family_t sin_family; __be16 sin_port; struct in_addr sin_addr; };
 struct sockaddr_in6 { sa_family_t sin6_family; __be16 sin6_port; struct in6_addr sin6_addr; };
+/* socket -> sock -> __sk_common: skc_rcv_saddr (BE), skc_num (HOST order), family, v6 addr.
+ * skc_rcv_saddr/skc_num live in anonymous unions in the kernel; CO-RE matches by name. */
+struct sock_common {
+    __be32 skc_rcv_saddr;
+    __u16 skc_num;
+    unsigned short skc_family;
+    struct in6_addr skc_v6_rcv_saddr;
+};
+struct sock { struct sock_common __sk_common; };
+struct socket { struct sock *sk; };
 #pragma clang attribute pop
 #endif

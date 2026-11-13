@@ -108,6 +108,46 @@ unsafe fn try_connect(ctx: &LsmContext) -> Result<i32, i32> {
     Ok(0)
 }
 
+#[lsm(hook = "socket_listen")]
+pub fn listen(ctx: LsmContext) -> i32 {
+    match unsafe { try_listen(&ctx) } {
+        Ok(v) => v,
+        Err(v) => v,
+    }
+}
+
+unsafe fn try_listen(ctx: &LsmContext) -> Result<i32, i32> {
+    let ret: i64 = ctx.arg(2);
+    if ret != 0 {
+        return Err(ret as c_int);
+    }
+    let sock: *const c_void = ctx.arg(0);
+    let Some(a) = shim::sock_laddr(sock) else {
+        return Ok(0);
+    };
+    if a.family == AF_UNIX || is_loopback(&a) {
+        return Ok(0);
+    }
+    let Some(mut e) = emit::reserve() else {
+        return Ok(0);
+    };
+    let p = e.as_mut_ptr();
+    let Some(core) = facts_kern::fill_header(p, EventKind::Listen as u8) else {
+        e.discard(0);
+        return Ok(0);
+    };
+    facts_kern::set_uid_facts(p, core.uid);
+    let port = u16::from_be(a.port_be);
+    (*p).payload.net.family = a.family;
+    (*p).payload.net.proto = 0;
+    (*p).payload.net.addr = a.addr;
+    (*p).payload.net.port = port;
+    (*p).payload.net._pad = 0;
+    (*p).hdr.facts[G_FLAGS] |= F_LISTEN_NON_LOOPBACK;
+    e.submit(0);
+    Ok(0)
+}
+
 #[btf_tracepoint(function = "sched_process_fork")]
 pub fn fork(ctx: BtfTracePointContext) -> i32 {
     unsafe { proc_event(&ctx, EventKind::Fork) }

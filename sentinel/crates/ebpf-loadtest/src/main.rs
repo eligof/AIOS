@@ -176,7 +176,7 @@ fn attach_btf_tp(bpf: &mut aya::Ebpf, btf: &aya::Btf, name: &str, tp: &str) -> R
 /// per kind by later observers.
 fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
     use sentinel_common::event::EventKind;
-    use sentinel_common::facts::{F_DELETED, F_MEMFD, G_FLAGS};
+    use sentinel_common::facts::{F_DELETED, F_LISTEN_NON_LOOPBACK, F_MEMFD, G_FLAGS};
     let h = &ev.hdr;
     let facts = h.facts.map(|f| f.to_string()).join(",");
     let flags = h.facts[G_FLAGS];
@@ -187,7 +187,7 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
             ",\"child_pid\":{},\"exit_code\":{}",
             p.child_pid, p.exit_code
         )
-    } else if h.kind == EventKind::Connect as u8 {
+    } else if h.kind == EventKind::Connect as u8 || h.kind == EventKind::Listen as u8 {
         // SAFETY: for Connect events the kernel side wrote the net variant.
         let n = unsafe { ev.payload.net };
         let a = &n.addr;
@@ -199,10 +199,20 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
                 .collect();
             format!("[{}]", g.join(":"))
         };
-        format!(
-            ",\"family\":{},\"addr\":\"{}\",\"port\":{}",
-            n.family, addr, n.port
-        )
+        if h.kind == EventKind::Listen as u8 {
+            format!(
+                ",\"family\":{},\"laddr\":\"{}\",\"port\":{},\"flags_listen_nonloopback\":{}",
+                n.family,
+                addr,
+                n.port,
+                flags & F_LISTEN_NON_LOOPBACK != 0
+            )
+        } else {
+            format!(
+                ",\"family\":{},\"addr\":\"{}\",\"port\":{}",
+                n.family, addr, n.port
+            )
+        }
     } else {
         String::new()
     };
@@ -225,6 +235,7 @@ fn load() -> Result<()> {
     let btf = aya::Btf::from_sys_fs()?;
     attach_lsm(&mut bpf, &btf, "exec", "bprm_check_security")?;
     attach_lsm(&mut bpf, &btf, "connect", "socket_connect")?;
+    attach_lsm(&mut bpf, &btf, "listen", "socket_listen")?;
     attach_btf_tp(&mut bpf, &btf, "fork", "sched_process_fork")?;
     attach_btf_tp(&mut bpf, &btf, "exit", "sched_process_exit")?;
 

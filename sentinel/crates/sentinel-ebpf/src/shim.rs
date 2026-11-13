@@ -29,6 +29,7 @@ pub struct SockAddr {
 
 unsafe extern "C" {
     fn shim_sockaddr(address: *const c_void, out: *mut SockAddr) -> i32;
+    fn shim_sock_laddr(sock: *const c_void, out: *mut SockAddr) -> i32;
     fn shim_current_core(task: *const c_void, out: *mut TaskCore) -> i32;
     fn shim_exec_info(bprm: *const c_void, out: *mut ExecInfo) -> i32;
     fn shim_task_tgid(task: *const c_void, out: *mut u32) -> i32;
@@ -81,6 +82,16 @@ pub unsafe fn task_exit_code(task: *const c_void) -> Option<i32> {
 pub unsafe fn sockaddr(address: *const c_void) -> Option<SockAddr> {
     let mut o: SockAddr = core::mem::zeroed();
     if shim_sockaddr(address, &mut o) == 0 {
+        Some(o)
+    } else {
+        None
+    }
+}
+
+/// Bound local family/address/big-endian port of a `struct socket*`.
+pub unsafe fn sock_laddr(sock: *const c_void) -> Option<SockAddr> {
+    let mut o: SockAddr = core::mem::zeroed();
+    if shim_sock_laddr(sock, &mut o) == 0 {
         Some(o)
     } else {
         None

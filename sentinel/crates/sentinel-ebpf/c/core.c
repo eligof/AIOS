@@ -82,3 +82,25 @@ int shim_sockaddr(const void *address, struct sentinel_addr *o) {
     }
     return e;
 }
+
+/* Bound local address of a struct socket*. Port is returned big-endian
+ * (skc_num is host order) so it shares the SockAddr convention. */
+int shim_sock_laddr(const void *sock, struct sentinel_addr *o) {
+    const struct socket *so = sock;
+    const struct sock *sk = 0;
+    unsigned short fam = 0, num = 0;
+    int e = BPF_CORE_READ_INTO(&sk, so, sk);
+    if (!sk) return -1;
+    e |= BPF_CORE_READ_INTO(&fam, sk, __sk_common.skc_family);
+    e |= BPF_CORE_READ_INTO(&num, sk, __sk_common.skc_num);
+    o->family = fam;
+    o->port_be = __builtin_bswap16(num);
+    if (fam == 2) {
+        unsigned int a4 = 0;
+        e |= BPF_CORE_READ_INTO(&a4, sk, __sk_common.skc_rcv_saddr);
+        __builtin_memcpy(o->addr, &a4, 4);
+    } else if (fam == 10) {
+        e |= bpf_core_read(o->addr, 16, &sk->__sk_common.skc_v6_rcv_saddr);
+    }
+    return e;
+}

@@ -5,6 +5,7 @@ members = [
     "crates/sentinel-rules",
     "crates/sentinel-detect",
 ]
+exclude = ["crates/sentinel-ebpf"]
 
 [workspace.package]
 version = "0.1.0"

@@ -48,7 +48,7 @@ ISO_RM_WORK = $(if $(SUDO),$(SUDO),unshare --map-auto --map-root-user) rm -rf --
 	exit 1; } >&2
 
 .PHONY: check rust-check sentinel-check release-check shell-check bats-check unit-check e2e-unit tools repo \
-	keys iso-build iso iso-check clean-iso e2e FORCE
+	keys iso-build iso iso-check clean-iso e2e sentinel-vmtest FORCE
 
 check: rust-check sentinel-check shell-check bats-check unit-check e2e-unit
 
@@ -196,3 +196,9 @@ E2E_ARGS ?=
 e2e: tools
 	cd tests && $(PYTHON) -m e2e.vm
 	$(PYTEST) -p no:cacheprovider -v -rs tests/e2e/test_e2e.py $(E2E_ARGS)
+
+# Every Sentinel eBPF VM scenario under virtme-ng (needs KVM, a few minutes). Local only,
+# not part of `make check`; see sentinel/tests/vm/README.md.
+sentinel-vmtest:
+	cd sentinel && PATH="$$HOME/.cargo/bin:$$PATH:$$PWD/../build/hosttools/root/usr/bin" \
+		$(CARGO) run -p xtask -- vmtest all

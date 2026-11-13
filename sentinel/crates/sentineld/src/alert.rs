@@ -118,6 +118,176 @@ impl Alert {
     }
 }
 
+use std::fs::{File, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+
+/// Rotation threshold (spec §9).
+pub const ROTATE_AT: u64 = 64 * 1024 * 1024;
+
+/// A store error. The daemon downgrades these to "alerts still reach the
+/// journal and the TTY" rather than exiting (spec §12).
+#[derive(Debug)]
+pub struct StoreError(pub String);
+
+impl std::fmt::Display for StoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+fn err<T>(msg: impl Into<String>) -> Result<T, StoreError> {
+    Err(StoreError(msg.into()))
+}
+
+/// The hash-chained alert log (spec §9).
+pub struct Store {
+    dir: PathBuf,
+    live: PathBuf,
+    last: String,
+    /// Bytes after which the live file rotates. Public so tests can shrink it.
+    pub rotate_at: u64,
+}
+
+impl Store {
+    /// Open (creating the directory if needed) and recover the chain head.
+    pub fn open(dir: &Path) -> Result<Store, StoreError> {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            return err(format!("cannot create {}: {e}", dir.display()));
+        }
+        let live = dir.join("alerts.jsonl");
+        let mut s = Store {
+            dir: dir.to_path_buf(),
+            live,
+            last: GENESIS.to_string(),
+            rotate_at: ROTATE_AT,
+        };
+        s.last = match s.read_all()?.last() {
+            Some(a) => a.hash.clone(),
+            None => GENESIS.to_string(),
+        };
+        Ok(s)
+    }
+
+    /// The hash the next record will chain from.
+    pub fn last_hash(&self) -> String {
+        self.last.clone()
+    }
+
+    /// The rotated files, oldest first, then the live file.
+    fn files(&self) -> Result<Vec<PathBuf>, StoreError> {
+        let mut rotated: Vec<(u32, PathBuf)> = Vec::new();
+        let rd = match std::fs::read_dir(&self.dir) {
+            Ok(rd) => rd,
+            Err(e) => return err(format!("cannot read {}: {e}", self.dir.display())),
+        };
+        for ent in rd.flatten() {
+            let name = ent.file_name().to_string_lossy().into_owned();
+            if let Some(n) = name
+                .strip_prefix("alerts.")
+                .and_then(|r| r.strip_suffix(".jsonl"))
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                rotated.push((n, ent.path()));
+            }
+        }
+        rotated.sort_by_key(|(n, _)| *n);
+        let mut out: Vec<PathBuf> = rotated.into_iter().map(|(_, p)| p).collect();
+        if self.live.exists() {
+            out.push(self.live.clone());
+        }
+        Ok(out)
+    }
+
+    /// Every record, oldest first, across rotated files.
+    pub fn read_all(&self) -> Result<Vec<Alert>, StoreError> {
+        let mut out = Vec::new();
+        for p in self.files()? {
+            let f = match File::open(&p) {
+                Ok(f) => f,
+                Err(e) => return err(format!("cannot read {}: {e}", p.display())),
+            };
+            for (i, line) in BufReader::new(f).lines().enumerate() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(e) => return err(format!("{}: line {}: {e}", p.display(), i + 1)),
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                match serde_json::from_str::<Alert>(&line) {
+                    Ok(a) => out.push(a),
+                    Err(e) => return err(format!("{}: line {}: {e}", p.display(), i + 1)),
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Seal `a` onto the chain, write it, rotate if the live file is now over
+    /// the threshold. Returns the record's hash.
+    pub fn append(&mut self, mut a: Alert) -> Result<String, StoreError> {
+        a.seal(&self.last);
+        let line = match serde_json::to_string(&a) {
+            Ok(l) => l,
+            Err(e) => return err(format!("cannot serialise alert {}: {e}", a.id)),
+        };
+        let mut f = match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.live)
+        {
+            Ok(f) => f,
+            Err(e) => return err(format!("cannot open {}: {e}", self.live.display())),
+        };
+        if let Err(e) = writeln!(f, "{line}").and_then(|()| f.sync_data()) {
+            return err(format!("cannot write {}: {e}", self.live.display()));
+        }
+        self.last = a.hash.clone();
+        let size = f.metadata().map(|m| m.len()).unwrap_or(0);
+        if size >= self.rotate_at {
+            self.rotate()?;
+        }
+        Ok(a.hash)
+    }
+
+    /// Rename the live file to the next free `alerts.<n>.jsonl`. The next
+    /// record keeps chaining from `self.last`, so the chain spans the rename.
+    fn rotate(&mut self) -> Result<(), StoreError> {
+        let mut n = 1u32;
+        while self.dir.join(format!("alerts.{n}.jsonl")).exists() {
+            n += 1;
+        }
+        let to = self.dir.join(format!("alerts.{n}.jsonl"));
+        if let Err(e) = std::fs::rename(&self.live, &to) {
+            return err(format!("cannot rotate to {}: {e}", to.display()));
+        }
+        Ok(())
+    }
+
+    /// Walk the whole chain. Returns the number of records, or an error naming
+    /// the index of the first bad one.
+    pub fn verify(&self) -> Result<usize, StoreError> {
+        let all = self.read_all()?;
+        let mut prev = GENESIS.to_string();
+        for (i, a) in all.iter().enumerate() {
+            if a.prev_hash != prev {
+                return err(format!(
+                    "record {i} ({}) chains from {}, expected {prev}",
+                    a.id, a.prev_hash
+                ));
+            }
+            if a.hash != a.compute_hash() {
+                return err(format!("record {i} ({}) hash mismatch", a.id));
+            }
+            prev = a.hash.clone();
+        }
+        Ok(all.len())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,5 +416,89 @@ mod tests {
         let restored: Alert = serde_json::from_str(&line).expect("Alert deserialises");
         assert_eq!(restored.message, a.message);
         assert_eq!(restored.compute_hash(), a.hash);
+    }
+
+    fn store_alert(id: &str) -> Alert {
+        let mut a = sample();
+        a.id = id.to_string();
+        a
+    }
+
+    #[test]
+    fn append_chains_each_record_to_the_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::open(dir.path()).unwrap();
+        let h1 = s.append(store_alert("a1")).unwrap();
+        let h2 = s.append(store_alert("a2")).unwrap();
+        assert_ne!(h1, h2);
+        let read = s.read_all().unwrap();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].prev_hash, GENESIS);
+        assert_eq!(read[1].prev_hash, read[0].hash);
+        assert_eq!(read[1].hash, h2);
+    }
+
+    #[test]
+    fn a_fresh_store_verifies_and_reports_the_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::open(dir.path()).unwrap();
+        for i in 0..5 {
+            s.append(store_alert(&format!("a{i}"))).unwrap();
+        }
+        assert_eq!(s.verify().unwrap(), 5);
+    }
+
+    #[test]
+    fn a_tampered_record_fails_verification_at_its_index() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut s = Store::open(dir.path()).unwrap();
+            for i in 0..3 {
+                s.append(store_alert(&format!("a{i}"))).unwrap();
+            }
+        }
+        // Rewrite record 1's severity, keeping its stored hash.
+        let path = dir.path().join("alerts.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+        lines[1] = lines[1].replace(r#""severity":"high""#, r#""severity":"low""#);
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+
+        let s = Store::open(dir.path()).unwrap();
+        let err = s.verify().unwrap_err();
+        assert!(
+            err.to_string().contains("record 1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rotation_renames_the_live_file_and_keeps_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = Store::open(dir.path()).unwrap();
+        // A tiny limit, so every record rotates.
+        s.rotate_at = 1;
+        let h1 = s.append(store_alert("a1")).unwrap();
+        let h2 = s.append(store_alert("a2")).unwrap();
+        assert!(dir.path().join("alerts.1.jsonl").exists());
+        let all = s.read_all().unwrap();
+        assert_eq!(all.len(), 2, "read_all must span rotated files");
+        assert_eq!(all[0].hash, h1);
+        assert_eq!(all[1].prev_hash, h1);
+        assert_eq!(all[1].hash, h2);
+        assert_eq!(s.verify().unwrap(), 2);
+    }
+
+    #[test]
+    fn reopening_resumes_the_chain_from_the_last_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let h1 = {
+            let mut s = Store::open(dir.path()).unwrap();
+            s.append(store_alert("a1")).unwrap()
+        };
+        let mut s = Store::open(dir.path()).unwrap();
+        assert_eq!(s.last_hash(), h1);
+        s.append(store_alert("a2")).unwrap();
+        assert_eq!(s.verify().unwrap(), 2);
     }
 }

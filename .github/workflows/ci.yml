@@ -1,0 +1,72 @@
+name: CI
+
+# Portable regression gate. The ISO build (`make iso`) and end-to-end tests
+# (`make e2e`) need an Arch host with pacstrap/mkarchiso and KVM, which GitHub's
+# hosted runners do not provide, so they stay local-only. `make check` is the
+# subset that runs anywhere: the Rust workspaces (aios-cli on stable, sentinel on
+# its pinned nightly), shellcheck, bats, systemd unit verification, and pytest.
+
+on:
+  push:
+    branches: [main, "feat/**", "fix/**", "chore/**"]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable + clippy + rustfmt)
+        run: |
+          rustup toolchain install stable --profile minimal -c clippy -c rustfmt
+          rustup default stable
+          rustc --version && cargo --version
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Cache cargo and target directories
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            aios-cli/target
+            sentinel/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('aios-cli/Cargo.lock', 'sentinel/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Fetch pinned tools (shellcheck, bats, pytest venv)
+        run: make tools
+
+      # The sentinel/ workspace's nightly toolchain auto-installs from
+      # sentinel/rust-toolchain.toml on the first cargo invocation inside it.
+      - name: make check
+        run: make check
+
+  audit:
+    name: audit (cargo-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit aios-cli dependencies
+        run: cd aios-cli && cargo audit
+
+      - name: Audit sentinel dependencies
+        run: cd sentinel && cargo audit

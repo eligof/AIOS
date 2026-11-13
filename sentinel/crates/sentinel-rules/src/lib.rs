@@ -5,6 +5,7 @@
 //! can path-depend on it (S4).
 
 pub mod classify;
+pub mod compile;
 pub mod config;
 pub mod model;
 
@@ -84,3 +85,4 @@ pub fn load_dir(dir: &Path) -> Result<Vec<Rule>, Vec<RuleError>> {
 
 pub mod validate;
 pub use validate::parse_duration_ms;
+pub use validate::{parse_action, parse_mode, parse_on};

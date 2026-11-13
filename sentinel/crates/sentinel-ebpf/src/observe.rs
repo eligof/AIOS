@@ -53,6 +53,61 @@ unsafe fn try_exec(ctx: &LsmContext) -> Result<i32, i32> {
     Ok(0) // deny decided in Phase D
 }
 
+const AF_UNIX: u16 = 1;
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
+
+fn is_loopback(a: &shim::SockAddr) -> bool {
+    if a.family == AF_INET {
+        a.addr[0] == 127
+    } else if a.family == AF_INET6 {
+        a.addr[..15].iter().all(|b| *b == 0) && a.addr[15] == 1
+    } else {
+        false
+    }
+}
+
+#[lsm(hook = "socket_connect")]
+pub fn connect(ctx: LsmContext) -> i32 {
+    match unsafe { try_connect(&ctx) } {
+        Ok(v) => v,
+        Err(v) => v,
+    }
+}
+
+unsafe fn try_connect(ctx: &LsmContext) -> Result<i32, i32> {
+    let ret: i64 = ctx.arg(3);
+    if ret != 0 {
+        return Err(ret as c_int);
+    }
+    let address: *const c_void = ctx.arg(1);
+    let Some(a) = shim::sockaddr(address) else {
+        return Ok(0);
+    };
+    if a.family == AF_UNIX || is_loopback(&a) {
+        return Ok(0);
+    }
+    let Some(mut e) = emit::reserve() else {
+        return Ok(0);
+    };
+    let p = e.as_mut_ptr();
+    let Some(core) = facts_kern::fill_header(p, EventKind::Connect as u8) else {
+        e.discard(0);
+        return Ok(0);
+    };
+    facts_kern::set_uid_facts(p, core.uid);
+    let port = u16::from_be(a.port_be);
+    (*p).payload.net.family = a.family;
+    (*p).payload.net.proto = 0;
+    (*p).payload.net.addr = a.addr;
+    (*p).payload.net.port = port;
+    (*p).payload.net._pad = 0;
+    facts_kern::set_dest_facts(p, &a);
+    facts_kern::set_port_facts(p, port);
+    e.submit(0);
+    Ok(0)
+}
+
 #[btf_tracepoint(function = "sched_process_fork")]
 pub fn fork(ctx: BtfTracePointContext) -> i32 {
     unsafe { proc_event(&ctx, EventKind::Fork) }

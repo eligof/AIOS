@@ -29,6 +29,11 @@ struct path { struct vfsmount *mnt; struct dentry *dentry; };
 struct file { struct inode *f_inode; struct path f_path; };
 struct mount { struct vfsmount mnt; int mnt_id; };
 struct linux_binprm { struct file *file; };
-/* socket, sockaddr_in* added per task */
+typedef unsigned short sa_family_t;
+struct in_addr { __be32 s_addr; };
+struct in6_addr { __u8 s6_addr[16]; };
+struct sockaddr { sa_family_t sa_family; };
+struct sockaddr_in { sa_family_t sin_family; __be16 sin_port; struct in_addr sin_addr; };
+struct sockaddr_in6 { sa_family_t sin6_family; __be16 sin6_port; struct in6_addr sin6_addr; };
 #pragma clang attribute pop
 #endif

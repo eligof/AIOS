@@ -35,3 +35,13 @@ pub fn set_uid_facts(ev: *mut RawEvent, uid: u32) {
         }
     }
 }
+
+/// Destination CIDR facts. Task 21: CIDRS/PORTS lookup
+pub fn set_dest_facts(_ev: *mut RawEvent, _a: &shim::SockAddr) {
+    // Task 21: CIDRS/PORTS lookup
+}
+
+/// Destination port facts. Task 21: CIDRS/PORTS lookup
+pub fn set_port_facts(_ev: *mut RawEvent, _port: u16) {
+    // Task 21: CIDRS/PORTS lookup
+}

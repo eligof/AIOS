@@ -187,6 +187,22 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
             ",\"child_pid\":{},\"exit_code\":{}",
             p.child_pid, p.exit_code
         )
+    } else if h.kind == EventKind::Connect as u8 {
+        // SAFETY: for Connect events the kernel side wrote the net variant.
+        let n = unsafe { ev.payload.net };
+        let a = &n.addr;
+        let addr = if n.family == 2 {
+            format!("{}.{}.{}.{}", a[0], a[1], a[2], a[3])
+        } else {
+            let g: Vec<String> = (0..8)
+                .map(|i| format!("{:x}", u16::from_be_bytes([a[2 * i], a[2 * i + 1]])))
+                .collect();
+            format!("[{}]", g.join(":"))
+        };
+        format!(
+            ",\"family\":{},\"addr\":\"{}\",\"port\":{}",
+            n.family, addr, n.port
+        )
     } else {
         String::new()
     };
@@ -208,6 +224,7 @@ fn load() -> Result<()> {
     let mut bpf = aya::Ebpf::load(data)?;
     let btf = aya::Btf::from_sys_fs()?;
     attach_lsm(&mut bpf, &btf, "exec", "bprm_check_security")?;
+    attach_lsm(&mut bpf, &btf, "connect", "socket_connect")?;
     attach_btf_tp(&mut bpf, &btf, "fork", "sched_process_fork")?;
     attach_btf_tp(&mut bpf, &btf, "exit", "sched_process_exit")?;
 

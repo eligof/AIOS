@@ -61,3 +61,24 @@ int shim_task_exit_code(const void *task, int *out) {
     const struct task_struct *t = task;
     return BPF_CORE_READ_INTO(out, t, exit_code);
 }
+
+/* sockaddr: family, address (v4 in addr[0..4]), port (network byte order). */
+int shim_sockaddr(const void *address, struct sentinel_addr *o) {
+    const struct sockaddr *sa = address;
+    unsigned short fam = 0;
+    int e = BPF_CORE_READ_INTO(&fam, sa, sa_family);
+    o->family = fam;
+    o->port_be = 0;
+    if (fam == 2) {
+        const struct sockaddr_in *s4 = address;
+        unsigned int a4 = 0;
+        e |= BPF_CORE_READ_INTO(&a4, s4, sin_addr.s_addr);
+        e |= BPF_CORE_READ_INTO(&o->port_be, s4, sin_port);
+        __builtin_memcpy(o->addr, &a4, 4);
+    } else if (fam == 10) {
+        const struct sockaddr_in6 *s6 = address;
+        e |= bpf_core_read(o->addr, 16, &s6->sin6_addr);
+        e |= BPF_CORE_READ_INTO(&o->port_be, s6, sin6_port);
+    }
+    return e;
+}

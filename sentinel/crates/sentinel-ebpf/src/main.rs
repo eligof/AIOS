@@ -6,6 +6,7 @@ use aya_ebpf::{macros::tracepoint, programs::TracePointContext};
 mod emit;
 mod engine;
 mod facts_kern;
+mod guard;
 mod maps;
 mod observe;
 mod shim;

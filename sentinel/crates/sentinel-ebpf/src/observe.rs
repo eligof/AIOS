@@ -478,6 +478,15 @@ unsafe fn try_signal(ctx: &LsmContext) -> Result<i32, i32> {
     (*p).payload.signal.sig = sig;
     let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
     let deny = crate::engine::apply_verdict(p, &v);
+    if crate::guard::selfguard_on() {
+        let d = crate::guard::daemon_tgid();
+        let sender = core.pid;
+        if target_tgid == d && d != 0 && sender != d && sender != 1 {
+            (*p).hdr.kverdict = sentinel_common::wire::KVerdict::Denied as u8;
+            e.submit(0);
+            return Err(-1); // -EPERM
+        }
+    }
     e.submit(0);
     match deny {
         Some(err) => Err(err),

@@ -35,6 +35,9 @@ enum Cmd {
         /// Set CFG_ENFORCE so Deny+Enforce kernel rules actually block.
         #[arg(long)]
         enforce: bool,
+        /// Set CFG_SELFGUARD: refuse user signals aimed at the daemon.
+        #[arg(long)]
+        selfguard: bool,
     },
 }
 
@@ -48,7 +51,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::HeartbeatSelftest => heartbeat_selftest(),
-        Cmd::Load { enforce } => load(enforce),
+        Cmd::Load { enforce, selfguard } => load(enforce, selfguard),
         Cmd::Maps => {
             let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/sentinel-ebpf"));
             let bpf = aya::Ebpf::load(data)?;
@@ -463,7 +466,7 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
     )
 }
 
-fn load(enforce: bool) -> Result<()> {
+fn load(enforce: bool, selfguard: bool) -> Result<()> {
     use std::io::Write;
     use std::sync::atomic::Ordering;
 
@@ -474,11 +477,15 @@ fn load(enforce: bool) -> Result<()> {
         let cfg = sentinel_common::wire::KConfig {
             lockdown_after_ns: 5_000_000_000,
             sentineld_tgid: std::process::id(),
-            flags: if enforce {
+            flags: (if enforce {
                 sentinel_common::wire::CFG_ENFORCE
             } else {
                 0
-            },
+            }) | (if selfguard {
+                sentinel_common::wire::CFG_SELFGUARD
+            } else {
+                0
+            }),
         };
         let mut config = aya::maps::Array::<_, PodConfig>::try_from(
             bpf.map_mut("CONFIG")

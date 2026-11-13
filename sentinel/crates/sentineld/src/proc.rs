@@ -26,9 +26,28 @@ pub trait ProcSource: Send {
     fn has_stdio_socket(&self, pid: u32) -> bool;
 }
 
-/// The systemd unit is the last unit-like component of the cgroup v2 path.
-pub fn unit_from_cgroup(line: &str) -> String {
-    let path = line.rsplit("::").next().unwrap_or("");
+/// The cgroup v2 (unified-hierarchy) line out of the full contents of
+/// `/proc/<pid>/cgroup` -- the one line starting `0::`. This project is
+/// cgroup-v2-only by design (`sentinel-ebpf`'s `guard.rs` keys off
+/// `bpf_get_current_cgroup_id()`'s v2 id). On a hybrid host that still has
+/// legacy v1 controllers mounted, earlier lines look like
+/// `7:memory:/user.slice`: no `::` in them at all. Blindly taking the
+/// first line (rather than picking out the `0::` one) would hand a v1
+/// line to `rsplit("::")`, which returns the whole line unchanged -- a
+/// bogus path that silently resolves to nothing. Returns `""` when there
+/// is no `0::` line (not a cgroup v2 host, or the file was empty):
+/// callers must treat that as "unknown", not fall back to the root path.
+pub fn cgroup_v2_line(contents: &str) -> &str {
+    contents
+        .lines()
+        .find(|l| l.starts_with("0::"))
+        .unwrap_or("")
+}
+
+/// The systemd unit is the last unit-like component of the cgroup v2 path,
+/// read out of the full contents of `/proc/<pid>/cgroup`.
+pub fn unit_from_cgroup(contents: &str) -> String {
+    let path = cgroup_v2_line(contents).strip_prefix("0::").unwrap_or("");
     path.rsplit('/')
         .find(|c| {
             c.ends_with(".service")
@@ -42,6 +61,12 @@ pub fn unit_from_cgroup(line: &str) -> String {
 }
 
 /// `/proc/<pid>/cmdline` is NUL-separated; join with spaces.
+///
+/// Known lossy edge case, left as-is: a NUL or empty `argv[0]` (a known
+/// process-identity-spoofing trick) collapses indistinguishably into
+/// whatever argv would look like without it, since empty elements are
+/// filtered out below. Acceptable here because `argv` is a display and
+/// glob-match string, not an identity field -- `Proc.exe` carries that.
 pub fn argv_from_cmdline(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw)
         .split('\0')
@@ -54,6 +79,33 @@ pub fn argv_from_cmdline(raw: &[u8]) -> String {
 pub fn environ_has_ld(raw: &[u8]) -> bool {
     raw.split(|b| *b == 0)
         .any(|e| e.starts_with(b"LD_PRELOAD=") || e.starts_with(b"LD_LIBRARY_PATH="))
+}
+
+/// The slice of `raw` to hand to [`environ_has_ld`] for the "first 4 KiB
+/// of environ" scan the spec describes (§4). A raw byte-offset cut at
+/// `window` would slice straight through whichever entry happens to sit
+/// on the boundary, e.g. turning a real `LD_PRELOAD=/tmp/evil.so` into a
+/// truncated `LD_PRELOA` with no `=` -- a false negative on exactly the
+/// thing this flag exists to catch. Instead: include every COMPLETE
+/// entry that STARTS before `window` (even one that extends past it),
+/// and exclude any entry that starts at or after `window`. If the naive
+/// `window`-byte prefix contains no `\0` at all, there is not even one
+/// entry boundary to trust, so the result is empty.
+pub fn environ_window(raw: &[u8], window: usize) -> &[u8] {
+    let cap = raw.len().min(window);
+    if !raw[..cap].contains(&0) {
+        return &[];
+    }
+    let mut end = 0usize;
+    let mut next_start = 0usize;
+    for entry in raw.split(|&b| b == 0) {
+        if next_start >= window {
+            break;
+        }
+        end = next_start + entry.len();
+        next_start = end + 1;
+    }
+    &raw[..end.min(raw.len())]
 }
 
 /// The real `/proc`.
@@ -86,14 +138,25 @@ impl ProcSource for RealProc {
         }
         let cgroup_file =
             std::fs::read_to_string(format!("/proc/{pid}/cgroup")).unwrap_or_default();
-        let first = cgroup_file.lines().next().unwrap_or("");
-        let unit = unit_from_cgroup(first);
+        let unit = unit_from_cgroup(&cgroup_file);
         // The cgroup id is the inode of the cgroup directory, which is what
-        // bpf_get_current_cgroup_id() returns on the kernel side.
-        let rel = first.rsplit("::").next().unwrap_or("/");
-        let cgroup_id = std::fs::metadata(format!("/sys/fs/cgroup{rel}"))
-            .map(|m| m.ino())
-            .unwrap_or(0);
+        // bpf_get_current_cgroup_id() returns on the kernel side -- but
+        // only for the cgroup v2 (unified-hierarchy) line. `cgroup_v2_line`
+        // is what finds that line rather than just taking the first one.
+        let v2_line = cgroup_v2_line(&cgroup_file);
+        let cgroup_id = if v2_line.is_empty() {
+            // Not a cgroup v2 host (or /proc/<pid>/cgroup was unreadable):
+            // there is no unified-hierarchy path to resolve, and the eBPF
+            // side only ever reports a v2 id, so there is nothing to
+            // compare against. This 0 is a deliberate "unknown", not an
+            // accidental fallback from a bad path string.
+            0
+        } else {
+            let rel = v2_line.strip_prefix("0::").unwrap_or("/");
+            std::fs::metadata(format!("/sys/fs/cgroup{rel}"))
+                .map(|m| m.ino())
+                .unwrap_or(0)
+        };
         Some(Proc {
             pid,
             ppid,
@@ -121,9 +184,11 @@ impl ProcSource for RealProc {
     }
 
     fn has_env_ld(&self, pid: u32) -> bool {
-        // Only the first 4 KiB, as the spec's env_ld flag describes (§4).
+        // Only the first 4 KiB, as the spec's env_ld flag describes (§4);
+        // `environ_window` keeps that bound without chopping an entry
+        // that straddles it.
         match Self::read_bytes(pid, "environ") {
-            Some(raw) => environ_has_ld(&raw[..raw.len().min(4096)]),
+            Some(raw) => environ_has_ld(environ_window(&raw, 4096)),
             None => false,
         }
     }
@@ -241,5 +306,73 @@ mod tests {
         assert_eq!(p.pid, me);
         assert!(!p.exe.is_empty(), "exe should resolve for the test binary");
         assert!(RealProc.pids().contains(&me));
+    }
+
+    // Review finding 1: a hard byte cut at the window boundary can chop a
+    // genuine LD_PRELOAD entry in half, producing a false negative. Pin
+    // that it survives intact when it straddles the boundary: a filler
+    // entry ending at offset 4090, then the real entry running from 4091
+    // to past 4096.
+    #[test]
+    fn environ_window_completes_an_entry_that_straddles_the_boundary() {
+        let mut raw = vec![b'A'; 4090];
+        raw.push(0); // filler entry ends at offset 4090
+        raw.extend_from_slice(b"LD_PRELOAD=/tmp/evil.so"); // starts at 4091
+        raw.push(0);
+        assert!(
+            environ_has_ld(environ_window(&raw, 4096)),
+            "an entry starting before the window must be seen in full, even past it"
+        );
+    }
+
+    // Complement of the above: an entry that begins entirely after the
+    // window must stay out of scope, since the spec deliberately bounds
+    // the scan to the first 4 KiB.
+    #[test]
+    fn environ_window_excludes_an_entry_that_starts_after_the_boundary() {
+        let mut raw = vec![b'A'; 4090];
+        raw.push(0); // filler #1 ends at offset 4090
+        raw.extend_from_slice(&[b'B'; 10]); // filler #2: 4091..4101
+        raw.push(0); // filler #2 ends at offset 4101
+        raw.extend_from_slice(b"LD_PRELOAD=/tmp/x.so"); // starts at 4102
+        raw.push(0);
+        assert!(
+            !environ_has_ld(environ_window(&raw, 4096)),
+            "an entry starting at or after the window must not be seen at all"
+        );
+    }
+
+    // Pins the prefix-only semantics `env_ld_is_set_by_either_variable`
+    // already covers for "mentioned inside a value", extended to "a
+    // variable name that merely contains LD_PRELOAD as a substring".
+    #[test]
+    fn environ_has_ld_requires_the_variable_name_as_a_prefix() {
+        assert!(!environ_has_ld(b"MY_LD_PRELOAD=x\0"));
+    }
+
+    // Review finding 2: a hybrid host's legacy v1 cgroup lines
+    // (`N:controller:path`) have no "::" at all. Taking the first line
+    // blindly would feed one of those to the v2 path logic; selecting the
+    // "0::" line explicitly must skip them and find the unified line
+    // wherever it sits.
+    #[test]
+    fn cgroup_v2_line_skips_legacy_v1_lines() {
+        let body = "12:pids:/user.slice\n\
+                     7:memory:/user.slice/user-1000.slice\n\
+                     0::/user.slice/user-1000.slice/session-2.scope\n";
+        assert_eq!(
+            cgroup_v2_line(body),
+            "0::/user.slice/user-1000.slice/session-2.scope"
+        );
+        assert_eq!(unit_from_cgroup(body), "session-2.scope");
+    }
+
+    #[test]
+    fn cgroup_v2_line_is_empty_when_there_is_no_unified_hierarchy_line() {
+        assert_eq!(
+            cgroup_v2_line("12:pids:/user.slice\n7:memory:/user.slice\n"),
+            ""
+        );
+        assert_eq!(unit_from_cgroup("12:pids:/user.slice\n"), "");
     }
 }

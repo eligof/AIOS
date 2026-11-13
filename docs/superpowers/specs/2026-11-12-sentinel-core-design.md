@@ -381,3 +381,19 @@ AIOS/
 4. Multi-event sequence rules (`exec` then `connect` then `open camera`).
 5. PID 1 signals to `sentineld` (§8.2 known limit): a systemd drop-in can't stop `systemctl kill`; a tighter answer needs knowing in the hook whether the system is shutting down.
 6. Signing `aios-sentinel` together with repo signing (Base ISO follow-up #2): until then a root compromise can plant a modified package in `/persist/aios/repo` for the next apply, which the apply-time alert would show.
+
+## 17. Implementation amendments
+
+Recorded during S1 (plan `docs/superpowers/plans/2026-11-13-sentinel-s1-core-crates.md`). These refine the design where the toolchain or the chosen crates differ from the original text; the guarantees of §1–§2 are unchanged.
+
+1. **CO-RE via C shims (§3.1, §4).** Rust eBPF cannot emit CO-RE relocations today (rustc has no `.BTF.ext` for `preserve_access_index`; rust#158412, aya#349). Kernel-struct field reads that must survive a kernel version change are done in a small C file (`sentinel-ebpf/c/`), compiled with `clang -target bpfel -O2 -g -emit-llvm` and linked by bpf-linker `--btf`; the Aya loader relocates it. Everything else stays Rust (Aya). This is the §3.1 "written in C … name it and say why" allowance. Verified working in a virtme-ng VM during S1 pre-work.
+
+2. **Socket destruction from user space (§6 freeze).** Aya exposes no socket-iterator program type, so the "`bpf_sock_destroy` from a socket iterator" step runs in `sentineld` instead: for each quarantined pid it enumerates sockets via `sock_diag` and destroys them with `SOCK_DESTROY` (`INET_DIAG_DESTROY`, present on the host kernel). The `socket_connect`/`socket_sendmsg` LSM deny for the quarantine cgroup still runs in the kernel, so no new connection is possible during the race.
+
+3. **`aya-build` instead of `cargo xtask build` for the package (§11.4).** The kernel object is built by an `aya-build` build-script step, so a plain `cargo build --release --locked` (what the PKGBUILD runs) produces everything. `xtask` is kept for the S2 VM tests, not the package build.
+
+4. **New predicate `any = true` (§5.2).** A rule that should match every event of its `on` (e.g. `module-load`) sets `any = true`. It is kernel-evaluable and satisfies the "empty match is an error" rule. Applies to all event kinds.
+
+5. **New predicate `managed_home = true` (§5.2, §5.5 `persistence-write`).** The protected home files are known only to `sentineld` (it fills the list from the rendered home binds). `managed_home = true` is a user-space predicate on `write_refused` that holds when the resolved path is one of them.
+
+6. **`exe_on` matches by mount id (§5.2).** Btrfs subvolumes share one `s_dev`, so `exe_on` is matched on the VFS mount's `mnt_id`, not on `s_dev` or path text. `sentineld` resolves each `exe_on` path to its mount at load time and warns when a path is not a mount point (the rule would then never match).

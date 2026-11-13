@@ -73,6 +73,62 @@ struct PodConfig(sentinel_common::wire::KConfig);
 // SAFETY: KConfig is repr(C), Copy, and fully initialised plain data.
 unsafe impl aya::Pod for PodConfig {}
 
+/// Same orphan-rule workaround for the compiled kernel rule.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct PodRule(sentinel_common::rule::KRule);
+// SAFETY: KRule is repr(C), Copy, and fully initialised plain data.
+unsafe impl aya::Pod for PodRule {}
+
+/// Compile the rule pack (a directory of *.toml, default: the repo pack) with
+/// the S1 `sentinel-rules` crate and write the kernel rules into RULES and
+/// RULE_COUNT. Lookup tables (CIDRS/PORTS/MOUNTS/UID_LITERALS) are Task 21.
+fn populate_rules(bpf: &mut aya::Ebpf) -> Result<()> {
+    let dir = std::env::var("SENTINEL_RULES_DIR").unwrap_or_else(|_| {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../manifest/sentinel/rules"
+        )
+        .to_string()
+    });
+    let rules = sentinel_rules::load_dir(std::path::Path::new(&dir)).map_err(|errs| {
+        anyhow::anyhow!(
+            "rule pack invalid: {}",
+            errs.iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    let tables = sentinel_rules::compile::compile_kernel(&rules).map_err(|errs| {
+        anyhow::anyhow!(
+            "rule compile failed: {}",
+            errs.iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        )
+    })?;
+    {
+        let mut arr = aya::maps::Array::<_, PodRule>::try_from(
+            bpf.map_mut("RULES")
+                .ok_or_else(|| anyhow::anyhow!("RULES missing"))?,
+        )?;
+        for (i, kr) in tables.rules.iter().enumerate() {
+            arr.set(i as u32, &PodRule(*kr), 0)?;
+            eprintln!("rule {} -> {}", i, rules[kr.index as usize].id);
+        }
+    }
+    {
+        let mut cnt = aya::maps::Array::<_, u32>::try_from(
+            bpf.map_mut("RULE_COUNT")
+                .ok_or_else(|| anyhow::anyhow!("RULE_COUNT missing"))?,
+        )?;
+        cnt.set(0, &(tables.rules.len() as u32), 0)?;
+    }
+    Ok(())
+}
+
 fn monotonic_ns() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -302,6 +358,7 @@ fn load() -> Result<()> {
         )?;
         config.set(0, &PodConfig(cfg), 0)?;
     }
+    populate_rules(&mut bpf)?;
     attach_lsm(&mut bpf, &btf, "exec", "bprm_check_security")?;
     attach_lsm(&mut bpf, &btf, "connect", "socket_connect")?;
     attach_lsm(&mut bpf, &btf, "listen", "socket_listen")?;

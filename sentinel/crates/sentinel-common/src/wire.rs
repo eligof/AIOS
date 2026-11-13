@@ -163,6 +163,9 @@ pub struct KConfig {
     pub lockdown_after_ns: u64,
     pub sentineld_tgid: u32,
     pub flags: u32,
+    /// mnt_id of the read-only /usr mount (lockdown allows exec only from it).
+    pub usr_mnt_id: u32,
+    pub _pad: u32,
 }
 
 pub const CFG_ENFORCE: u32 = 1 << 0;
@@ -190,6 +193,7 @@ const _: () = {
     use core::mem::size_of;
     assert!(size_of::<EventHeader>() == 80);
     assert!(size_of::<RawEvent>() % 8 == 0);
+    assert!(size_of::<KConfig>() == 24);
     let m = size_of::<ExecPayload>();
     assert!(size_of::<NetPayload>() <= m);
     assert!(size_of::<OpenPayload>() <= m);

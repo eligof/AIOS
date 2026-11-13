@@ -303,6 +303,8 @@ fn heartbeat_selftest() -> Result<()> {
         lockdown_after_ns: 200_000_000,
         sentineld_tgid: std::process::id(),
         flags: 0,
+        usr_mnt_id: 0,
+        _pad: 0,
     };
     {
         let mut config = Array::<_, PodConfig>::try_from(
@@ -338,6 +340,34 @@ static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
 
 extern "C" fn on_signal(_: libc::c_int) {
     STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+static STOP_HB: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_usr1(_: libc::c_int) {
+    STOP_HB.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// mnt_id of the mount holding /usr/bin (longest mountinfo mount point that is a path prefix).
+fn usr_mnt_id() -> Result<u32> {
+    let info = std::fs::read_to_string("/proc/self/mountinfo")?;
+    let target = "/usr/bin";
+    let mut best: Option<(usize, u32)> = None;
+    for line in info.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 5 {
+            continue;
+        }
+        let mp = f[4];
+        let is_prefix = mp == "/"
+            || target == mp
+            || (target.starts_with(mp) && target.as_bytes().get(mp.len()) == Some(&b'/'));
+        if is_prefix && best.is_none_or(|(l, _)| mp.len() >= l) {
+            best = Some((mp.len(), f[0].parse()?));
+        }
+    }
+    best.map(|(_, id)| id)
+        .ok_or_else(|| anyhow::anyhow!("no mount found for /usr"))
 }
 
 /// Attach one LSM program (`name`) to its kernel hook (`hook`). Later observers add a line in `load`.
@@ -403,6 +433,10 @@ fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
                 n.family, addr, n.port
             )
         }
+    } else if h.kind == EventKind::Exec as u8 {
+        // SAFETY: for Exec events the kernel side wrote the exec variant.
+        let x = unsafe { ev.payload.exec };
+        format!(",\"mnt_id\":{}", x.mnt_id)
     } else if h.kind == EventKind::Open as u8 {
         // SAFETY: for Open events the kernel side wrote the open variant.
         let o = unsafe { ev.payload.open };
@@ -481,8 +515,10 @@ fn load(enforce: bool, selfguard: bool, guard_dir: Option<std::path::PathBuf>) -
     let mut bpf = aya::Ebpf::load(data)?;
     let btf = aya::Btf::from_sys_fs()?;
     {
+        let usr = usr_mnt_id()?;
+        eprintln!("load: /usr mnt_id {usr}");
         let cfg = sentinel_common::wire::KConfig {
-            lockdown_after_ns: 5_000_000_000,
+            lockdown_after_ns: 1_500_000_000,
             sentineld_tgid: std::process::id(),
             flags: (if enforce {
                 sentinel_common::wire::CFG_ENFORCE
@@ -493,6 +529,8 @@ fn load(enforce: bool, selfguard: bool, guard_dir: Option<std::path::PathBuf>) -
             } else {
                 0
             }),
+            usr_mnt_id: usr,
+            _pad: 0,
         };
         let mut config = aya::maps::Array::<_, PodConfig>::try_from(
             bpf.map_mut("CONFIG")
@@ -500,6 +538,11 @@ fn load(enforce: bool, selfguard: bool, guard_dir: Option<std::path::PathBuf>) -
         )?;
         config.set(0, &PodConfig(cfg), 0)?;
     }
+    let mut hb_map = aya::maps::Array::<_, u64>::try_from(
+        bpf.take_map("HEARTBEAT")
+            .ok_or_else(|| anyhow::anyhow!("HEARTBEAT missing"))?,
+    )?;
+    hb_map.set(0, &monotonic_ns(), 0)?;
     populate_rules(&mut bpf)?;
     if let Some(dir) = guard_dir {
         use std::os::unix::fs::MetadataExt;
@@ -556,6 +599,18 @@ fn load(enforce: bool, selfguard: bool, guard_dir: Option<std::path::PathBuf>) -
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
     }
+    // Heartbeat thread: refreshes HEARTBEAT[0] until SIGUSR1 (then the
+    // heartbeat goes stale and the kernel side locks down).
+    // SAFETY: the handler only stores to an atomic (async-signal-safe).
+    unsafe {
+        libc::signal(libc::SIGUSR1, on_usr1 as *const () as libc::sighandler_t);
+    }
+    std::thread::spawn(move || {
+        while !STOP_HB.load(Ordering::Relaxed) {
+            let _ = hb_map.set(0, &monotonic_ns(), 0);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    });
     eprintln!("load: attached, streaming events");
 
     let stdout = std::io::stdout();

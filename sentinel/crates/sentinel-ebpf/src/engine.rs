@@ -19,7 +19,10 @@ pub fn lockdown_active() -> bool {
     now.saturating_sub(hb) > after
 }
 
-#[allow(dead_code)]
+pub fn usr_mnt_id() -> u32 {
+    CONFIG.get(0).map(|c| c.usr_mnt_id).unwrap_or(0)
+}
+
 pub fn count_lockdown(hook: u32) {
     if let Some(p) = LOCKDOWN_COUNTS.get_ptr_mut(hook) {
         unsafe {

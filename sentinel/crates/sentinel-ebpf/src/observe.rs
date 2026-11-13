@@ -39,6 +39,12 @@ unsafe fn try_exec(ctx: &LsmContext) -> Result<i32, i32> {
     (*p).payload.exec.mnt_id = 0;
     if let Some(info) = shim::exec_info(bprm) {
         (*p).payload.exec.mnt_id = info.mnt_id;
+        if crate::engine::lockdown_active() && info.mnt_id != crate::engine::usr_mnt_id() {
+            crate::engine::count_lockdown(1);
+            (*p).hdr.kverdict = sentinel_common::wire::KVerdict::Denied as u8;
+            e.submit(0);
+            return Err(-1);
+        }
         if info.is_memfd != 0 {
             (*p).hdr.facts[G_FLAGS] |= F_MEMFD;
         } else if info.nlink == 0 {
@@ -112,6 +118,12 @@ unsafe fn try_connect(ctx: &LsmContext) -> Result<i32, i32> {
     facts_kern::set_port_facts(p, port);
     let v = crate::engine::evaluate((*p).hdr.kind, &Facts((*p).hdr.facts));
     let deny = crate::engine::apply_verdict(p, &v);
+    if crate::engine::lockdown_active() {
+        crate::engine::count_lockdown(0);
+        (*p).hdr.kverdict = sentinel_common::wire::KVerdict::Denied as u8;
+        e.submit(0);
+        return Err(-1);
+    }
     e.submit(0);
     match deny {
         Some(err) => Err(err),

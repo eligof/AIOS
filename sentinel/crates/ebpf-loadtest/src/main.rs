@@ -29,6 +29,9 @@ enum Cmd {
     Maps,
     /// Single-process heartbeat/lockdown check (fresh -> stale).
     HeartbeatSelftest,
+    /// Attach the observers and stream every ring-buffer event as a JSON line
+    /// on stdout until SIGINT/SIGTERM.
+    Load,
 }
 
 fn main() -> Result<()> {
@@ -41,6 +44,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         Cmd::HeartbeatSelftest => heartbeat_selftest(),
+        Cmd::Load => load(),
         Cmd::Maps => {
             let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/sentinel-ebpf"));
             let bpf = aya::Ebpf::load(data)?;
@@ -137,5 +141,80 @@ fn heartbeat_selftest() -> Result<()> {
         std::process::exit(1);
     }
     println!("heartbeat-lockdown: PASS");
+    Ok(())
+}
+
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Attach one LSM program (`name`) to its kernel hook (`hook`). Later observers add a line in `load`.
+fn attach_lsm(bpf: &mut aya::Ebpf, btf: &aya::Btf, name: &str, hook: &str) -> Result<()> {
+    let prog: &mut aya::programs::Lsm = bpf
+        .program_mut(name)
+        .ok_or_else(|| anyhow::anyhow!("program {name} missing"))?
+        .try_into()?;
+    prog.load(hook, btf)?;
+    prog.attach()?;
+    Ok(())
+}
+
+/// Render one decoded event as a single JSON line. Payload fields are added
+/// per kind by later observers.
+fn event_json(ev: &sentinel_common::wire::RawEvent) -> String {
+    use sentinel_common::facts::{F_DELETED, F_MEMFD, G_FLAGS};
+    let h = &ev.hdr;
+    let facts = h.facts.map(|f| f.to_string()).join(",");
+    let flags = h.facts[G_FLAGS];
+    format!(
+        "{{\"kind\":{},\"pid\":{},\"tid\":{},\"ppid\":{},\"uid\":{},\"euid\":{},\"cgroup\":{},\"ts_ns\":{},\"matched_rule\":{},\"kverdict\":{},\"facts\":[{}],\"flags_memfd\":{},\"flags_deleted\":{}}}",
+        h.kind, h.pid, h.tid, h.ppid, h.uid, h.euid, h.cgroup_id, h.ts_ns,
+        h.matched_rule, h.kverdict, facts,
+        flags & F_MEMFD != 0,
+        flags & F_DELETED != 0,
+    )
+}
+
+fn load() -> Result<()> {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+
+    let data = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/sentinel-ebpf"));
+    let mut bpf = aya::Ebpf::load(data)?;
+    let btf = aya::Btf::from_sys_fs()?;
+    attach_lsm(&mut bpf, &btf, "exec", "bprm_check_security")?;
+
+    let mut ring = aya::maps::RingBuf::try_from(
+        bpf.take_map("EVENTS")
+            .ok_or_else(|| anyhow::anyhow!("EVENTS missing"))?,
+    )?;
+
+    // SAFETY: the handler only stores to an atomic (async-signal-safe).
+    unsafe {
+        libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
+    }
+    eprintln!("load: attached, streaming events");
+
+    let stdout = std::io::stdout();
+    while !STOP.load(Ordering::Relaxed) {
+        let mut out = stdout.lock();
+        while let Some(item) = ring.next() {
+            if item.len() < core::mem::size_of::<sentinel_common::wire::RawEvent>() {
+                continue;
+            }
+            // SAFETY: length checked above; RawEvent is repr(C) POD and the
+            // ring item is not necessarily aligned.
+            let ev = unsafe {
+                core::ptr::read_unaligned(item.as_ptr() as *const sentinel_common::wire::RawEvent)
+            };
+            writeln!(out, "{}", event_json(&ev))?;
+        }
+        out.flush()?;
+        drop(out);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
     Ok(())
 }

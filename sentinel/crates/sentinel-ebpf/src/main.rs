@@ -5,13 +5,15 @@ use aya_ebpf::{macros::tracepoint, programs::TracePointContext};
 
 mod emit;
 mod engine;
+mod facts_kern;
 mod maps;
+mod observe;
 mod shim;
 
 #[tracepoint]
 pub fn probe(_ctx: TracePointContext) -> u32 {
     let v = engine::lockdown_active() as u64;
-    // slot 7 = reserved, test output (probe is removed in Task 8)
+    // slot 7 = reserved, test output (kept: heartbeat-selftest reads it)
     if let Some(p) = maps::LOCKDOWN_COUNTS.get_ptr_mut(7) {
         unsafe {
             *p = v;

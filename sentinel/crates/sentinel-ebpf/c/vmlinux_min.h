@@ -19,6 +19,15 @@ struct task_struct {
 /* kuid_t/kgid_t are struct { uid_t val; } in-kernel; the shim reads ->val */
 typedef struct { __u32 val; } kuid_t;
 struct cred { kuid_t uid; kuid_t euid; };
-/* socket, file, path, dentry, vfsmount, linux_binprm, sockaddr_in* added per task */
+/* exec-file info. mount.mnt_id confirmed in host BTF. */
+struct qstr { const unsigned char *name; };
+struct dentry { struct qstr d_name; };
+struct inode { unsigned int i_nlink; };
+struct vfsmount {};
+struct path { struct vfsmount *mnt; struct dentry *dentry; };
+struct file { struct inode *f_inode; struct path f_path; };
+struct mount { struct vfsmount mnt; int mnt_id; };
+struct linux_binprm { struct file *file; };
+/* socket, sockaddr_in* added per task */
 #pragma clang attribute pop
 #endif

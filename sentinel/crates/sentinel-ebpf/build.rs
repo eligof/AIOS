@@ -6,7 +6,11 @@ fn main() {
         .args(["-target","bpfel","-O2","-g","-emit-llvm","-Wno-unknown-attributes","-c","c/core.c","-o"])
         .arg(&bc).status().expect("clang for the C shim");
     assert!(status.success(), "C shim failed to compile");
-    println!("cargo:rustc-link-arg=--btf");
+    // aya-build already passes `-Clink-arg=--btf`; bpf-linker rejects it twice.
+    let flags = env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+    if !flags.contains("--btf") {
+        println!("cargo:rustc-link-arg=--btf");
+    }
     println!("cargo:rustc-link-arg={}", bc.display());
     println!("cargo:rerun-if-changed=c/core.c");
     println!("cargo:rerun-if-changed=c/vmlinux_min.h");

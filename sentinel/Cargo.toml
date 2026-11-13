@@ -4,6 +4,7 @@ members = [
     "crates/sentinel-common",
     "crates/sentinel-rules",
     "crates/sentinel-detect",
+    "crates/ebpf-loadtest",
 ]
 exclude = ["crates/sentinel-ebpf"]
 
@@ -21,3 +22,9 @@ ipnet = "2.12"
 psl = "2.1.252"
 tempfile = "3"
 sentinel-common = { path = "crates/sentinel-common" }
+aya = "0.16"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+aya-build = "0.2.1"
+cargo_metadata = "0.18"

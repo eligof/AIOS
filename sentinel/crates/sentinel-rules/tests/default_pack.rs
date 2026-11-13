@@ -12,9 +12,11 @@ fn default_pack_loads_validates_and_compiles() {
     assert_eq!(rules.len(), 14, "the §5.5 table has 14 rules");
 
     let (tables, user) = compile_all(&rules).expect("default pack compiles");
-    // 9 kernel rules, 5 user-space rules (the ones with exe/ancestors/managed_home)
-    assert_eq!(tables.rules.len(), 9, "kernel rules");
-    assert_eq!(user.len(), 5, "user-space rules");
+    // 8 kernel rules, 6 user-space rules (exe/ancestors/managed_home, plus
+    // env_ld and stdio_socket per spec amendment 8: S2 cannot fill either
+    // fact in the kernel, so `ld-preload` (env_ld) is now a user rule too).
+    assert_eq!(tables.rules.len(), 8, "kernel rules");
+    assert_eq!(user.len(), 6, "user-space rules");
     assert!(tables.rules.len() <= sentinel_common::MAX_RULES);
     assert!(tables.cidrs.len() <= sentinel_common::MAX_CIDRS);
 

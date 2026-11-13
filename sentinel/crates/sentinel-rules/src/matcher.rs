@@ -226,3 +226,24 @@ pub fn compile_all(rules: &[Rule]) -> Result<(Tables, Vec<UserRule>), Vec<RuleEr
         Err(errors)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_pack_has_ld_preload_as_a_user_rule() {
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../manifest/sentinel/rules"
+        ));
+        let rules = crate::load_dir(dir).expect("default pack is valid");
+        let (_tables, user) = compile_all(&rules).expect("default pack compiles");
+        let ids: Vec<&str> = user
+            .iter()
+            .map(|u| rules[u.index as usize].id.as_str())
+            .collect();
+        assert!(ids.contains(&"ld-preload"), "user rules were {ids:?}");
+        assert!(ids.contains(&"reverse-shell"), "user rules were {ids:?}");
+    }
+}

@@ -8,6 +8,7 @@ pub mod alert;
 pub mod daemon;
 pub mod engine;
 pub mod kernel;
+pub mod loader;
 pub mod lockdown;
 pub mod proc;
 pub mod report;

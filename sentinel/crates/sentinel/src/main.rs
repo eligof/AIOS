@@ -209,8 +209,26 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// One `Status` field as plain text. `Value`'s own `Display` is JSON, so it
+/// would print `health "ok"` with the quotes, and a list as `["exec","bpf"]`.
+fn field(s: &serde_json::Value, key: &str) -> String {
+    match s.get(key) {
+        None | Some(serde_json::Value::Null) => "-".to_string(),
+        Some(serde_json::Value::String(v)) => v.clone(),
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(other) => other.to_string(),
+    }
+}
+
 fn print_status(s: &serde_json::Value) {
-    let g = |k: &str| s.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    let g = |k: &str| field(s, k);
     println!("version        {}", g("version"));
     println!("health         {}", g("health"));
     println!("programs       {}", g("programs"));

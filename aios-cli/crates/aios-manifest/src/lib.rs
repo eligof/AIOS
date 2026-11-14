@@ -2,10 +2,12 @@
 
 mod locate;
 mod model;
+mod sentinel;
 mod validate;
 
 pub use locate::{locate, locate_key, locate_section, locate_value, offset_to_line_col};
 pub use model::*;
+pub use sentinel::Sentinel;
 pub use validate::{validate, ValidationEnv};
 
 use std::fmt;

@@ -14,3 +14,4 @@ pub mod report;
 pub mod resolve;
 pub mod status;
 pub mod table;
+pub mod varlink;

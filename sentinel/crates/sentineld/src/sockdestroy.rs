@@ -188,6 +188,13 @@ pub fn destroy_for_pids(pids: &[u32]) -> Result<usize, KernelError> {
     // read/write wrapper around it; nothing here depends on its address family.
     let mut sock = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
 
+    // A read timeout is not optional here. This runs inside a freeze, which
+    // the event loop performs while holding both the daemon and the kernel
+    // lock, so a reply that never comes would not merely lose one socket --
+    // it would wedge the whole daemon, varlink included. Losing a dump is
+    // acceptable: the LSM hooks already deny the cgroup's new connections.
+    let _ = sock.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+
     let mut destroyed = 0usize;
     let mut seq = 1u32;
     for (family, protocol) in [

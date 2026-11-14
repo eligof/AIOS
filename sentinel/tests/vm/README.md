@@ -41,8 +41,10 @@ the first failure, prints PASS/FAIL/SKIP per scenario and exits non-zero on fail
 | `bpf` | A socket-filter `BPF_PROG_LOAD` surfaces as a Bpf event. |
 | `connect` | Non-loopback `connect()` attempts emit Connect events; loopback does not. |
 | `deny` | In enforce mode, memfd exec and exec from `/tmp` are denied. |
+| `daemon` | `sentineld` starts, pins its maps and links, serves varlink; the CLI reads status, alerts and the chain. |
 | `exe_on` | `exe_on` rules: exec from `/dev/shm` is denied, from `/tmp` only audited. |
 | `exec` | Exec events carry `flags_memfd` true for memfd exec and false for a normal one. |
+| `freeze` | A freeze rule quarantines a listener: the cgroup exists, is frozen, holds the pid; `release` restores it. |
 | `guard_bpf` | With `--selfguard`, a kprobe `BPF_PROG_LOAD` gets EPERM; a socket filter is allowed. |
 | `guard_files` | With `--selfguard`, writing or removing a guarded file gets EPERM and the file survives. |
 | `guard_kill` | With `--selfguard`, a signal to the daemon from another process is denied and the daemon lives. |
@@ -50,6 +52,7 @@ the first failure, prints PASS/FAIL/SKIP per scenario and exits non-zero on fail
 | `heartbeat` | Heartbeat lockdown self-test passes (`heartbeat-lockdown: PASS`). |
 | `listen` | Non-loopback `listen()` emits a Listen event; loopback does not. |
 | `lockdown` | After the heartbeat stops, non-loopback connect and non-`/usr` exec are denied; before, they work. |
+| `lockdown_report` | After a SIGKILLed daemon, a non-`/usr` exec is refused during the gap, and the next daemon reports the gap as a critical alert. |
 | `memfd` | `memfd_create` emits a Memfd event with the memfd name. |
 | `module` | A module load attempt emits a Module event with a module name. |
 | `open` | Opening camera and input device nodes emits Open events; a regular file does not. |

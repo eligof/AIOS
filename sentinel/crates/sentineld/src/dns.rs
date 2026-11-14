@@ -80,8 +80,11 @@ pub fn run(
                     continue;
                 };
                 for name in query_names(&v) {
-                    let now = kernel.lock().map(|k| k.wall_ms()).unwrap_or(0);
+                    // Daemon before kernel, the one lock order every thread
+                    // uses; taking the clock first would deadlock against the
+                    // drain and the varlink methods.
                     if let Ok(mut d) = daemon.lock() {
+                        let now = kernel.lock().map(|k| k.wall_ms()).unwrap_or(0);
                         if let Some(hit) = d.detectors.on_dns(&name, now) {
                             d.raise_dns(hit, now);
                         }

@@ -42,6 +42,16 @@ struct Cli {
     /// The manifest-managed home targets, one per line (S4 fills this in).
     #[arg(long)]
     home_binds: Option<PathBuf>,
+    /// Clear `CFG_ENFORCE`: the hooks observe and report but never deny.
+    #[arg(long)]
+    no_enforce: bool,
+    /// Clear `CFG_SELFGUARD`: let a user signal reach the daemon (spec §8.2).
+    ///
+    /// On by default, which is what makes the daemon unkillable short of
+    /// `systemctl kill`. The VM scenarios need the opt-out to simulate an
+    /// instance dying, the same way `ebpf-loadtest` takes `--selfguard`.
+    #[arg(long)]
+    no_selfguard: bool,
 }
 
 fn main() -> Result<()> {
@@ -95,8 +105,14 @@ fn main() -> Result<()> {
         cli.alerts.clone(),
         PathBuf::from(sentineld::loader::PIN_ROOT),
     ];
-    let mut real = RealKernel::load(lockdown_after_ns, true, true, &rules.tables, &guarded)
-        .map_err(|e| anyhow::anyhow!("cannot start the kernel side: {e}"))?;
+    let mut real = RealKernel::load(
+        lockdown_after_ns,
+        !cli.no_enforce,
+        !cli.no_selfguard,
+        &rules.tables,
+        &guarded,
+    )
+    .map_err(|e| anyhow::anyhow!("cannot start the kernel side: {e}"))?;
     let degraded = real.mode == Mode::Degraded;
     let attached = real.attached.clone();
     let ring = real.take_ring();
@@ -202,12 +218,15 @@ fn main() -> Result<()> {
         let dns_connected = dns_connected.clone();
         std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                if let Ok(mut k) = kernel.lock() {
+                // Lock order is daemon then kernel, everywhere: the drain and
+                // the varlink methods both need the daemon first, so taking
+                // the kernel first here would deadlock against them.
+                if let (Ok(mut d), Ok(mut k)) = (daemon.lock(), kernel.lock()) {
                     let now = k.monotonic_ns();
                     let _ = k.heartbeat(now);
-                    // This thread already holds the kernel, so it is also
-                    // where the Status snapshot is kept current (§10.1).
-                    if let Ok(mut d) = daemon.lock() {
+                    // This tick already holds both, so it is also where the
+                    // Status snapshot is kept current (§10.1).
+                    {
                         d.refresh_status(
                             k.as_ref(),
                             dns_connected.load(Ordering::Relaxed),

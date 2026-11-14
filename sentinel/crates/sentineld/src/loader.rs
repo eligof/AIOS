@@ -192,7 +192,15 @@ impl RealKernel {
 
         for sub in ["maps", "links"] {
             if let Err(e) = std::fs::create_dir_all(Path::new(PIN_ROOT).join(sub)) {
-                return ke(format!("cannot create {PIN_ROOT}/{sub}: {e}"));
+                // The usual cause is no bpffs at all: a pin directory cannot
+                // be created anywhere else, and the error alone does not say
+                // so (spec §12 wants the reason, not just the errno).
+                let hint = if std::fs::metadata("/sys/fs/bpf").is_err() {
+                    " (is bpffs mounted on /sys/fs/bpf?)"
+                } else {
+                    ""
+                };
+                return ke(format!("cannot create {PIN_ROOT}/{sub}: {e}{hint}"));
             }
         }
 

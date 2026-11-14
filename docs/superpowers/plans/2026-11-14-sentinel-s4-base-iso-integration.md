@@ -14,7 +14,7 @@
 
 ## Status of this plan
 
-**Tasks 1–2 are written. Tasks 3–14 are listed under "Remaining tasks" with
+**Tasks 1–6 are written. Tasks 7–14 are listed under "Remaining tasks" with
 their scope and files, and still need to be written out in full before they are
 executed.** They are deliberately not stubbed inside the task format: a task in
 this plan means complete code and commands, and a half-written task invites an
@@ -474,6 +474,692 @@ git commit -m "feat(aios-manifest): validate the Sentinel rule files at plan tim
 
 ---
 
+## Task 3: Wire the section into manifest validation
+
+**Files:**
+- Modify: `aios-cli/crates/aios-manifest/src/validate.rs:75-87` (call the new check) and the `Validator` impl in the same file
+- Test: in `aios-cli/crates/aios-manifest/src/validate.rs`'s existing `tests` module
+
+Spec §11.2: a bad `[sentinel]` section or a rule file that does not validate
+fails the plan like any other manifest error. `validate` already returns every
+problem as a `ManifestError { line, col, message }` positioned with the
+`locate_*` helpers; Sentinel joins that list, so the CLI needs no new path.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append inside the `tests` module of `aios-cli/crates/aios-manifest/src/validate.rs`.
+Match the fixtures the module already uses for `env`; if it has a helper that
+builds a `ValidationEnv` over a tempdir, call that instead of repeating this:
+
+```rust
+    /// A manifest whose only interesting part is its `[sentinel]` section.
+    fn with_sentinel(section: &str) -> String {
+        format!(
+            "[system]\nhostname = \"h\"\ntimezone = \"UTC\"\n\
+             locale = \"C.UTF-8\"\nkeymap = \"us\"\n\n\
+             [kernel]\npackage = \"linux\"\n\n{section}"
+        )
+    }
+
+    #[test]
+    fn a_bad_sentinel_field_is_a_manifest_error() {
+        let raw = with_sentinel("[sentinel]\nlockdown_after = \"5 fortnights\"\n");
+        let m: Manifest = crate::parse(&raw).expect("parses");
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("sentinel/rules")).unwrap();
+        let env = ValidationEnv {
+            repo_root: dir.path().to_path_buf(),
+            secrets_dir: dir.path().join("secrets"),
+            zoneinfo_dir: dir.path().join("zoneinfo"),
+        };
+        let errs = validate(&m, &raw, &env);
+        let hit = errs
+            .iter()
+            .find(|e| e.message.contains("lockdown_after"))
+            .unwrap_or_else(|| panic!("no sentinel error in {errs:?}"));
+        assert!(hit.line > 1, "the error points at the section: {hit:?}");
+    }
+
+    #[test]
+    fn a_rule_file_that_does_not_validate_is_a_manifest_error() {
+        let raw = with_sentinel("[sentinel]\n");
+        let m: Manifest = crate::parse(&raw).expect("parses");
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("sentinel/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("pack.toml"),
+            "[[rule]]\nid = \"x\"\non = \"exec\"\nseverity = \"low\"\n\
+             action = \"alert\"\nmatch = { nope = true }\n",
+        )
+        .unwrap();
+        let env = ValidationEnv {
+            repo_root: dir.path().to_path_buf(),
+            secrets_dir: dir.path().join("secrets"),
+            zoneinfo_dir: dir.path().join("zoneinfo"),
+        };
+        let errs = validate(&m, &raw, &env);
+        assert!(
+            errs.iter().any(|e| e.message.contains("nope")),
+            "the validator's own message reaches the plan: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_manifest_without_a_sentinel_section_validates_its_default_rules() {
+        // Absent section means enabled with defaults (§11.1), and the default
+        // rules directory must therefore exist in the repo.
+        let raw = with_sentinel("");
+        let m: Manifest = crate::parse(&raw).expect("parses");
+        let dir = tempfile::tempdir().unwrap();
+        let env = ValidationEnv {
+            repo_root: dir.path().to_path_buf(),
+            secrets_dir: dir.path().join("secrets"),
+            zoneinfo_dir: dir.path().join("zoneinfo"),
+        };
+        let errs = validate(&m, &raw, &env);
+        assert!(
+            errs.iter().any(|e| e.message.contains("sentinel/rules")),
+            "a missing default rule directory is reported: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn a_valid_section_and_rule_set_adds_no_errors() {
+        let raw = with_sentinel("[sentinel]\nstorm_brake = 3\n");
+        let m: Manifest = crate::parse(&raw).expect("parses");
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("sentinel/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("pack.toml"),
+            "[[rule]]\nid = \"x\"\non = \"exec\"\nseverity = \"low\"\n\
+             action = \"alert\"\nmatch = { exe_memfd = true }\n",
+        )
+        .unwrap();
+        let env = ValidationEnv {
+            repo_root: dir.path().to_path_buf(),
+            secrets_dir: dir.path().join("secrets"),
+            zoneinfo_dir: dir.path().join("zoneinfo"),
+        };
+        let errs = validate(&m, &raw, &env);
+        assert!(
+            !errs.iter().any(|e| e.message.contains("sentinel")),
+            "{errs:?}"
+        );
+    }
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd aios-cli && cargo test -p aios-manifest sentinel`
+Expected: the four new tests fail — no Sentinel problem appears in `errs`,
+because `validate` does not look at the section yet.
+
+- [ ] **Step 3: Write the implementation**
+
+In `aios-cli/crates/aios-manifest/src/validate.rs`, add the call at the end of
+`validate`'s existing sequence:
+
+```rust
+    v.users(m, env);
+    v.sentinel(m, env);
+    v.errors
+```
+
+and add the method to `impl Validator<'_>`, beside `files`:
+
+```rust
+    /// The `[sentinel]` section and its rule files (spec §11.1, §11.2). An
+    /// absent section means the defaults, which still name a rule directory,
+    /// so the rules are validated either way.
+    fn sentinel(&mut self, m: &Manifest, env: &ValidationEnv) {
+        let s = m.sentinel.clone().unwrap_or_default();
+        let pos = locate_section(self.raw, &["sentinel"]);
+
+        for problem in s.problems() {
+            self.err(pos, problem);
+        }
+        if let Err(problems) = s.load_rules(&env.repo_root) {
+            // One error per problem, so `aios plan` lists them all rather than
+            // making the user fix them one build at a time.
+            for problem in problems {
+                self.err(pos, problem);
+            }
+        }
+    }
+```
+
+`locate_section` takes a slice and falls back to `(1, 1)` when the section is
+absent, which is the right position for "your manifest did not mention
+Sentinel and its default rule directory is missing".
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd aios-cli && cargo test -p aios-manifest`
+Expected: all pass, the four new ones included.
+
+Existing manifest fixtures now need a `sentinel/rules` directory in their test
+repo root, or they will gain a "not a directory" error. If a fixture fails that
+way, create the directory in the fixture — do not weaken the check, because
+§11.1's defaults really do point at `sentinel/rules`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add aios-cli/crates/aios-manifest/src/validate.rs
+git commit -m "feat(aios-manifest): fail the plan on a bad [sentinel] section or rules"
+```
+
+---
+
+## Task 4: Render `sentinel.toml`
+
+**Files:**
+- Create: `aios-cli/crates/aios-render/src/sentinel.rs`
+- Modify: `aios-cli/crates/aios-render/src/lib.rs` (add `mod sentinel;` and re-export), `aios-cli/crates/aios-render/Cargo.toml`
+- Test: in `aios-cli/crates/aios-render/src/sentinel.rs`
+
+Spec §11.3: the renderer writes `/etc/aios/sentinel/sentinel.toml` — the
+section resolved with defaults, which is exactly what `sentineld --config`
+reads. Pure function returning the content, like every other module here.
+
+- [ ] **Step 1: Add the dependency**
+
+In `aios-cli/crates/aios-render/Cargo.toml`, under `[dependencies]`:
+
+```toml
+sentinel-rules = { path = "../../../sentinel/crates/sentinel-rules" }
+toml.workspace = true
+```
+
+`toml` only if it is not already a dependency of this crate; check first with
+`grep '^toml' aios-cli/crates/aios-render/Cargo.toml`.
+
+- [ ] **Step 2: Write the failing tests**
+
+Create `aios-cli/crates/aios-render/src/sentinel.rs`:
+
+```rust
+//! `/etc/aios/sentinel/sentinel.toml` (spec §11.3).
+
+use aios_manifest::Manifest;
+
+/// Where the daemon reads its configuration.
+pub const SENTINEL_TOML: &str = "/etc/aios/sentinel/sentinel.toml";
+/// Where the daemon reads its rules.
+pub const RULES_DIR: &str = "/etc/aios/sentinel/rules.d";
+
+/// `/etc/aios/sentinel/sentinel.toml`: the `[sentinel]` section resolved with
+/// the §11.1 defaults. An absent section renders the defaults, so the file is
+/// always present and `sentineld` never has to guess.
+pub fn sentinel_toml(m: &Manifest) -> String {
+    let s = m.sentinel.clone().unwrap_or_default();
+    // Serialised from the same type the daemon parses, so a field added to
+    // SentinelConfig cannot be silently dropped on the way to disk.
+    let body = toml::to_string_pretty(&s.config)
+        .unwrap_or_else(|e| panic!("the [sentinel] section must serialise: {e}"));
+    format!("# Written by aios. Do not edit.\n{body}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn manifest(sentinel: &str) -> Manifest {
+        let raw = format!(
+            "[system]\nhostname = \"h\"\ntimezone = \"UTC\"\n\
+             locale = \"C.UTF-8\"\nkeymap = \"us\"\n\n\
+             [kernel]\npackage = \"linux\"\n\n{sentinel}"
+        );
+        aios_manifest::parse(&raw).expect("parses")
+    }
+
+    #[test]
+    fn an_absent_section_renders_the_defaults() {
+        let out = sentinel_toml(&manifest(""));
+        assert!(out.starts_with("# Written by aios. Do not edit.\n"));
+        assert!(out.contains("enable = true"), "{out}");
+        assert!(out.contains("lockdown_after = \"5s\""), "{out}");
+        assert!(out.contains("storm_brake = 5"), "{out}");
+    }
+
+    #[test]
+    fn the_rendered_file_is_what_the_daemon_parses() {
+        // The round trip is the point: this file is sentineld's --config.
+        let out = sentinel_toml(&manifest("[sentinel]\nstorm_brake = 3\n"));
+        let parsed = sentinel_rules::config::parse(&out).expect("the daemon can read it");
+        assert_eq!(parsed.storm_brake, 3);
+        assert!(parsed.enable);
+        assert!(
+            sentinel_rules::config::validate(&parsed).is_empty(),
+            "and it validates"
+        );
+    }
+
+    #[test]
+    fn a_disabled_sentinel_renders_enable_false() {
+        let out = sentinel_toml(&manifest("[sentinel]\nenable = false\n"));
+        assert!(out.contains("enable = false"), "{out}");
+        let parsed = sentinel_rules::config::parse(&out).unwrap();
+        assert!(!parsed.enable);
+    }
+
+    #[test]
+    fn the_detector_tables_survive_the_round_trip() {
+        let out = sentinel_toml(&manifest(
+            "[sentinel]\n\n[sentinel.beacon]\nmin_connects = 9\n\n\
+             [sentinel.dns_tunnel]\nlabel_len = 30\n",
+        ));
+        let parsed = sentinel_rules::config::parse(&out).unwrap();
+        assert_eq!(parsed.beacon.min_connects, 9);
+        assert_eq!(parsed.dns_tunnel.label_len, 30);
+    }
+}
+```
+
+- [ ] **Step 3: Run the tests to verify they fail**
+
+Run: `cd aios-cli && cargo test -p aios-render sentinel`
+Expected: FAIL to compile — ``file not found for module `sentinel` ``.
+
+- [ ] **Step 4: Make `SentinelConfig` serialisable**
+
+`sentinel_rules::config::SentinelConfig` derives `Deserialize` only. In
+`sentinel/crates/sentinel-rules/src/config.rs`, add `Serialize` to the derive
+on `SentinelConfig`, `Beacon` and `DnsTunnel`:
+
+```rust
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct SentinelConfig {
+```
+
+and make sure that file's `use serde::...` line imports both:
+
+```rust
+use serde::{Deserialize, Serialize};
+```
+
+Run: `cd sentinel && cargo test -p sentinel-rules config`
+Expected: the crate's existing config tests still pass.
+
+- [ ] **Step 5: Declare the module**
+
+In `aios-cli/crates/aios-render/src/lib.rs`, beside the other module
+declarations and re-exports:
+
+```rust
+mod sentinel;
+pub use sentinel::{sentinel_toml, RULES_DIR, SENTINEL_TOML};
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `cd aios-cli && cargo test -p aios-render sentinel`
+Expected: 4 passed.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add aios-cli/crates/aios-render/src/sentinel.rs aios-cli/crates/aios-render/src/lib.rs aios-cli/crates/aios-render/Cargo.toml aios-cli/Cargo.lock sentinel/crates/sentinel-rules/src/config.rs
+git commit -m "feat(aios-render): render /etc/aios/sentinel/sentinel.toml"
+```
+
+---
+
+## Task 5: Sentinel files in the desired state
+
+**Files:**
+- Modify: `aios-cli/crates/aios-plan/src/desired.rs:145-207` (the generated-file block and the rule copies)
+- Test: in `aios-cli/crates/aios-plan/src/desired.rs`'s `tests` module
+
+Spec §11.3: both the config and the rule files are managed files of the
+generation. `MANAGED_FILES` is built from the keys of the desired map, so
+inserting them is all it takes for drift and removal to behave like every
+other managed file — no separate bookkeeping.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append inside the `tests` module of `aios-cli/crates/aios-plan/src/desired.rs`.
+Use whatever helper that module already has for building `Inputs` and a probe;
+the names below assume `desired_etc(inputs, probe)` is the function under test
+and that the module has a `fixture()` helper — adapt to what is there rather
+than adding a second fixture:
+
+```rust
+    #[test]
+    fn the_sentinel_config_and_rules_are_managed_files() {
+        let (inputs, probe, repo) = fixture();
+        let rules = repo.join("sentinel/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(
+            rules.join("default.toml"),
+            "[[rule]]\nid = \"x\"\non = \"exec\"\nseverity = \"low\"\n\
+             action = \"alert\"\nmatch = { exe_memfd = true }\n",
+        )
+        .unwrap();
+
+        let out = desired_etc(&inputs, &probe).expect("renders");
+
+        assert!(
+            out.contains_key("/etc/aios/sentinel/sentinel.toml"),
+            "the config is rendered"
+        );
+        assert!(
+            out.contains_key("/etc/aios/sentinel/rules.d/default.toml"),
+            "each rule file is copied: {:?}",
+            out.keys().collect::<Vec<_>>()
+        );
+
+        let managed = match out.get(MANAGED_FILES).expect("managed list") {
+            EtcEntry::File { content, .. } => String::from_utf8(content.clone()).unwrap(),
+            other => panic!("managed-files is not a file: {other:?}"),
+        };
+        assert!(managed.contains("/etc/aios/sentinel/sentinel.toml"), "{managed}");
+        assert!(managed.contains("/etc/aios/sentinel/rules.d/default.toml"), "{managed}");
+    }
+
+    #[test]
+    fn a_rule_file_is_copied_byte_for_byte() {
+        let (inputs, probe, repo) = fixture();
+        let rules = repo.join("sentinel/rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        let body = "[[rule]]\nid = \"keep\"\non = \"exec\"\nseverity = \"low\"\n\
+                    action = \"alert\"\nmatch = { exe_memfd = true }\n";
+        std::fs::write(rules.join("keep.toml"), body).unwrap();
+
+        let out = desired_etc(&inputs, &probe).expect("renders");
+        match out.get("/etc/aios/sentinel/rules.d/keep.toml").unwrap() {
+            EtcEntry::File { content, mode } => {
+                assert_eq!(String::from_utf8(content.clone()).unwrap(), body);
+                assert_eq!(*mode, 0o644);
+            }
+            other => panic!("not a file: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_disabled_sentinel_still_renders_its_files() {
+        // enable = false only takes effect at the next boot (§11.3), and the
+        // daemon in this generation still reads both paths.
+        let (mut inputs, probe, repo) = fixture();
+        std::fs::create_dir_all(repo.join("sentinel/rules")).unwrap();
+        let mut m = inputs.manifest.clone();
+        m.sentinel = Some(aios_manifest::Sentinel {
+            config: sentinel_rules::config::SentinelConfig {
+                enable: false,
+                ..Default::default()
+            },
+        });
+        inputs.manifest = &m;
+
+        let out = desired_etc(&inputs, &probe).expect("renders");
+        assert!(out.contains_key("/etc/aios/sentinel/sentinel.toml"));
+    }
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd aios-cli && cargo test -p aios-plan sentinel`
+Expected: FAIL — the keys are missing from the desired map.
+
+- [ ] **Step 3: Write the implementation**
+
+In `aios-cli/crates/aios-plan/src/desired.rs`, add `sentinel_toml`,
+`SENTINEL_TOML` and `RULES_DIR` to the `aios_render` import list, then add
+`sentinel.toml` to the `generated` array:
+
+```rust
+        ("/etc/tmpfiles.d/aios-home.conf", home_tmpfiles(m)),
+        (SENTINEL_TOML, sentinel_toml(m)),
+```
+
+and copy the rule files in, after the `home_binds` loop and before
+`out.remove(PKGDIRS_CONF)`:
+
+```rust
+    // The rule files, copied from the manifest repo (§11.3). Validation
+    // already ran in aios-manifest, so a file that fails to read here is a
+    // repo that changed under us, which is a plan error like any other.
+    let sentinel = m.sentinel.clone().unwrap_or_default();
+    let rules_src = in_repo(inputs.repo_root, &sentinel.config.rules)?;
+    for (rel, entry) in walk(&rules_src)? {
+        out.insert(format!("{RULES_DIR}/{rel}"), entry);
+    }
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd aios-cli && cargo test -p aios-plan`
+Expected: all pass. Existing fixtures that have no `sentinel/rules` directory
+will now fail in `in_repo`; add the directory to those fixtures, which is what
+a real manifest repo has.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add aios-cli/crates/aios-plan/src/desired.rs
+git commit -m "feat(aios-plan): Sentinel config and rules are managed files"
+```
+
+---
+
+## Task 6: The `aios plan` Sentinel summary
+
+**Files:**
+- Modify: `aios-cli/crates/aios-plan/src/plan.rs:44-49` (the `Plan` struct), `aios-cli/crates/aios-plan/src/plan.rs:164` (`impl fmt::Display for Plan`), and wherever `Plan` is built in that file
+- Test: in `aios-cli/crates/aios-plan/src/plan.rs`'s `tests` module
+
+Spec §11.2: the diff prints a Sentinel summary — rules added, removed and
+changed, naming changed fields — plus any change to the `[sentinel]` section,
+and a warning when Sentinel is disabled. The rule lines come from
+`sentinel_rules::diff::diff_rules(...).summary()`, so `aios plan` and the
+daemon's own `config-changed` alert word them identically.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append inside the `tests` module of `aios-cli/crates/aios-plan/src/plan.rs`:
+
+```rust
+    use sentinel_rules::model::Rule;
+
+    fn rule(id: &str, action: &str) -> Rule {
+        let raw = format!(
+            "[[rule]]\nid = \"{id}\"\non = \"exec\"\nseverity = \"low\"\n\
+             action = \"{action}\"\nmatch = {{ exe_memfd = true }}\n"
+        );
+        sentinel_rules::model::parse(&raw).expect("parses").rule.remove(0)
+    }
+
+    #[test]
+    fn the_summary_names_added_removed_and_changed_rules() {
+        let old = vec![rule("gone", "alert"), rule("changed", "freeze")];
+        let new = vec![rule("changed", "kill"), rule("added", "alert")];
+        let lines = sentinel_summary(&old, &new);
+        assert!(lines.iter().any(|l| l == "+ added"), "{lines:?}");
+        assert!(lines.iter().any(|l| l == "- gone"), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("changed") && l.contains("freeze") && l.contains("kill")),
+            "a changed field is named: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn an_unchanged_rule_set_summarises_to_nothing() {
+        let same = vec![rule("x", "alert")];
+        assert!(sentinel_summary(&same, &same).is_empty());
+    }
+
+    #[test]
+    fn a_changed_section_field_is_reported() {
+        let old = sentinel_rules::config::SentinelConfig::default();
+        let new = sentinel_rules::config::SentinelConfig {
+            storm_brake: 9,
+            ..Default::default()
+        };
+        let lines = sentinel_config_summary(&old, &new);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("storm_brake"), "{lines:?}");
+        assert!(lines[0].contains('5') && lines[0].contains('9'), "{lines:?}");
+    }
+
+    #[test]
+    fn disabling_sentinel_is_a_warning() {
+        let off = sentinel_rules::config::SentinelConfig {
+            enable: false,
+            ..Default::default()
+        };
+        let w = sentinel_warnings(&off);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(
+            w[0].contains("Sentinel") && w[0].contains("reboot"),
+            "it says what is lost and when: {w:?}"
+        );
+        assert!(sentinel_warnings(&Default::default()).is_empty());
+    }
+
+    #[test]
+    fn the_summary_prints_under_its_own_heading() {
+        let mut p = Plan::default();
+        p.sentinel_changes = vec!["+ added".to_string(), "x: action alert -> kill".to_string()];
+        let text = p.to_string();
+        assert!(text.contains("Sentinel:"), "{text}");
+        assert!(text.contains("+ added"), "{text}");
+        assert!(text.contains("x: action alert -> kill"), "{text}");
+    }
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd aios-cli && cargo test -p aios-plan sentinel`
+Expected: FAIL to compile — ``cannot find function `sentinel_summary` `` and
+``no field `sentinel_changes` ``.
+
+- [ ] **Step 3: Write the implementation**
+
+In `aios-cli/crates/aios-plan/src/plan.rs`, add the field to `Plan`:
+
+```rust
+pub struct Plan {
+    pub packages_add: Vec<String>,
+    pub packages_remove: Vec<String>,
+    pub etc_changes: Vec<EtcChange>,
+    pub unit_changes: Vec<UnitChange>,
+    pub warnings: Vec<String>,
+    /// Rule and `[sentinel]` changes, in the wording the daemon's own
+    /// `config-changed` alert uses (spec §11.2).
+    pub sentinel_changes: Vec<String>,
+}
+```
+
+Update every construction of `Plan` in the crate to set it (an empty `Vec` where
+there is nothing to say), and add the three helpers:
+
+```rust
+/// Rule changes between two rule sets, worded as the daemon words them.
+pub fn sentinel_summary(
+    old: &[sentinel_rules::model::Rule],
+    new: &[sentinel_rules::model::Rule],
+) -> Vec<String> {
+    sentinel_rules::diff::diff_rules(old, new).summary()
+}
+
+/// Changed `[sentinel]` fields, one line each.
+pub fn sentinel_config_summary(
+    old: &sentinel_rules::config::SentinelConfig,
+    new: &sentinel_rules::config::SentinelConfig,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut field = |name: &str, a: String, b: String| {
+        if a != b {
+            out.push(format!("[sentinel] {name}: {a} -> {b}"));
+        }
+    };
+    field("enable", old.enable.to_string(), new.enable.to_string());
+    field("rules", old.rules.clone(), new.rules.clone());
+    field(
+        "lockdown_after",
+        old.lockdown_after.clone(),
+        new.lockdown_after.clone(),
+    );
+    field(
+        "storm_brake",
+        old.storm_brake.to_string(),
+        new.storm_brake.to_string(),
+    );
+    field(
+        "never_act_on",
+        old.never_act_on.join(","),
+        new.never_act_on.join(","),
+    );
+    field(
+        "bpf_loaders",
+        old.bpf_loaders.join(","),
+        new.bpf_loaders.join(","),
+    );
+    if old.beacon != new.beacon {
+        out.push("[sentinel.beacon]: changed".to_string());
+    }
+    if old.dns_tunnel != new.dns_tunnel {
+        out.push("[sentinel.dns_tunnel]: changed".to_string());
+    }
+    out
+}
+
+/// The §11.2 warning for a disabled Sentinel, worded like `lockdown = "none"`.
+pub fn sentinel_warnings(c: &sentinel_rules::config::SentinelConfig) -> Vec<String> {
+    if c.enable {
+        return Vec::new();
+    }
+    vec![
+        "Sentinel is disabled: no exec, network, device or BPF monitoring, \
+         and no quarantine. Takes effect after a reboot into this generation."
+            .to_string(),
+    ]
+}
+```
+
+In `impl fmt::Display for Plan`, print the section after the unit changes and
+before the warnings:
+
+```rust
+        if !self.sentinel_changes.is_empty() {
+            writeln!(f, "Sentinel:")?;
+            for line in &self.sentinel_changes {
+                writeln!(f, "  {line}")?;
+            }
+        }
+```
+
+If `Plan` has no `Default` impl, derive one (`#[derive(Debug, Default, ...)]`)
+so the display test can build an otherwise-empty plan.
+
+- [ ] **Step 4: Fill the field where the plan is built**
+
+Wherever the planner compares current and desired state, set
+`sentinel_changes` to `sentinel_summary(old_rules, new_rules)` followed by
+`sentinel_config_summary(old_config, new_config)`, and extend `warnings` with
+`sentinel_warnings(&new_config)`. The old rules and config come from the booted
+generation's `/etc/aios/sentinel/` (read through the probe, like the other
+current-state reads); when they cannot be read — a first apply, or Sentinel
+newly added — treat the old side as empty and the summary becomes all
+additions.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `cd aios-cli && cargo test -p aios-plan`
+Expected: all pass.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add aios-cli/crates/aios-plan/src/plan.rs
+git commit -m "feat(aios-plan): Sentinel summary and the disabled warning"
+```
+
+---
+
 ## Remaining tasks
 
 Each line is one task still to be written out in the format above — files, a
@@ -481,26 +1167,6 @@ failing test with real code, the run command and its expected output, the
 implementation, the verification, the commit. Scope and files are settled; the
 code is not yet written.
 
-- **Task 3: Wire the section into manifest loading.** The crate's top-level
-  `load`/`validate` path calls `Sentinel::problems` and `load_rules`, so a bad
-  section or a bad rule fails like any other manifest error. Files:
-  `aios-cli/crates/aios-manifest/src/lib.rs` and wherever that crate's existing
-  `validate` collects problems.
-- **Task 4: Render `sentinel.toml` and the rule list.** Create
-  `aios-cli/crates/aios-render/src/sentinel.rs` with
-  `sentinel_toml(m: &Manifest) -> String` (the section resolved with defaults,
-  which is what `sentineld --config` reads) and a function listing the rule
-  files to copy. Pure functions, `simple.rs` pattern, unit-tested on content.
-- **Task 5: The `aios plan` Sentinel summary.** `Plan` gains
-  `sentinel_changes: Vec<String>`, filled from
-  `sentinel_rules::diff::diff_rules(...).summary()` plus the changed
-  `[sentinel]` fields, and a warning when `enable = false` (§11.2, mirroring
-  `lockdown = "none"`). Files: `aios-cli/crates/aios-plan/src/{plan.rs,desired.rs}`
-  and the CLI's plan printer.
-- **Task 6: Sentinel files in the desired state.** `desired.rs` puts
-  `/etc/aios/sentinel/sentinel.toml` and each `/etc/aios/sentinel/rules.d/*.toml`
-  into the desired `/etc` map and therefore into `MANAGED_FILES`, so drift and
-  removal behave like every other managed file.
 - **Task 7: Extract `sentinel-client`.** New crate
   `sentinel/crates/sentinel-client` holding the framing and `Client` from
   `sentinel/crates/sentinel/src/client.rs`, with that file's tests moving with
@@ -552,5 +1218,5 @@ code is not yet written.
 | §11.5 health check and its ordering | Task 11 |
 | §17.9 decisions 1–3 | Tasks 1–2 (linked validator), 7–8 (shared client), the single-stage scope of this plan |
 
-**Known gap in this document:** Tasks 3–14 are scoped but not written out.
+**Known gap in this document:** Tasks 7–14 are scoped but not written out.
 Write them before executing them.

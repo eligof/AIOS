@@ -2480,6 +2480,12 @@ Spec §6. **freeze:** take the process and all its descendants, create `/sys/fs/
 
 Order matters and the tests assert it: the quarantine map entry and the socket destruction must both happen **after** the freeze, so nothing in the tree can open a new connection in between.
 
+> **Corrections applied during execution (commit `e4975db`).** Three defects in the Step 3 block below; the committed code is the authority.
+>
+> 1. **A failed freeze left the tree stranded.** Every `?` after the first attach returns with the pids already moved into `q-<id>`: that cgroup is then never frozen, never in the quarantine map, and never in the `Registry` — the caller got `Err` and drops the record, so no `release` can ever reach those processes, and the `original` map that would have put them back dies with it. §6 says a failed action leaves the process "neither frozen nor killed", not silently moved out of its session scope with no record of where it came from. `freeze` now tracks what it has done in a `Partial` and undoes it — unmap, unfreeze, move each pid back, remove the cgroup — before returning the original error. The plan's own failure test asserted only `quarantined.is_empty()`, which passed while leaking; there is a test for the rollback now.
+> 2. **A freeze that took nothing reported success.** If every pid's `cgroup_of` fails (the tree is already gone), `moved` is empty and `cgroup_freeze` succeeds on an empty cgroup, so the alert claims `outcome = "frozen"` for a quarantine of nothing. It is an error now, which routes to §6's critical-alert path.
+> 3. **The rescan was a no-op.** `table` is a borrowed snapshot taken before the move, so rounds 2..4 walk the same `descendants` list, `added == 0`, and the loop breaks after one round — the comment claiming a fork "is caught by the next round" was not true of the code. §6 asks for a rescan "until no new descendant appears", which has to mean the live `/proc`: a child forked by a process already moved inherits the quarantine cgroup, but one forked by a process still waiting its turn does not. **`freeze` therefore takes a `src: &dyn ProcSource`**, which Task 13's `apply` must pass. Tests cover both a two-round rescan and the fact that it does not pull in a process outside the tree.
+
 - [ ] **Step 1: Write the failing tests**
 
 Create `sentinel/crates/sentineld/src/action.rs` with the tests first:

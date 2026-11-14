@@ -1,3 +1,4 @@
+use crate::sentinel::Sentinel;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -39,6 +40,11 @@ pub struct Manifest {
     pub persist: Persist,
     #[serde(default)]
     pub users: BTreeMap<String, User>,
+    /// `Option`, not a defaulted value: §11.2 warns when Sentinel is disabled,
+    /// and the planner has to tell "the manifest said nothing" from "the
+    /// manifest asked for the defaults explicitly".
+    #[serde(default)]
+    pub sentinel: Option<Sentinel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]

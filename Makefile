@@ -47,10 +47,10 @@ ISO_RM_WORK = $(if $(SUDO),$(SUDO),unshare --map-auto --map-root-user) rm -rf --
 	echo "If it reported 'Permission denied', clear it with the same mode that built it (sudo, or SUDO= for unprivileged)."; \
 	exit 1; } >&2
 
-.PHONY: check rust-check release-check shell-check bats-check unit-check e2e-unit tools repo \
-	keys iso-build iso iso-check clean-iso e2e FORCE
+.PHONY: check rust-check sentinel-check release-check shell-check bats-check unit-check e2e-unit tools repo \
+	keys iso-build iso iso-check clean-iso e2e sentinel-vmtest FORCE
 
-check: rust-check shell-check bats-check unit-check e2e-unit
+check: rust-check sentinel-check shell-check bats-check unit-check e2e-unit
 
 # The CLI tests need the `test-hooks` feature (AIOS_* overrides, AIOS_FAKE_RUNNER), hence
 # --all-features. The shipped configuration (no features) is linted too, and its release
@@ -62,6 +62,14 @@ rust-check:
 	cd aios-cli && $(CARGO) test --workspace --all-features
 	cd aios-cli && $(CARGO) build --release --locked -p aios
 	$(check-release-bin)
+
+# Sentinel's own workspace (sentinel/) pins a nightly toolchain via rust-toolchain.toml.
+# S1 covers the three pure crates; S2 extends this to build the eBPF object too.
+sentinel-check:
+	cd sentinel && $(CARGO) fmt --all -- --check
+	cd sentinel && $(CARGO) clippy --workspace --all-targets -- -D warnings
+	cd sentinel && $(CARGO) test --workspace
+	cd sentinel && PATH="$$HOME/.cargo/bin:$$PATH" $(CARGO) build -p ebpf-loadtest -p sentineld -p sentinel
 
 # The shipped binary reads no AIOS_* variable at all, so any AIOS_ string in it means an
 # override leaked into the release build. Only grep's "no match" (status 1) passes: a read
@@ -103,7 +111,18 @@ unit-check:
 e2e-unit: tools
 	$(PYTEST) -p no:cacheprovider -q tests/e2e/test_harness_unit.py
 
-tools: $(SHELLCHECK) $(BATS) $(filter build/venv/bin/pytest,$(PYTEST))
+# bpf-linker links the eBPF object; clang compiles the C CO-RE shim. cargo install lands in
+# ~/.cargo/bin (on PATH above) and is a quick no-op when this version is already installed.
+BPF_LINKER_VERSION ?= 0.9.13
+
+tools: $(SHELLCHECK) $(BATS) $(filter build/venv/bin/pytest,$(PYTEST)) build/tools/.bpf-linker-$(BPF_LINKER_VERSION)
+
+build/tools/.bpf-linker-$(BPF_LINKER_VERSION):
+	command -v clang >/dev/null || { echo "clang required for the C CO-RE shim" >&2; exit 1; }
+	echo '#include <bpf/bpf_helpers.h>' | clang -target bpfel -E -x c - >/dev/null 2>&1 \
+		|| { echo "libbpf headers (bpf/bpf_helpers.h) required for the C CO-RE shim: install libbpf (Arch) / libbpf-dev (Debian)" >&2; exit 1; }
+	$(CARGO) install bpf-linker --version $(BPF_LINKER_VERSION) --locked
+	mkdir -p build/tools && touch $@
 
 build/tools/shellcheck:
 	mkdir -p build/tools
@@ -179,3 +198,9 @@ E2E_ARGS ?=
 e2e: tools
 	cd tests && $(PYTHON) -m e2e.vm
 	$(PYTEST) -p no:cacheprovider -v -rs tests/e2e/test_e2e.py $(E2E_ARGS)
+
+# Every Sentinel eBPF VM scenario under virtme-ng (needs KVM, a few minutes). Local only,
+# not part of `make check`; see sentinel/tests/vm/README.md.
+sentinel-vmtest:
+	cd sentinel && PATH="$$HOME/.cargo/bin:$$PATH:$$PWD/../build/hosttools/root/usr/bin" \
+		$(CARGO) run -p xtask -- vmtest all

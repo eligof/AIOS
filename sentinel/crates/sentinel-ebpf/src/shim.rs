@@ -1,0 +1,225 @@
+use aya_ebpf::helpers::{bpf_get_current_cgroup_id, bpf_get_current_task};
+use core::ffi::c_void;
+
+#[repr(C)]
+pub struct TaskCore {
+    pub pid: u32,
+    pub tid: u32,
+    pub ppid: u32,
+    pub uid: u32,
+    pub euid: u32,
+    pub cgroup_id: u64,
+}
+
+#[repr(C)]
+pub struct ExecInfo {
+    pub mnt_id: u32,
+    pub nlink: i32,
+    pub is_memfd: i32,
+    pub name: [u8; 64],
+    pub name_len: i32,
+}
+
+#[repr(C)]
+pub struct FileDev {
+    pub mode: u32,
+    pub rdev: u32,
+    pub name_len: i32,
+    pub name: [u8; 64],
+}
+
+#[repr(C)]
+pub struct SockAddr {
+    pub family: u16,
+    pub port_be: u16,
+    pub addr: [u8; 16],
+}
+
+unsafe extern "C" {
+    fn shim_sockaddr(address: *const c_void, out: *mut SockAddr) -> i32;
+    fn shim_sock_laddr(sock: *const c_void, out: *mut SockAddr) -> i32;
+    fn shim_current_core(task: *const c_void, out: *mut TaskCore) -> i32;
+    fn shim_exec_info(bprm: *const c_void, out: *mut ExecInfo) -> i32;
+    fn shim_file_dev(file: *const c_void, out: *mut FileDev) -> i32;
+    fn shim_file_ino(file: *const c_void, ino: *mut u64, fmode: *mut u32) -> i32;
+    fn shim_dentry_ino(dentry: *const c_void, ino: *mut u64) -> i32;
+    fn shim_path_ino(path: *const c_void, ino: *mut u64) -> i32;
+    fn shim_file_name(file: *const c_void, out: *mut u8, cap: i32) -> i32;
+    fn shim_filename(filename: *const c_void, out: *mut u8, cap: i32) -> i32;
+    fn shim_exec_path(bprm: *const c_void, out: *mut u8, cap: i32) -> i32;
+    fn shim_nd_filename(nd: *const c_void, out: *mut u8, cap: i32) -> i32;
+    fn shim_open_flag(op: *const c_void, out: *mut i32) -> i32;
+    fn shim_ptrace(child: *const c_void, tgid: *mut u32, uid: *mut u32) -> i32;
+    fn shim_is_descendant(child: *const c_void, ancestor_tgid: u32) -> i32;
+    fn shim_bpf_prog_type(attr: *const c_void, out: *mut u32) -> i32;
+    fn shim_task_tgid(task: *const c_void, out: *mut u32) -> i32;
+    fn shim_task_exit_code(task: *const c_void, out: *mut i32) -> i32;
+}
+
+/// Core ids of the current task (pid/tid/ppid/uid/euid + cgroup id).
+pub unsafe fn current_core() -> Option<TaskCore> {
+    let task = bpf_get_current_task() as *const c_void;
+    let mut o: TaskCore = core::mem::zeroed();
+    if shim_current_core(task, &mut o) == 0 {
+        o.cgroup_id = bpf_get_current_cgroup_id();
+        Some(o)
+    } else {
+        None
+    }
+}
+
+/// Exec-file facts of a `linux_binprm*`.
+pub unsafe fn exec_info(bprm: *const c_void) -> Option<ExecInfo> {
+    let mut o: ExecInfo = core::mem::zeroed();
+    if shim_exec_info(bprm, &mut o) == 0 {
+        Some(o)
+    } else {
+        None
+    }
+}
+
+/// Thread-group id of an arbitrary `task_struct*`.
+pub unsafe fn task_tgid(task: *const c_void) -> Option<u32> {
+    let mut v: u32 = 0;
+    if shim_task_tgid(task, &mut v) == 0 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// `task->exit_code` of an arbitrary `task_struct*`.
+pub unsafe fn task_exit_code(task: *const c_void) -> Option<i32> {
+    let mut v: i32 = 0;
+    if shim_task_exit_code(task, &mut v) == 0 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// Family, raw address and big-endian port of a kernel `sockaddr*`.
+pub unsafe fn sockaddr(address: *const c_void) -> Option<SockAddr> {
+    let mut o: SockAddr = core::mem::zeroed();
+    if shim_sockaddr(address, &mut o) == 0 {
+        Some(o)
+    } else {
+        None
+    }
+}
+
+/// Bound local family/address/big-endian port of a `struct socket*`.
+pub unsafe fn sock_laddr(sock: *const c_void) -> Option<SockAddr> {
+    let mut o: SockAddr = core::mem::zeroed();
+    if shim_sock_laddr(sock, &mut o) == 0 {
+        Some(o)
+    } else {
+        None
+    }
+}
+
+/// Mode, raw `i_rdev` and dentry name (first 64 bytes) of a `struct file*`.
+pub unsafe fn file_dev(file: *const c_void) -> Option<FileDev> {
+    let mut o: FileDev = core::mem::zeroed();
+    if shim_file_dev(file, &mut o) == 0 {
+        Some(o)
+    } else {
+        None
+    }
+}
+
+/// `(i_ino, f_mode)` of a `struct file*`.
+pub unsafe fn file_ino(file: *const c_void) -> Option<(u64, u32)> {
+    let (mut ino, mut mode) = (0u64, 0u32);
+    if shim_file_ino(file, &mut ino, &mut mode) == 0 {
+        Some((ino, mode))
+    } else {
+        None
+    }
+}
+
+/// Inode number behind a `struct dentry*`.
+pub unsafe fn dentry_ino(dentry: *const c_void) -> Option<u64> {
+    let mut ino = 0u64;
+    if shim_dentry_ino(dentry, &mut ino) == 0 {
+        Some(ino)
+    } else {
+        None
+    }
+}
+
+/// Inode number behind a `struct path*`.
+pub unsafe fn path_ino(path: *const c_void) -> Option<u64> {
+    let mut ino = 0u64;
+    if shim_path_ino(path, &mut ino) == 0 {
+        Some(ino)
+    } else {
+        None
+    }
+}
+
+/// Target `(tgid, uid)` of a ptrace `child` task.
+pub unsafe fn ptrace_target(child: *const c_void) -> Option<(u32, u32)> {
+    let (mut tgid, mut uid) = (0u32, 0u32);
+    if shim_ptrace(child, &mut tgid, &mut uid) == 0 {
+        Some((tgid, uid))
+    } else {
+        None
+    }
+}
+
+/// True if `ancestor_tgid` is on `child`'s real_parent chain (bounded walk).
+pub unsafe fn is_descendant(child: *const c_void, ancestor_tgid: u32) -> bool {
+    shim_is_descendant(child, ancestor_tgid) == 1
+}
+
+/// Copy the dentry name of a `struct file*` into `out` (NUL-terminated).
+pub unsafe fn file_name(file: *const c_void, out: *mut u8, cap: i32) -> bool {
+    shim_file_name(file, out, cap) == 0
+}
+
+/// `attr->prog_type` of a kernel `union bpf_attr*` (BPF_PROG_LOAD layout).
+pub unsafe fn bpf_prog_type(attr: *const c_void) -> Option<u32> {
+    let mut v: u32 = 0;
+    if shim_bpf_prog_type(attr, &mut v) == 0 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// Copy `bprm->filename` -- the path execve was given -- into `out`, and
+/// return its length without the NUL.
+///
+/// This hook runs before the new image is installed, so `/proc/<pid>/exe`
+/// still names the caller's old image; the path has to come from here if an
+/// `exe` rule is to match the program actually being executed.
+pub unsafe fn exec_path(bprm: *const c_void, out: *mut u8, cap: i32) -> u16 {
+    let n = shim_exec_path(bprm, out, cap);
+    // bpf_core_read_str counts the NUL; the wire length does not.
+    if n > 1 {
+        (n - 1) as u16
+    } else {
+        0
+    }
+}
+
+/// Copy `filename->name` of a `struct filename*` into `out` (NUL-terminated).
+pub unsafe fn filename(filename: *const c_void, out: *mut u8, cap: i32) -> bool {
+    shim_filename(filename, out, cap) == 0
+}
+
+/// `op->open_flag` of a `struct open_flags*`.
+pub unsafe fn open_flag(op: *const c_void) -> Option<i32> {
+    let mut v: i32 = 0;
+    if shim_open_flag(op, &mut v) == 0 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+/// Copy `nd->name->name` of a `struct nameidata*` into `out` (NUL-terminated).
+pub unsafe fn nd_filename(nd: *const c_void, out: *mut u8, cap: i32) -> bool {
+    shim_nd_filename(nd, out, cap) == 0
+}

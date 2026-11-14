@@ -1,0 +1,20 @@
+[package]
+name = "ebpf-loadtest"
+description = "Loads the embedded Sentinel eBPF object; stand-in for the daemon in VM tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+aya.workspace = true
+sentinel-common.workspace = true
+sentinel-rules = { path = "../sentinel-rules" }
+anyhow.workspace = true
+clap.workspace = true
+libc.workspace = true
+
+[build-dependencies]
+aya-build.workspace = true
+cargo_metadata.workspace = true
+anyhow.workspace = true

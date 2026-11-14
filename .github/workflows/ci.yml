@@ -32,6 +32,14 @@ jobs:
           rustup default stable
           rustc --version && cargo --version
 
+      # The eBPF object is built on the project's pinned nightly (see
+      # sentinel/rust-toolchain.toml and ebpf-loadtest/build.rs, which passes this
+      # exact channel to aya-build's `rustup run`). rust-src backs `-Z build-std=core`
+      # for the bpfel-unknown-none target. Install it explicitly rather than leaning on
+      # rust-toolchain.toml auto-install, which does not fire for aya-build's sub-cargo.
+      - name: Install pinned nightly for the eBPF build
+        run: rustup toolchain install nightly-2026-11-03 --profile minimal -c rust-src
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -48,11 +56,17 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
+      # clang compiles the C CO-RE shim; libbpf-dev supplies its bpf/bpf_helpers.h and
+      # bpf_core_read.h; llvm/libelf-dev back the eBPF build. `make tools` installs
+      # bpf-linker (pinned), whose first uncached build adds a few minutes to CI.
+      - name: Install clang + bpf prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang llvm libelf-dev libbpf-dev
+
       - name: Fetch pinned tools (shellcheck, bats, pytest venv)
         run: make tools
 
-      # The sentinel/ workspace's nightly toolchain auto-installs from
-      # sentinel/rust-toolchain.toml on the first cargo invocation inside it.
+      # Builds both Rust workspaces (aios-cli on stable, sentinel on the pinned nightly
+      # installed above, including the embedded eBPF object) plus the shell/python gates.
       - name: make check
         run: make check
 

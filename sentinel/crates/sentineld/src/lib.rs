@@ -12,6 +12,7 @@ pub mod lockdown;
 pub mod proc;
 pub mod report;
 pub mod resolve;
+pub mod sockdestroy;
 pub mod status;
 pub mod table;
 pub mod varlink;

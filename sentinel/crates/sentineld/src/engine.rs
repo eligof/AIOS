@@ -1,11 +1,14 @@
 //! Dispatch: which rules a resolved event hits, and what the outcome is
 //! before any action runs (spec §5.3, §6).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use ipnet::IpNet;
 use sentinel_common::event::{Action, Mode};
 use sentinel_common::wire::KVerdict;
+use sentinel_detect::beacon::{Beacon, BeaconConfig};
+use sentinel_detect::dns_tunnel::{DnsReason, DnsTunnel, DnsTunnelConfig};
 use sentinel_rules::matcher::{compile_all, UserRule};
 use sentinel_rules::model::Rule;
 use sentinel_rules::validate::parse_duration_ms;
@@ -277,6 +280,194 @@ impl RuleSet {
         }
 
         out
+    }
+}
+
+/// The storm-brake window (spec §6: "within a minute").
+pub const BRAKE_WINDOW_MS: u64 = 60_000;
+
+/// Caps automatic freezes and kills (spec §6).
+pub struct StormBrake {
+    limit: u32,
+    acts: VecDeque<u64>,
+    engaged: bool,
+    reported: bool,
+}
+
+impl StormBrake {
+    pub fn new(limit: u32) -> StormBrake {
+        StormBrake {
+            limit,
+            acts: VecDeque::new(),
+            engaged: false,
+            reported: false,
+        }
+    }
+
+    /// Record one automatic act. Returns true when this one must be braked.
+    pub fn trip(&mut self, now_ms: u64) -> bool {
+        while let Some(&front) = self.acts.front() {
+            if now_ms.saturating_sub(front) > BRAKE_WINDOW_MS {
+                self.acts.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.acts.len() as u32 >= self.limit {
+            // Engaging for the first time in this window is itself a critical
+            // alert (spec §6); `just_engaged` reports it exactly once.
+            self.engaged = true;
+            return true;
+        }
+        self.acts.push_back(now_ms);
+        self.engaged = false;
+        self.reported = false;
+        false
+    }
+
+    pub fn engaged(&self) -> bool {
+        self.engaged
+    }
+
+    /// True the first time the brake engages, false on every later brake.
+    pub fn just_engaged(&mut self) -> bool {
+        if self.engaged && !self.reported {
+            self.reported = true;
+            return true;
+        }
+        false
+    }
+}
+
+/// A detector hit, shaped like a rule hit so the daemon handles both the same way.
+#[derive(Debug, Clone)]
+pub struct DetectorHit {
+    pub rule_id: &'static str,
+    pub severity: String,
+    pub action: Action,
+    pub event: serde_json::Value,
+    /// The executable the hit is about, for the alert's process reference.
+    pub exe: String,
+}
+
+/// The two built-in detectors plus their allow lists (spec §5.4).
+pub struct Detectors {
+    beacon: Beacon,
+    dns: DnsTunnel,
+    beacon_nets: Vec<IpNet>,
+    beacon_exes: GlobSet,
+    beacon_severity: String,
+    beacon_action: Action,
+    dns_severity: String,
+    dns_action: Action,
+}
+
+impl Detectors {
+    pub fn new(
+        b: &sentinel_rules::config::Beacon,
+        d: &sentinel_rules::config::DnsTunnel,
+    ) -> Detectors {
+        let mut nets = Vec::new();
+        let mut exes = GlobSetBuilder::new();
+        for a in &b.allow {
+            // `config::validate` has already checked these are a CIDR or a
+            // `/`-prefixed glob.
+            if let Ok(n) = a.parse::<IpNet>() {
+                nets.push(n);
+            } else if let Ok(g) = Glob::new(a) {
+                exes.add(g);
+            }
+        }
+        Detectors {
+            beacon: Beacon::new(BeaconConfig {
+                min_connects: b.min_connects,
+                max_cov: b.max_cov,
+                ..BeaconConfig::default()
+            }),
+            dns: DnsTunnel::new(DnsTunnelConfig {
+                label_len: d.label_len,
+                entropy: d.entropy,
+                unique_per_min: d.unique_per_min,
+                ..DnsTunnelConfig::default()
+            }),
+            beacon_nets: nets,
+            beacon_exes: exes.build().unwrap_or_else(|_| GlobSet::empty()),
+            beacon_severity: b.severity.clone(),
+            beacon_action: sentinel_rules::validate::parse_action(&b.action)
+                .unwrap_or(Action::Alert),
+            dns_severity: d.severity.clone(),
+            dns_action: sentinel_rules::validate::parse_action(&d.action).unwrap_or(Action::Alert),
+        }
+    }
+
+    /// Is this (executable, destination) never reported (spec §5.4 `allow`)?
+    pub fn beacon_allowed(&self, exe: &str, dest: &str) -> bool {
+        if self.beacon_exes.is_match(exe) {
+            return true;
+        }
+        match dest.trim_matches(['[', ']']).parse::<std::net::IpAddr>() {
+            Ok(ip) => self.beacon_nets.iter().any(|n| n.contains(&ip)),
+            Err(_) => false,
+        }
+    }
+
+    /// Feed one connect to the beacon detector.
+    pub fn on_connect(
+        &mut self,
+        exe: &str,
+        dest: &str,
+        port: u16,
+        now_ms: u64,
+    ) -> Option<DetectorHit> {
+        if self.beacon_allowed(exe, dest) {
+            return None;
+        }
+        let hit = self.beacon.observe(exe, dest, port, now_ms)?;
+        Some(DetectorHit {
+            rule_id: "beacon",
+            severity: self.beacon_severity.clone(),
+            action: self.beacon_action,
+            event: serde_json::json!({
+                "on": "connect",
+                "detector": "beacon",
+                "dest": hit.dest,
+                "port": hit.port,
+                "count": hit.count,
+                "cov": hit.cov,
+            }),
+            exe: hit.exe,
+        })
+    }
+
+    /// Feed one resolved query name to the DNS-tunnel detector.
+    pub fn on_dns(&mut self, qname: &str, now_ms: u64) -> Option<DetectorHit> {
+        let hit = self.dns.observe(qname, now_ms)?;
+        let reason = match &hit.reason {
+            DnsReason::HighEntropy { label, bits } => serde_json::json!({
+                "reason": "entropy", "label": label, "bits": bits
+            }),
+            DnsReason::HighRate { unique } => serde_json::json!({
+                "reason": "rate", "unique": unique
+            }),
+        };
+        let mut event = serde_json::json!({
+            "on": "dns",
+            "detector": "dns_tunnel",
+            "domain": hit.domain,
+        });
+        if let (Some(dst), Some(src)) = (event.as_object_mut(), reason.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        Some(DetectorHit {
+            rule_id: "dns-tunnel",
+            severity: self.dns_severity.clone(),
+            action: self.dns_action,
+            // Host-level: the alert names the domain, not a process (§5.4).
+            event,
+            exe: String::new(),
+        })
     }
 }
 
@@ -607,5 +798,114 @@ match = { exe_deleted = true }
         assert!(p.is_protected(2, ""), "kthreadd");
         assert!(p.is_protected(1, ""), "pid 1");
         assert!(!p.is_protected(4242, "session-2.scope"));
+    }
+
+    #[test]
+    fn the_brake_engages_after_the_configured_count() {
+        let mut b = StormBrake::new(2);
+        assert!(!b.trip(0), "1st act allowed");
+        assert!(!b.trip(100), "2nd act allowed");
+        assert!(b.trip(200), "3rd act is braked");
+        assert!(b.engaged(), "the brake reports itself engaged");
+    }
+
+    #[test]
+    fn the_brake_reports_engaging_only_once() {
+        let mut b = StormBrake::new(1);
+        b.trip(0);
+        assert!(b.trip(10) && b.just_engaged(), "first brake reports");
+        assert!(b.trip(20) && !b.just_engaged(), "later brakes stay quiet");
+    }
+
+    #[test]
+    fn the_brake_forgets_acts_older_than_a_minute() {
+        let mut b = StormBrake::new(2);
+        b.trip(0);
+        b.trip(1_000);
+        assert!(b.trip(2_000), "braked inside the minute");
+        assert!(!b.trip(70_000), "the window has rolled past the old acts");
+    }
+
+    #[test]
+    fn beacon_allow_list_skips_destinations_and_executables() {
+        let d = Detectors::new(
+            &sentinel_rules::config::Beacon {
+                min_connects: 2,
+                max_cov: 1.0,
+                allow: vec!["9.9.9.9/32".to_string(), "/usr/bin/chronyd".to_string()],
+                severity: "high".to_string(),
+                action: "alert".to_string(),
+            },
+            &sentinel_rules::config::DnsTunnel::default(),
+        );
+        assert!(d.beacon_allowed("/usr/bin/curl", "9.9.9.9"), "CIDR match");
+        assert!(d.beacon_allowed("/usr/bin/chronyd", "1.2.3.4"), "exe match");
+        assert!(!d.beacon_allowed("/usr/bin/curl", "1.2.3.4"));
+    }
+
+    #[test]
+    fn a_periodic_connect_fires_the_beacon_detector() {
+        let mut d = Detectors::new(
+            &sentinel_rules::config::Beacon {
+                min_connects: 3,
+                max_cov: 0.2,
+                allow: vec![],
+                severity: "high".to_string(),
+                action: "alert".to_string(),
+            },
+            &sentinel_rules::config::DnsTunnel::default(),
+        );
+        let mut fired = None;
+        for i in 0..4 {
+            // The hit lands on the min_connects-th connect; the ones after it
+            // return None because `refire_ms` holds the key quiet for an hour,
+            // so keep the fire rather than the last answer.
+            fired = fired.or(d.on_connect("/usr/bin/implant", "10.0.2.2", 443, i * 5_000));
+        }
+        let hit = fired.expect("a perfectly periodic connect is a beacon");
+        assert_eq!(hit.rule_id, "beacon");
+        assert_eq!(hit.severity, "high");
+        assert_eq!(hit.action, Action::Alert);
+        assert_eq!(hit.event["dest"], "10.0.2.2");
+    }
+
+    #[test]
+    fn a_detector_action_of_freeze_is_carried_through() {
+        let mut d = Detectors::new(
+            &sentinel_rules::config::Beacon {
+                min_connects: 2,
+                max_cov: 0.5,
+                allow: vec![],
+                severity: "critical".to_string(),
+                action: "freeze".to_string(),
+            },
+            &sentinel_rules::config::DnsTunnel::default(),
+        );
+        let mut fired = None;
+        for i in 0..3 {
+            fired = fired.or(d.on_connect("/usr/bin/implant", "10.0.2.2", 443, i * 5_000));
+        }
+        let hit = fired.expect("beacon fires");
+        assert_eq!(hit.action, Action::Freeze);
+        assert_eq!(hit.severity, "critical");
+    }
+
+    #[test]
+    fn high_entropy_subdomains_fire_the_dns_detector() {
+        let mut d = Detectors::new(
+            &sentinel_rules::config::Beacon::default(),
+            &sentinel_rules::config::DnsTunnel {
+                label_len: 10,
+                entropy: 3.0,
+                unique_per_min: 1000,
+                severity: "high".to_string(),
+                action: "alert".to_string(),
+            },
+        );
+        let hit = d
+            .on_dns("a7f3k9x2m4q8w1e5r6t0y.example.com", 0)
+            .expect("a high-entropy label is a tunnel");
+        assert_eq!(hit.rule_id, "dns-tunnel");
+        assert_eq!(hit.event["domain"], "example.com");
     }
 }

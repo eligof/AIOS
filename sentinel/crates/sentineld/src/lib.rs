@@ -3,6 +3,7 @@
 //! Every effect on the kernel goes through the [`kernel::Kernel`] trait, so the
 //! whole dispatch path is unit-testable on the host without root.
 
+pub mod action;
 pub mod alert;
 pub mod kernel;
 pub mod proc;

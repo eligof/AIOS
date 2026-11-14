@@ -138,6 +138,51 @@ impl Daemon {
         Ok(changes)
     }
 
+    /// A DNS-tunnel hit. Host-level, so it names the domain, not a process
+    /// (spec §5.4), and its action can only be alert — freezing a host-level
+    /// detection has no process to freeze.
+    pub fn raise_dns(&mut self, hit: crate::engine::DetectorHit, now_ms: u64) {
+        let mut a = self.blank_alert(hit.rule_id, &hit.severity, "alerted");
+        a.ts = Self::format_ts(now_ms);
+        a.event = hit.event;
+        self.raise(a);
+    }
+
+    /// Rebuild the `Status` snapshot the varlink thread serves (spec §10.1).
+    ///
+    /// Called from the heartbeat thread, which already holds the kernel each
+    /// tick. Without it the snapshot would keep whatever values it was built
+    /// with at start-up, and `sentinel status` would report a 0 ms heartbeat
+    /// age and no drops however long the daemon had been running.
+    pub fn refresh_status(&mut self, k: &dyn Kernel, dns_monitor: bool, lockdown_after_ns: u64) {
+        let Some(prev) = self.status.clone() else {
+            return;
+        };
+        let beat = k.heartbeat_value().unwrap_or(0);
+        let now_ns = k.monotonic_ns();
+        let counts = k.lockdown_counts().unwrap_or([0; crate::kernel::NHOOKS]);
+        let (kernel_rules, user_rules) = self.rules.counts();
+        self.status = Some(crate::status::Status {
+            heartbeat_age_ms: crate::status::heartbeat_age_ms(now_ns, beat),
+            lockdown_active: crate::status::lockdown_active(now_ns, beat, lockdown_after_ns),
+            lockdown_counts: counts.to_vec(),
+            kernel_rules,
+            user_rules,
+            audit_rules: self
+                .rules
+                .rules
+                .iter()
+                .filter(|r| r.mode.as_deref() == Some("audit"))
+                .count(),
+            generation: self.generation.clone(),
+            drops: k.drops().unwrap_or(0),
+            quarantines: self.quarantines.list().len(),
+            dns_monitor,
+            store_error: self.store_failing.clone(),
+            ..prev
+        });
+    }
+
     /// The start-up `/proc` scan (spec §4).
     pub fn seed_table(&mut self) {
         let src = &*self.procs;
@@ -840,4 +885,9 @@ match = { exe = ["/usr/bin/bash"], stdio_socket = true }
             "an unknown kind must not be dispatched as an exec"
         );
     }
+}
+
+/// `Daemon::format_ts`, for callers outside the type.
+pub fn format_ts_pub(ms: u64) -> String {
+    Daemon::format_ts(ms)
 }

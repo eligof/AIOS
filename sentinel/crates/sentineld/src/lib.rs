@@ -8,5 +8,6 @@ pub mod alert;
 pub mod engine;
 pub mod kernel;
 pub mod proc;
+pub mod report;
 pub mod resolve;
 pub mod table;

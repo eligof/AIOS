@@ -5,6 +5,7 @@
 
 pub mod action;
 pub mod alert;
+pub mod daemon;
 pub mod engine;
 pub mod kernel;
 pub mod proc;

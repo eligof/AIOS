@@ -70,6 +70,13 @@ impl Table {
         self.procs.get(&pid)
     }
 
+    /// `pid` whether it is alive or a tombstone — what an alert wants, since
+    /// a record of what the process *was* is the point of the ancestor chain.
+    /// Anything that acts on a process must use [`Table::get`] instead.
+    pub fn get_any(&self, pid: u32) -> Option<&Proc> {
+        self.procs.get(&pid)
+    }
+
     pub fn insert(&mut self, p: Proc) {
         let (pid, ppid) = (p.pid, p.ppid);
         if let Some(old) = self.procs.get(&pid) {

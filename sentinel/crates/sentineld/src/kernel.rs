@@ -61,6 +61,9 @@ pub struct FakeKernel {
     pub calls: Vec<String>,
     /// Calls that should fail, matched against the same strings as `calls`.
     pub fail_on: HashSet<String>,
+    /// Every call whose text starts with this prefix fails. For when the
+    /// argument contains a generated id, so the exact string is unknowable.
+    pub fail_all_prefixed: Option<String>,
     pub quarantined: HashSet<u64>,
     pub cgroups: HashMap<String, u64>,
     pub frozen: HashSet<String>,
@@ -83,7 +86,11 @@ impl FakeKernel {
     }
 
     fn record(&mut self, call: String) -> Result<(), KernelError> {
-        let fail = self.fail_on.contains(&call);
+        let fail = self.fail_on.contains(&call)
+            || self
+                .fail_all_prefixed
+                .as_ref()
+                .is_some_and(|p| call.starts_with(p.as_str()));
         self.calls.push(call.clone());
         if fail {
             Err(KernelError(format!("fake failure: {call}")))

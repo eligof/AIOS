@@ -350,6 +350,14 @@ impl Store {
         Ok(out)
     }
 
+    /// The chain head: the hash of the most recent record, or [`GENESIS`] for
+    /// an empty store. This is what the next `append` will seal onto, so a
+    /// caller mirroring records in memory can read it before appending
+    /// instead of re-reading the whole log to find the predecessor.
+    pub fn head(&self) -> &str {
+        &self.last
+    }
+
     /// Seal `a` onto the chain, write it, rotate if the live file is now over
     /// the threshold. Returns the record's hash.
     pub fn append(&mut self, mut a: Alert) -> Result<String, StoreError> {

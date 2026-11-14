@@ -32,6 +32,12 @@ pub struct Daemon {
     pub recent: std::collections::VecDeque<Alert>,
     /// Set when the store is failing, for `Status` (spec §12).
     pub store_failing: Option<String>,
+    /// The generation whose rules are loaded, for `Status` (spec §10.1).
+    pub generation: String,
+    /// The last `Status` built, so the varlink thread does not need a kernel.
+    pub status: Option<crate::status::Status>,
+    /// The last wall clock the hot path saw, for alerts raised off it.
+    pub last_wall_ms: u64,
 }
 
 /// How many alerts stay in memory for watchers.
@@ -65,7 +71,71 @@ impl Daemon {
             last_drops: 0,
             recent: std::collections::VecDeque::new(),
             store_failing: None,
+            generation: String::new(),
+            status: None,
+            last_wall_ms: 0,
         }
+    }
+
+    /// The snapshot the read methods answer from.
+    pub fn read_view(&self) -> crate::varlink::ReadView {
+        crate::varlink::ReadView {
+            status: self.status.clone(),
+            alerts: self.store.read_all().unwrap_or_default(),
+            quarantines: self
+                .quarantines
+                .list()
+                .iter()
+                .map(|q| {
+                    serde_json::json!({
+                        "id": q.alert_id,
+                        "cgroup": q.cgroup,
+                        "rootPid": q.root_pid,
+                        "pids": q.pids,
+                        "killed": q.killed,
+                    })
+                })
+                .collect(),
+            chain: self.store.verify().map_err(|e| e.to_string()),
+        }
+    }
+
+    /// Validate and swap a generation's rules (spec §11.3). On success the
+    /// change summary is returned and a critical alert records it; on failure
+    /// the current rules stay and the errors come back.
+    pub fn load_generation(
+        &mut self,
+        generation: &str,
+        dir: &std::path::Path,
+        kernel: std::sync::Arc<std::sync::Mutex<Box<dyn Kernel>>>,
+    ) -> Result<Vec<String>, Vec<String>> {
+        let loaded = sentinel_rules::load_dir(dir)
+            .map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>())?;
+        let next = crate::engine::RuleSet::compile(loaded)
+            .map_err(|errs| errs.iter().map(|e| e.to_string()).collect::<Vec<_>>())?;
+
+        let diff = sentinel_rules::diff::diff_rules(&self.rules.rules, &next.rules);
+        let changes = diff.summary();
+
+        {
+            let mut k = kernel.lock().map_err(|_| vec!["kernel busy".to_string()])?;
+            k.swap_rules(&next.tables)
+                .map_err(|e| vec![e.to_string()])?;
+        }
+        self.rules = next;
+        self.generation = generation.to_string();
+
+        let now = self.last_wall_ms;
+        let mut a = self.blank_alert("config-changed", "critical", "alerted");
+        a.ts = Self::format_ts(now);
+        a.message = format!("Sentinel configuration changed by {generation}");
+        a.event = serde_json::json!({
+            "on": "config",
+            "generation": generation,
+            "changes": changes,
+        });
+        self.raise(a);
+        Ok(changes)
     }
 
     /// The start-up `/proc` scan (spec §4).
@@ -248,6 +318,7 @@ impl Daemon {
     /// The whole hot path for one raw event.
     pub fn on_event(&mut self, ev: &RawEvent, k: &mut dyn Kernel) {
         let now_ms = k.wall_ms();
+        self.last_wall_ms = now_ms;
 
         // 1. Table upkeep. An event whose kind does not decode is dropped
         //    right here: `Resolved::from_raw` would refuse it anyway, and

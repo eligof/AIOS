@@ -227,6 +227,284 @@ pub fn dispatch_read(method: &str, params: &serde_json::Value, v: &ReadView) -> 
     }
 }
 
+/// One parsed call.
+#[derive(Debug, Clone)]
+pub struct Call {
+    pub method: String,
+    pub parameters: serde_json::Value,
+    pub more: bool,
+}
+
+impl Call {
+    pub fn parse(frame: &[u8]) -> Option<Call> {
+        let v: serde_json::Value = serde_json::from_slice(frame).ok()?;
+        Some(Call {
+            method: v.get("method")?.as_str()?.to_string(),
+            parameters: v
+                .get("parameters")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({})),
+            more: v.get("more").and_then(|m| m.as_bool()).unwrap_or(false),
+        })
+    }
+}
+
+/// Methods that change something, and so need root (spec §10.1).
+pub fn requires_root(method: &str) -> bool {
+    matches!(method, "Release" | "Kill" | "LoadGeneration")
+}
+
+/// `Some(error frame)` when the peer may not call this method.
+pub fn check_access(method: &str, peer: &Peer) -> Option<Vec<u8>> {
+    let allowed = if requires_root(method) {
+        peer.may_write()
+    } else {
+        peer.may_read()
+    };
+    if allowed {
+        None
+    } else {
+        Some(encode_error(
+            "PermissionDenied",
+            serde_json::json!({ "method": method, "uid": peer.uid }),
+        ))
+    }
+}
+
+/// One `WatchAlerts` stream item. Always `continues`, because the stream only
+/// ends when the client disconnects.
+pub fn encode_watch_item(a: &Alert) -> Vec<u8> {
+    encode_reply(&serde_json::json!({ "alert": a }), true)
+}
+
+/// `WatchAlerts` requires `more: true`; returns the error frame when it is absent.
+pub fn dispatch_watch_precheck(more: bool) -> Option<Vec<u8>> {
+    if more {
+        None
+    } else {
+        Some(encode_error("ExpectedMore", serde_json::json!({})))
+    }
+}
+
+/// The reply for `LoadGeneration`: the change summary, or the validation errors.
+pub fn load_generation_result(r: Result<Vec<String>, Vec<String>>) -> Vec<u8> {
+    match r {
+        Ok(changes) => encode_reply(&serde_json::json!({"ok": true, "changes": changes}), false),
+        Err(errors) => encode_error("InvalidRules", serde_json::json!({ "errors": errors })),
+    }
+}
+
+/// The reply for `Release` and `Kill`.
+pub fn quarantine_result(r: Result<(), String>, id: &str) -> Vec<u8> {
+    match r {
+        Ok(()) => encode_reply(&serde_json::json!({"ok": true, "id": id}), false),
+        Err(e) => encode_error("ActionFailed", serde_json::json!({"id": id, "error": e})),
+    }
+}
+
+/// The reply when `Release` or `Kill` names a quarantine that is not there.
+pub fn no_such_quarantine(id: &str) -> Vec<u8> {
+    encode_error("NoSuchQuarantine", serde_json::json!({ "id": id }))
+}
+
+use std::io::{Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+
+/// Largest run of bytes a client may send without completing a frame. A
+/// `wheel` peer that opens the socket and writes without ever sending a NUL
+/// would otherwise grow this buffer without limit (spec §13).
+const MAX_PENDING: usize = 1 << 20;
+
+/// What a connection thread needs to answer a call. The daemon is behind the
+/// same mutex every other thread uses.
+pub struct Service {
+    pub daemon: Arc<Mutex<crate::daemon::Daemon>>,
+    /// Hands each watcher a clone of every new alert.
+    pub watchers: Arc<Mutex<Vec<Sender<Alert>>>>,
+    /// The kernel handle, for `Release` and `Kill`.
+    pub kernel: Arc<Mutex<Box<dyn crate::kernel::Kernel>>>,
+    /// Where the rendered rule files live, for `LoadGeneration`.
+    pub rules_dir: std::path::PathBuf,
+}
+
+/// Send one alert to every `WatchAlerts` subscriber, dropping the ones whose
+/// client has gone. Without the drop, every disconnected watcher would stay in
+/// the list for the life of the daemon.
+pub fn fan_out(watchers: &Arc<Mutex<Vec<Sender<Alert>>>>, a: &Alert) {
+    if let Ok(mut w) = watchers.lock() {
+        w.retain(|tx| tx.send(a.clone()).is_ok());
+    }
+}
+
+/// Bind the socket, replacing a stale one from a previous instance. Mode 0660
+/// with the `wheel` group, so a `wheel` member can reach it at all (§10.1);
+/// the `SO_PEERCRED` check is still what decides what they may call.
+pub fn bind(path: &std::path::Path) -> std::io::Result<UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // A leftover socket file from a killed instance would make bind fail.
+    if path.exists() {
+        std::fs::remove_file(path)?;
+    }
+    let l = UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+    set_socket_group(path);
+    Ok(l)
+}
+
+/// Give the socket away to the `wheel` group. Best effort: it needs root, and
+/// a host with no `wheel` group leaves the socket root-only, which fails
+/// closed — `sentinel` run by root still works.
+fn set_socket_group(path: &std::path::Path) {
+    let group_file = std::fs::read_to_string("/etc/group").unwrap_or_default();
+    let Some(gid) = wheel_gid(&group_file) else {
+        return;
+    };
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return;
+    };
+    // SAFETY: `c` is a NUL-terminated path that exists; -1 leaves the owner.
+    unsafe {
+        libc::chown(c.as_ptr(), u32::MAX, gid);
+    }
+}
+
+/// Serve one connection until the peer goes away.
+pub fn serve_conn(mut stream: UnixStream, svc: Arc<Service>) {
+    let Ok(peer) = peer_of(&stream) else { return };
+    let mut pending: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => n,
+        };
+        pending.extend_from_slice(&buf[..n]);
+        let (frames, rest) = split_frames(&pending);
+        pending = rest;
+        if pending.len() > MAX_PENDING {
+            let _ = stream.write_all(&encode_error(
+                "InvalidParameter",
+                serde_json::json!({"error": "frame too long"}),
+            ));
+            return;
+        }
+        for frame in frames {
+            let Some(call) = Call::parse(&frame) else {
+                let _ = stream.write_all(&encode_error(
+                    "InvalidParameter",
+                    serde_json::json!({"frame": String::from_utf8_lossy(&frame)}),
+                ));
+                continue;
+            };
+            let Some(method) = short_method(&call.method).map(|m| m.to_string()) else {
+                let _ = stream.write_all(&encode_error(
+                    "InterfaceNotFound",
+                    serde_json::json!({"method": call.method}),
+                ));
+                continue;
+            };
+            if let Some(denied) = check_access(&method, &peer) {
+                let _ = stream.write_all(&denied);
+                continue;
+            }
+            if method == "WatchAlerts" {
+                if let Some(e) = dispatch_watch_precheck(call.more) {
+                    let _ = stream.write_all(&e);
+                    continue;
+                }
+                stream_alerts(&mut stream, &svc);
+                return;
+            }
+            let reply = handle(&method, &call.parameters, &svc);
+            if stream.write_all(&reply).is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Register a watcher and forward alerts until the write fails.
+fn stream_alerts(stream: &mut UnixStream, svc: &Arc<Service>) {
+    let (tx, rx): (Sender<Alert>, Receiver<Alert>) = channel();
+    if let Ok(mut w) = svc.watchers.lock() {
+        w.push(tx);
+    }
+    while let Ok(a) = rx.recv() {
+        if stream.write_all(&encode_watch_item(&a)).is_err() {
+            return;
+        }
+    }
+}
+
+/// Answer one non-streaming method against the live daemon.
+fn handle(method: &str, params: &serde_json::Value, svc: &Arc<Service>) -> Vec<u8> {
+    use crate::action;
+
+    let mut d = match svc.daemon.lock() {
+        Ok(d) => d,
+        Err(_) => return encode_error("Internal", serde_json::json!({"error": "state poisoned"})),
+    };
+
+    match method {
+        "Release" | "Kill" => {
+            let id = params.get("id").and_then(|i| i.as_str()).unwrap_or("");
+            let Some(q) = d.quarantines.take(id) else {
+                return no_such_quarantine(id);
+            };
+            let mut k = match svc.kernel.lock() {
+                Ok(k) => k,
+                Err(_) => {
+                    d.quarantines.insert(q);
+                    return encode_error("Internal", serde_json::json!({"error": "kernel busy"}));
+                }
+            };
+            let r = if method == "Release" {
+                action::release(k.as_mut(), &q)
+            } else {
+                action::kill_quarantine(k.as_mut(), &q)
+            };
+            match r {
+                Ok(()) => {
+                    if method == "Kill" {
+                        // A killed quarantine stays listed until its cgroup is
+                        // gone, so put it back with the flag set.
+                        let mut q = q;
+                        q.killed = true;
+                        d.quarantines.insert(q);
+                    }
+                    quarantine_result(Ok(()), id)
+                }
+                Err(e) => {
+                    d.quarantines.insert(q);
+                    quarantine_result(Err(e.to_string()), id)
+                }
+            }
+        }
+        "LoadGeneration" => {
+            let generation = params
+                .get("gen")
+                .and_then(|g| g.as_str())
+                .unwrap_or("")
+                .to_string();
+            let dir = params
+                .get("dir")
+                .and_then(|p| p.as_str())
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| svc.rules_dir.clone());
+            load_generation_result(d.load_generation(&generation, &dir, svc.kernel.clone()))
+        }
+        other => {
+            let view = d.read_view();
+            dispatch_read(other, params, &view)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,6 +699,157 @@ mod tests {
             &view_with_alerts(),
         );
         assert_eq!(decode(&out)["error"], "io.aios.Sentinel.NoSuchAlert");
+    }
+
+    #[test]
+    fn a_non_root_peer_is_refused_a_write_method() {
+        let wheel = Peer {
+            uid: 1000,
+            gid: 998,
+            wheel: true,
+        };
+        assert!(requires_root("Release"));
+        assert!(requires_root("Kill"));
+        assert!(requires_root("LoadGeneration"));
+        assert!(!requires_root("Status"));
+        assert!(!wheel.may_write());
+        let out = check_access("Release", &wheel).expect("refused");
+        assert_eq!(decode(&out)["error"], "io.aios.Sentinel.PermissionDenied");
+        assert!(check_access("Status", &wheel).is_none(), "but may read");
+    }
+
+    #[test]
+    fn a_peer_with_no_access_is_refused_everything() {
+        let user = Peer {
+            uid: 1000,
+            gid: 1000,
+            wheel: false,
+        };
+        let out = check_access("Status", &user).expect("an error is produced");
+        assert_eq!(decode(&out)["error"], "io.aios.Sentinel.PermissionDenied");
+        assert!(check_access(
+            "Status",
+            &Peer {
+                uid: 0,
+                gid: 0,
+                wheel: false
+            }
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn load_generation_rejects_an_invalid_rule_set_and_keeps_the_old_one() {
+        let out = load_generation_result(Err(vec![
+            "default.toml: rule x: unknown predicate `nope`".to_string(),
+        ]));
+        let v = decode(&out);
+        assert_eq!(v["error"], "io.aios.Sentinel.InvalidRules");
+        assert!(
+            v["parameters"]["errors"][0]
+                .as_str()
+                .unwrap()
+                .contains("unknown predicate"),
+            "the validation error is returned verbatim: {v}"
+        );
+    }
+
+    #[test]
+    fn load_generation_reports_the_diff_on_success() {
+        let out = load_generation_result(Ok(vec![
+            "reverse-shell: action freeze -> kill".to_string(),
+            "+ exec-shm".to_string(),
+        ]));
+        let v = decode(&out);
+        assert_eq!(v["parameters"]["ok"], true);
+        assert_eq!(v["parameters"]["changes"][1], "+ exec-shm");
+    }
+
+    fn an_alert(id: &str) -> Alert {
+        Alert {
+            id: id.to_string(),
+            ts: String::new(),
+            rule: "r".to_string(),
+            severity: "high".to_string(),
+            action: "alert".to_string(),
+            mode: "enforce".to_string(),
+            outcome: "alerted".to_string(),
+            message: String::new(),
+            process: None,
+            ancestors: vec![],
+            event: serde_json::json!({}),
+            context: vec![],
+            prev_hash: crate::alert::GENESIS.to_string(),
+            hash: String::new(),
+        }
+    }
+
+    #[test]
+    fn watch_alerts_streams_each_alert_with_continues() {
+        let out = encode_watch_item(&an_alert("A1"));
+        let v = decode(&out);
+        assert_eq!(v["continues"], true, "a stream item always continues");
+        assert_eq!(v["parameters"]["alert"]["id"], "A1");
+    }
+
+    #[test]
+    fn watch_alerts_without_more_is_an_error() {
+        let out = dispatch_watch_precheck(false);
+        assert_eq!(
+            decode(&out.unwrap())["error"],
+            "io.aios.Sentinel.ExpectedMore",
+            "WatchAlerts only makes sense with more: true"
+        );
+        assert!(dispatch_watch_precheck(true).is_none());
+    }
+
+    #[test]
+    fn fan_out_drops_a_watcher_that_went_away() {
+        let (live_tx, live_rx) = std::sync::mpsc::channel();
+        let (dead_tx, dead_rx) = std::sync::mpsc::channel();
+        drop(dead_rx);
+        let watchers = std::sync::Arc::new(std::sync::Mutex::new(vec![live_tx, dead_tx]));
+        fan_out(&watchers, &an_alert("A9"));
+        assert_eq!(live_rx.recv().unwrap().id, "A9");
+        assert_eq!(
+            watchers.lock().unwrap().len(),
+            1,
+            "a disconnected watcher is not kept forever"
+        );
+    }
+
+    #[test]
+    fn a_call_is_parsed_into_method_parameters_and_more() {
+        let c = Call::parse(
+            br#"{"method":"io.aios.Sentinel.GetAlert","parameters":{"id":"A1"},"more":true}"#,
+        )
+        .expect("parses");
+        assert_eq!(c.method, "io.aios.Sentinel.GetAlert");
+        assert_eq!(c.parameters["id"], "A1");
+        assert!(c.more);
+
+        assert!(Call::parse(b"not json").is_none());
+    }
+
+    #[test]
+    fn a_call_without_parameters_defaults_to_an_empty_object() {
+        let c = Call::parse(br#"{"method":"io.aios.Sentinel.Status"}"#).unwrap();
+        assert!(c.parameters.is_object());
+        assert!(!c.more);
+    }
+
+    #[test]
+    fn the_socket_is_group_readable_so_wheel_can_reach_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/io.aios.Sentinel");
+        let l = bind(&path).expect("binds");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o660, "0660 plus the wheel group, not root-only");
+        // Binding again over a leftover socket must work: a killed instance
+        // leaves the file behind and systemd restarts us.
+        drop(l);
+        assert!(bind(&path).is_ok());
     }
 
     #[test]

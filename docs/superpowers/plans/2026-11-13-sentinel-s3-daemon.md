@@ -2800,6 +2800,13 @@ Then §6 trims the result: PID 1, `sentineld` itself, `systemd-journald`, kernel
 
 This task produces `Decision` values only. Task 13 turns them into alerts and actions.
 
+> **Corrections applied during execution (commit `9b955cc`).** Two defects in the Step 3 block below.
+>
+> 1. **`hdr.matched_rule` is a position in the kernel's map, not an index into the source list.** The hook sets it from `bpf_loop`'s counter over `RULES` (`c.v.matched = i as i32` in `sentinel-ebpf/src/engine.rs`), and `RULES` holds only the kernel-evaluable rules. `self.rules.get(idx)` therefore names a different rule — different id, severity and action — as soon as any user rule precedes a kernel one, which is the normal case. `KRule` carries `index`, "the index of the source rule, so an alert can name which rule matched", for exactly this: dispatch goes through `tables.rules[position].index`, and takes the action and mode off the compiled `KRule` rather than re-parsing the source strings. An out-of-range position — a stale event from before a `LoadGeneration` swap — is dropped. The plan's pack has a single kernel rule at index 0, where position and index coincide, which is why its test passed; the committed test pack puts a user rule first and asserts the divergence directly.
+> 2. **`pid <= 2` does not cover a kernel thread.** §6 never acts on kernel threads, but a kworker is an ordinary pid: `RealProc::read` resolves no `/proc/<pid>/exe` for it and admits it to the table with `exe: ""`, so a rule not keyed on the executable (`match = { stdio_socket = true }`, say) would freeze one. `Policy::is_protected_event` adds that case — an empty `exe` means a kernel thread or a process that died before the read, neither of which can be frozen, and a user-space process cannot fake one because a deleted or memfd image still reports a path. `decide` uses it; `is_protected(pid, unit)` keeps its original signature.
+>
+> Also: `Resolved::from_raw` returns `Option` (Task 8), so the tests unwrap it, and the unused `idx` parameter of `outcome_for` is gone.
+
 - [ ] **Step 1: Write the failing tests**
 
 Create `sentinel/crates/sentineld/src/engine.rs` with the tests first:

@@ -12,17 +12,6 @@
 
 ---
 
-## Status of this plan
-
-**Tasks 1–8 are written. Tasks 9–14 are listed under "Remaining tasks" with
-their scope and files, and still need to be written out in full before they are
-executed.** They are deliberately not stubbed inside the task format: a task in
-this plan means complete code and commands, and a half-written task invites an
-executor to improvise. Write them against the verified contract reference below
-— those APIs were read off the tree, not remembered.
-
----
-
 ## Shared contract reference
 
 Verified against the tree at commit `03fd017`. Quote these rather than guessing.
@@ -117,7 +106,7 @@ pub struct Plan {
 ```
 
 Rendered Sentinel files are ordinary `etc_changes` entries and join `MANAGED_FILES`.
-The §11.2 rule summary is a new `Plan` field (Task 5), not a warning.
+The §11.2 rule summary is a new `Plan` field (Task 6), not a warning.
 
 ### The daemon side S3 already shipped (do not re-implement)
 
@@ -1602,37 +1591,638 @@ git commit -m "feat(aios-exec): call LoadGeneration after a generation is built"
 
 ---
 
-## Remaining tasks
+## Task 9: The systemd unit
 
-Each line is one task still to be written out in the format above — files, a
-failing test with real code, the run command and its expected output, the
-implementation, the verification, the commit. Scope and files are settled; the
-code is not yet written.
-- **Task 9: The systemd unit.** `packaging/aios-sentinel/aios-sentinel.service`
-  with §11.4's directives verbatim, plus `LogsDirectory=aios/sentinel` (0700)
-  and the bpffs dependency the S3 handoff flagged (`sys-fs-bpf.mount`), checked
-  with `systemd-analyze verify` the way `make check` already checks the other
-  units.
-- **Task 10: The package.** `packaging/aios-sentinel/PKGBUILD` building the
-  sentinel workspace and installing `/usr/bin/sentineld`, `/usr/bin/sentinel`
-  and the unit; `aios-sentinel` added to the Makefile `PACKAGES` and to the core
-  package set; `make tools` installs the pinned nightly with `rust-src` and
-  `bpf-linker`.
-- **Task 11: The health check.** `base/aios-health.sh` gains the §11.5 check
-  (when `enable = true`, unit active **and** `/run/aios-sentinel/state` reads
-  `ok`), and `base/aios-health.service` gains `After=aios-sentinel.service`.
-  Covered by the existing bats harness.
-- **Task 12: e2e coverage.** The rendered files appear in a generation with the
-  right content and mode, `MANAGED_FILES` lists them, and a manifest with a
-  broken rule fails `aios plan` with the validator's message.
-- **Task 13: A VM scenario for apply.**
-  `sentinel/tests/vm/scenarios/apply_generation.sh`: daemon running, rules
-  changed, `LoadGeneration` called, the daemon swaps and raises the critical
-  `config-changed` alert; an invalid set is rejected while the old rules stay
-  loaded.
-- **Task 14: `make check`, spec amendments and the S5 handoff.** Extend the gate
-  to the new package, record S4's outcomes as §17.10, and write what the S5
-  gauntlet inherits.
+**Files:**
+- Create: `packaging/aios-sentinel/aios-sentinel.service`
+- Modify: `Makefile` (the `unit-check` list in `check`)
+- Test: `systemd-analyze verify`, through the existing `unit-check` step
+
+Spec §11.4, plus the bpffs dependency the S3 handoff recorded: the daemon pins
+under `/sys/fs/bpf` and exits if it is not mounted.
+
+- [ ] **Step 1: Write the unit**
+
+Create `packaging/aios-sentinel/aios-sentinel.service`:
+
+```ini
+# AIOS Sentinel (spec §11.4). Starts before the network and before any login,
+# so a home-directory autostart is watched from its first instruction.
+#
+# RefuseManualStop: stopping the daemon is what the kernel-side lockdown exists
+# to punish (§8.3). `systemctl kill` is the documented escape.
+
+[Unit]
+Description=AIOS: Sentinel runtime security
+DefaultDependencies=no
+After=local-fs.target sys-fs-bpf.mount
+Requires=sys-fs-bpf.mount
+Before=sysinit.target network-pre.target
+Wants=network-pre.target
+RefuseManualStop=yes
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/sentineld
+Restart=always
+RestartSec=1
+OOMScoreAdjust=-1000
+LogsDirectory=aios/sentinel
+LogsDirectoryMode=0700
+
+[Install]
+WantedBy=sysinit.target
+```
+
+`Requires=sys-fs-bpf.mount`, not just `After=`: without bpffs the daemon cannot
+pin and exits non-zero (§12), and a dependency failure is a clearer report than
+a restart loop.
+
+- [ ] **Step 2: Add it to the unit verification `make check` already runs**
+
+In the `Makefile`'s `check` target, the `unit-check` step copies units into
+`build/unit-check/` and runs `systemd-analyze verify` over them. Add the new
+unit to both the `cp` list and the `systemd-analyze verify` arguments, beside
+`base/aios-health.service`.
+
+- [ ] **Step 3: Verify**
+
+Run: `make check 2>&1 | grep -A3 unit-check`
+Expected: no output naming `build/unit-check/aios-sentinel.service` — the step
+prints only problems in our own units, and `make check` exits 0.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add packaging/aios-sentinel/aios-sentinel.service Makefile
+git commit -m "feat(packaging): the aios-sentinel systemd unit"
+```
+
+---
+
+## Task 10: The `aios-sentinel` package
+
+**Files:**
+- Create: `packaging/aios-sentinel/PKGBUILD`
+- Modify: `Makefile:160` (`PACKAGES`), the `tools` target, and the AIOS core package set
+- Test: `make repo` builds it
+
+Spec §11.4. Follow `packaging/aios-cli/PKGBUILD` exactly for the version
+function, the `RUSTFLAGS` replacement and the `!lto !debug` options; the one
+difference is the toolchain, because the eBPF object needs the pinned nightly
+and `bpf-linker`.
+
+- [ ] **Step 1: Write the PKGBUILD**
+
+Create `packaging/aios-sentinel/PKGBUILD`:
+
+```bash
+# aios-sentinel: the Sentinel daemon and CLI (spec §6–§10, §11.4). Built from this
+# repository's sentinel workspace by `make repo`.
+
+pkgname=aios-sentinel
+pkgver=0.1.0.r54.g99f3fda
+pkgrel=1
+pkgdesc="AIOS Sentinel: eBPF runtime security daemon and its CLI"
+arch=(x86_64)
+license=(GPL-3.0-or-later)
+depends=(systemd)
+# The kernel object is built by an aya-build build script, so the pinned nightly
+# and bpf-linker must already be on the build host: `make tools` installs both.
+makedepends=(cargo rustup clang llvm libbpf)
+options=(!lto !debug)
+
+_root="${AIOS_SRC_ROOT:-$(realpath "$startdir/../..")}"
+
+pkgver() {
+  printf '0.1.0.r%s.g%s' \
+    "$(git -C "$_root" rev-list --count HEAD)" \
+    "$(git -C "$_root" rev-parse --short HEAD)"
+}
+
+prepare() {
+  [[ -d $_root/sentinel ]] || { error "run from packaging/<pkg> inside the AIOS repo"; return 1; }
+  cd "$_root/sentinel"
+  cargo fetch --locked
+}
+
+build() {
+  cd "$_root/sentinel"
+  # As in aios-cli: RUSTFLAGS is replaced, not appended to, so CachyOS's
+  # target-cpu=native does not leak into a package meant to run anywhere.
+  export RUSTFLAGS="-C target-cpu=x86-64 -C opt-level=3 \
+--remap-path-prefix=$HOME=/home/builder \
+--remap-path-prefix=$_root=/build/aios"
+  export CFLAGS="${CFLAGS//-march=native/-march=x86-64}"
+  export CXXFLAGS="${CXXFLAGS//-march=native/-march=x86-64}"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --frozen -p sentineld -p sentinel
+}
+
+package() {
+  install -Dm755 "$srcdir/target/release/sentineld" "$pkgdir/usr/bin/sentineld"
+  install -Dm755 "$srcdir/target/release/sentinel" "$pkgdir/usr/bin/sentinel"
+  install -Dm644 "$startdir/aios-sentinel.service" \
+    "$pkgdir/usr/lib/systemd/system/aios-sentinel.service"
+}
+```
+
+The binaries are built with `-p sentineld -p sentinel` rather than
+`cargo xfeature build`: `sentineld`'s build script already compiles and embeds
+the kernel object (spec amendment 3), so a plain `cargo build --release` is the
+whole build.
+
+- [ ] **Step 2: Add the package to the Makefile and the core set**
+
+In `Makefile:160`:
+
+```makefile
+PACKAGES := aios-base aios-cli aios-sentinel
+```
+
+Add `aios-sentinel` to the AIOS core package set the installer/manifest
+installs, next to `aios-cli`, and make `make tools` install what the build
+needs:
+
+```makefile
+	rustup toolchain install "$$(sed -n 's/^channel = "\(.*\)"/\1/p' sentinel/rust-toolchain.toml)" \
+	    --component rust-src
+	cargo install --locked bpf-linker
+```
+
+- [ ] **Step 3: Build the package**
+
+Run: `make repo 2>&1 | tail -20`
+Expected: `aios-sentinel-*.pkg.tar.zst` is built and added to the repo
+alongside `aios-base` and `aios-cli`.
+
+- [ ] **Step 4: Check what landed in it**
+
+Run: `tar -tf build/repo/aios-sentinel-*.pkg.tar.zst | grep -E 'usr/bin|systemd'`
+Expected: `usr/bin/sentineld`, `usr/bin/sentinel`,
+`usr/lib/systemd/system/aios-sentinel.service`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packaging/aios-sentinel/PKGBUILD Makefile
+git commit -m "feat(packaging): the aios-sentinel package"
+```
+
+---
+
+## Task 11: The health check
+
+**Files:**
+- Modify: `base/aios-health.sh`, `base/aios-health.service`
+- Test: the existing bats suite for `aios-health.sh`
+
+Spec §11.5: when `/etc/aios/sentinel/sentinel.toml` has `enable = true`, the
+unit must be active **and** `/run/aios-sentinel/state` must read `ok`. The
+script already takes `AIOS_*` environment overrides so the suite can run it
+without the real system; the new check follows that convention.
+
+- [ ] **Step 1: Write the failing tests**
+
+In the bats file that covers `aios-health.sh`, add:
+
+```bash
+@test "sentinel: an enabled daemon that is active and ok passes" {
+    printf 'enable = true\n' > "$BATS_TEST_TMPDIR/sentinel.toml"
+    printf 'ok' > "$BATS_TEST_TMPDIR/state"
+    printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/systemctl"
+    chmod +x "$BATS_TEST_TMPDIR/systemctl"
+    run env AIOS_SENTINEL_CONF="$BATS_TEST_TMPDIR/sentinel.toml" \
+            AIOS_SENTINEL_STATE="$BATS_TEST_TMPDIR/state" \
+            AIOS_SYSTEMCTL="$BATS_TEST_TMPDIR/systemctl" \
+            "$HEALTH"
+    [ "$status" -eq 0 ]
+}
+
+@test "sentinel: degraded fails the generation" {
+    printf 'enable = true\n' > "$BATS_TEST_TMPDIR/sentinel.toml"
+    printf 'degraded' > "$BATS_TEST_TMPDIR/state"
+    printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/systemctl"
+    chmod +x "$BATS_TEST_TMPDIR/systemctl"
+    run env AIOS_SENTINEL_CONF="$BATS_TEST_TMPDIR/sentinel.toml" \
+            AIOS_SENTINEL_STATE="$BATS_TEST_TMPDIR/state" \
+            AIOS_SYSTEMCTL="$BATS_TEST_TMPDIR/systemctl" \
+            "$HEALTH"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *degraded* ]]
+}
+
+@test "sentinel: an inactive unit fails even when the state file says ok" {
+    printf 'enable = true\n' > "$BATS_TEST_TMPDIR/sentinel.toml"
+    printf 'ok' > "$BATS_TEST_TMPDIR/state"
+    printf '#!/bin/sh\nexit 3\n' > "$BATS_TEST_TMPDIR/systemctl"
+    chmod +x "$BATS_TEST_TMPDIR/systemctl"
+    run env AIOS_SENTINEL_CONF="$BATS_TEST_TMPDIR/sentinel.toml" \
+            AIOS_SENTINEL_STATE="$BATS_TEST_TMPDIR/state" \
+            AIOS_SYSTEMCTL="$BATS_TEST_TMPDIR/systemctl" \
+            "$HEALTH"
+    [ "$status" -eq 1 ]
+}
+
+@test "sentinel: a missing state file fails an enabled Sentinel" {
+    printf 'enable = true\n' > "$BATS_TEST_TMPDIR/sentinel.toml"
+    printf '#!/bin/sh\nexit 0\n' > "$BATS_TEST_TMPDIR/systemctl"
+    chmod +x "$BATS_TEST_TMPDIR/systemctl"
+    run env AIOS_SENTINEL_CONF="$BATS_TEST_TMPDIR/sentinel.toml" \
+            AIOS_SENTINEL_STATE="$BATS_TEST_TMPDIR/missing" \
+            AIOS_SYSTEMCTL="$BATS_TEST_TMPDIR/systemctl" \
+            "$HEALTH"
+    [ "$status" -eq 1 ]
+}
+
+@test "sentinel: a disabled Sentinel is not checked at all" {
+    printf 'enable = false\n' > "$BATS_TEST_TMPDIR/sentinel.toml"
+    printf '#!/bin/sh\nexit 3\n' > "$BATS_TEST_TMPDIR/systemctl"
+    chmod +x "$BATS_TEST_TMPDIR/systemctl"
+    run env AIOS_SENTINEL_CONF="$BATS_TEST_TMPDIR/sentinel.toml" \
+            AIOS_SENTINEL_STATE="$BATS_TEST_TMPDIR/missing" \
+            AIOS_SYSTEMCTL="$BATS_TEST_TMPDIR/systemctl" \
+            "$HEALTH"
+    [ "$status" -eq 0 ]
+}
+
+@test "sentinel: no config file means no check" {
+    # A generation built before Sentinel existed, or one that never rendered it.
+    printf '#!/bin/sh\nexit 3\n' > "$BATS_TEST_TMPDIR/systemctl"
+    chmod +x "$BATS_TEST_TMPDIR/systemctl"
+    run env AIOS_SENTINEL_CONF="$BATS_TEST_TMPDIR/absent.toml" \
+            AIOS_SENTINEL_STATE="$BATS_TEST_TMPDIR/missing" \
+            AIOS_SYSTEMCTL="$BATS_TEST_TMPDIR/systemctl" \
+            "$HEALTH"
+    [ "$status" -eq 0 ]
+}
+```
+
+Set the other `AIOS_*` overrides these tests need (`AIOS_CMDLINE_FILE`,
+`AIOS_GEN_FILE`, `AIOS_FINDMNT`) the way the existing tests in that file do, so
+only the Sentinel check decides the outcome.
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `make check 2>&1 | grep -E "not ok .*sentinel"`
+Expected: the new cases fail — the script does not look at Sentinel yet, so the
+`degraded` and inactive-unit cases exit 0.
+
+- [ ] **Step 3: Write the implementation**
+
+In `base/aios-health.sh`, add the overrides to the header comment:
+
+```sh
+#   AIOS_SENTINEL_CONF  sentinel config     (default /etc/aios/sentinel/sentinel.toml)
+#   AIOS_SENTINEL_STATE sentinel state file (default /run/aios-sentinel/state)
+#   AIOS_SYSTEMCTL      systemctl           (default systemctl)
+```
+
+and add the check, after the existing ones so a Sentinel problem never masks a
+subvolume or generation mismatch:
+
+```sh
+SENTINEL_CONF="${AIOS_SENTINEL_CONF:-/etc/aios/sentinel/sentinel.toml}"
+SENTINEL_STATE="${AIOS_SENTINEL_STATE:-/run/aios-sentinel/state}"
+SYSTEMCTL="${AIOS_SYSTEMCTL:-systemctl}"
+
+# Sentinel (spec §11.5). Only when this generation enabled it: a generation
+# that never rendered the file, or set enable = false, has nothing to check.
+if [ -f "$SENTINEL_CONF" ] && grep -qE '^[[:space:]]*enable[[:space:]]*=[[:space:]]*true' "$SENTINEL_CONF"; then
+    "$SYSTEMCTL" is-active --quiet aios-sentinel.service \
+        || fail "aios-sentinel.service is not active"
+    [ -r "$SENTINEL_STATE" ] || fail "$SENTINEL_STATE is missing"
+    state=$(cat "$SENTINEL_STATE")
+    [ "$state" = ok ] || fail "sentineld reports $state"
+fi
+```
+
+`degraded` fails deliberately: it means the LSM programs did not attach, so the
+generation enforces nothing (§12), and §11.5 counts that as a failed health
+check so the three-boot fallback returns to the previous generation.
+
+- [ ] **Step 4: Order the units**
+
+In `base/aios-health.service`, add `aios-sentinel.service` to `After=`:
+
+```ini
+After=local-fs.target aios-sentinel.service
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `make check`
+Expected: every bats case passes, the six new ones included, and the unit
+verification still reports nothing.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add base/aios-health.sh base/aios-health.service
+git commit -m "feat(base): health check for an enabled Sentinel"
+```
+
+---
+
+## Task 12: End-to-end coverage of the rendered generation
+
+**Files:**
+- Modify: `tests/e2e/test_e2e.py`
+- Test: that file
+
+The e2e suite builds a generation from a manifest and inspects it. Three facts
+matter: the files are there with the right content, `MANAGED_FILES` lists them,
+and a broken rule fails `aios plan` with the validator's own message.
+
+- [ ] **Step 1: Write the failing tests**
+
+Add to `tests/e2e/test_e2e.py`, following the fixtures that file already uses
+for a manifest repo and an applied generation:
+
+```python
+def test_sentinel_files_are_rendered_into_the_generation(applied_generation):
+    """§11.3: both the config and the rules are managed files."""
+    etc = applied_generation.etc
+    conf = etc / "aios/sentinel/sentinel.toml"
+    assert conf.is_file(), "sentinel.toml is rendered"
+    body = conf.read_text()
+    assert "enable = true" in body
+    assert body.startswith("# Written by aios. Do not edit.")
+
+    rules = etc / "aios/sentinel/rules.d"
+    assert rules.is_dir(), "the rules directory is rendered"
+    assert any(rules.glob("*.toml")), f"rule files were copied: {list(rules.iterdir())}"
+
+    managed = (etc / "aios/managed-files").read_text()
+    assert "/etc/aios/sentinel/sentinel.toml" in managed
+    for f in rules.glob("*.toml"):
+        assert f"/etc/aios/sentinel/rules.d/{f.name}" in managed
+
+
+def test_a_broken_rule_fails_the_plan(manifest_repo, aios):
+    """§11.2: rule validation errors fail the plan like any manifest error."""
+    rules = manifest_repo / "sentinel/rules"
+    rules.mkdir(parents=True, exist_ok=True)
+    (rules / "bad.toml").write_text(
+        '[[rule]]\nid = "x"\non = "exec"\nseverity = "low"\n'
+        'action = "alert"\nmatch = { nope = true }\n'
+    )
+    out = aios("plan", expect_rc=1)
+    assert "nope" in out, out
+    assert "bad.toml" in out, out
+
+
+def test_the_plan_summarises_a_changed_rule(manifest_repo, aios):
+    """§11.2: the summary names the changed field, as the daemon words it."""
+    rules = manifest_repo / "sentinel/rules"
+    rules.mkdir(parents=True, exist_ok=True)
+    (rules / "pack.toml").write_text(
+        '[[rule]]\nid = "r"\non = "exec"\nseverity = "high"\n'
+        'action = "freeze"\nmatch = { exe_memfd = true }\n'
+    )
+    aios("apply")
+    (rules / "pack.toml").write_text(
+        '[[rule]]\nid = "r"\non = "exec"\nseverity = "high"\n'
+        'action = "kill"\nmatch = { exe_memfd = true }\n'
+    )
+    out = aios("plan")
+    assert "Sentinel:" in out, out
+    assert "r: action freeze -> kill" in out, out
+```
+
+Adapt the fixture names to the ones in that file (`aios(...)` standing for
+however it invokes the binary and captures output).
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `build/venv/bin/pytest -q tests/e2e/test_e2e.py -k sentinel`
+Expected: failures — the generation has no `aios/sentinel/` yet if Tasks 4–6
+are not merged, and the plan prints no Sentinel section.
+
+- [ ] **Step 3: Make them pass**
+
+No new production code: Tasks 4, 5 and 6 are what these assert. If a test fails
+after those are in, fix the implementation — these are the spec's own words.
+
+- [ ] **Step 4: Run the suite**
+
+Run: `build/venv/bin/pytest -q tests/e2e/test_e2e.py`
+Expected: all pass.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add tests/e2e/test_e2e.py
+git commit -m "test(e2e): the rendered Sentinel generation and the plan summary"
+```
+
+---
+
+## Task 13: A VM scenario for apply
+
+**Files:**
+- Create: `sentinel/tests/vm/scenarios/apply_generation.sh`
+- Modify: `sentinel/tests/vm/README.md` (the scenario table)
+- Test: `cargo run -p xtask -- vmtest apply_generation`
+
+The only place the whole §11.3 round trip runs: a live daemon, a rule change,
+`LoadGeneration` over the real socket, the swap, the critical alert, and a
+rejected set leaving the running rules alone. Follow
+`sentinel/tests/vm/scenarios/daemon.sh` for the shape.
+
+- [ ] **Step 1: Write the scenario**
+
+Create `sentinel/tests/vm/scenarios/apply_generation.sh`:
+
+```sh
+#!/bin/sh
+# Runs inside the VM as root.
+# LoadGeneration swaps a valid rule set, alerts about it, and refuses an
+# invalid one while the running rules stay loaded (spec 11.3).
+set -eu
+HERE=$(cd "$(dirname "$0")" && pwd)
+SENTINEL=$(cd "$HERE/../../.." && pwd)
+# shellcheck disable=SC1091
+. "$SENTINEL/tests/vm/lib.sh"
+cd "$SENTINEL"
+
+# virtme boots without bpffs; systemd mounts it in production (spec 8.1).
+grep -q " /sys/fs/bpf " /proc/mounts || mount -t bpf bpffs /sys/fs/bpf
+
+mkdir -p /tmp/ap/rules /tmp/ap/alerts
+cat > /tmp/ap/rules/pack.toml <<'RULES'
+[[rule]]
+id       = "r"
+desc     = "before the swap"
+on       = "exec"
+severity = "high"
+action   = "freeze"
+match    = { exe = ["/tmp/never-run"] }
+RULES
+
+./target/debug/sentineld \
+    --config /nonexistent/sentinel.toml \
+    --rules /tmp/ap/rules \
+    --alerts /tmp/ap/alerts \
+    --socket /tmp/ap/sock \
+    --state /tmp/ap/state \
+    >/tmp/ap/out 2>/tmp/ap/err &
+DAEMON=$!
+sleep 3
+grep -qF "sentineld: ready" /tmp/ap/err || { echo "ASSERT FAIL: not ready"; cat /tmp/ap/err; exit 1; }
+
+# A valid change: the action moves from freeze to kill.
+cat > /tmp/ap/rules/pack.toml <<'RULES'
+[[rule]]
+id       = "r"
+desc     = "after the swap"
+on       = "exec"
+severity = "high"
+action   = "kill"
+match    = { exe = ["/tmp/never-run"] }
+RULES
+
+printf '{"method":"io.aios.Sentinel.LoadGeneration","parameters":{"gen":"gen-7","dir":"/tmp/ap/rules"}}\0' \
+    | socat -t5 - UNIX-CONNECT:/tmp/ap/sock >/tmp/ap/reply1 2>/dev/null \
+    || { echo "ASSERT FAIL: LoadGeneration call failed"; exit 1; }
+tr -d '\0' < /tmp/ap/reply1
+assert_contains /tmp/ap/reply1 '"ok":true'
+assert_contains /tmp/ap/reply1 'action freeze -> kill'
+
+# The swap is a critical alert naming the generation (spec 11.3).
+./target/debug/sentinel --socket /tmp/ap/sock alerts --json >/tmp/ap/alerts.json 2>&1
+assert_contains /tmp/ap/alerts.json "config-changed"
+assert_contains /tmp/ap/alerts.json "gen-7"
+assert_contains /tmp/ap/alerts.json "critical"
+
+# An invalid set is refused and the running rules stay.
+cat > /tmp/ap/rules/pack.toml <<'RULES'
+[[rule]]
+id       = "r"
+on       = "exec"
+severity = "high"
+action   = "kill"
+match    = { nope = true }
+RULES
+
+printf '{"method":"io.aios.Sentinel.LoadGeneration","parameters":{"gen":"gen-8","dir":"/tmp/ap/rules"}}\0' \
+    | socat -t5 - UNIX-CONNECT:/tmp/ap/sock >/tmp/ap/reply2 2>/dev/null || true
+tr -d '\0' < /tmp/ap/reply2
+assert_contains /tmp/ap/reply2 "InvalidRules"
+assert_contains /tmp/ap/reply2 "nope"
+
+./target/debug/sentinel --socket /tmp/ap/sock status >/tmp/ap/status 2>&1
+cat /tmp/ap/status
+grep -qF "generation     gen-7" /tmp/ap/status \
+    || { echo "ASSERT FAIL: the rejected generation was recorded"; cat /tmp/ap/status; exit 1; }
+
+kill -TERM "$DAEMON" 2>/dev/null || true
+echo "apply_generation: PASS"
+```
+
+If `socat` is not in the VM, call the method with
+`./target/debug/sentinel --socket /tmp/ap/sock load-generation gen-7 /tmp/ap/rules`
+and add that subcommand to the CLI in this task — a root-only wrapper over
+`sentinel_client::Client::call_raw`, which also gives operators a way to reload
+by hand. Check first: `command -v socat`.
+
+- [ ] **Step 2: Make it executable and run it**
+
+Run:
+
+```bash
+chmod +x sentinel/tests/vm/scenarios/apply_generation.sh
+cd sentinel && cargo run -q -p xtask -- vmtest apply_generation
+```
+
+Expected: `apply_generation: PASS`.
+
+The log for a VM run must live outside `/tmp` — the guest mounts its own, and
+content written to a shared-fs path disappears mid-run. Redirect to `$HOME` if
+you capture it.
+
+- [ ] **Step 3: Add the row to the scenario table**
+
+In `sentinel/tests/vm/README.md`, in alphabetical order:
+
+```markdown
+| `apply_generation` | `LoadGeneration` swaps a valid rule set and alerts about it; an invalid set is refused and the running rules stay loaded. |
+```
+
+- [ ] **Step 4: Run the whole suite**
+
+Run: `cd sentinel && cargo run -q -p xtask -- vmtest all`
+Expected: `27/27 scenarios passed`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add sentinel/tests/vm/scenarios/apply_generation.sh sentinel/tests/vm/README.md
+git commit -m "test(sentinel): VM scenario for LoadGeneration from a generation"
+```
+
+---
+
+## Task 14: `make check`, the spec amendments and the S5 handoff
+
+**Files:**
+- Modify: `Makefile` (the `check` target), `docs/superpowers/specs/2026-11-12-sentinel-core-design.md` (§17.10)
+- Create: `docs/superpowers/plans/` nothing new; the handoff goes in the spec
+
+- [ ] **Step 1: Make the gate cover the new crates**
+
+`make check` runs `cargo test --workspace` in both workspaces, so the new unit
+tests are already in. Confirm the `aios-cli` side still builds the release
+binary and that the sentinel side builds the two binaries the package installs:
+
+Run: `make check`
+Expected: exits 0.
+
+- [ ] **Step 2: Record S4's outcomes as §17.10**
+
+Append to §17 of the spec, after §17.9, in the shape §17.8 used: what S4
+settled, what S5 inherits, and what is still missing. Cover at least:
+
+- The `[sentinel]` section is `Option<Sentinel>` on `Manifest`, wrapping
+  `sentinel_rules::config::SentinelConfig`, so the section has one definition.
+- Rule validation happens in `aios-manifest`'s `Validator`, so errors are
+  positioned `ManifestError`s like any other manifest problem.
+- `sentinel.toml` is rendered from the same type the daemon parses, and the
+  renderer's test asserts the round trip.
+- `MANAGED_FILES` lists the Sentinel files because the desired map's keys build
+  it; no separate bookkeeping was added.
+- `LoadGeneration` runs after the commit point, so all three §11.3 outcomes are
+  warnings on `ApplyOutcome` rather than apply failures.
+- `sentinel-client` is the only implementation of the wire format.
+- Anything that turned out differently from this plan, with the evidence —
+  the S3 amendments are the model: record what the VM or the gate proved, not
+  what was expected.
+
+- [ ] **Step 3: Write what S5 inherits**
+
+The S5 gauntlet needs to know: the unit and package names, that
+`/run/aios-sentinel/state` is what the health check reads, that a `degraded`
+generation fails health and rolls back, that the DNS monitor has no VM coverage
+and is exercised for the first time in S5, and that §13's CPU and RSS budgets
+are still unmeasured. Put it in §17.10 rather than a separate file, as §11.5's
+check and the unit are now the whole interface.
+
+- [ ] **Step 4: Commit and push**
+
+```bash
+git add Makefile docs/superpowers/specs/2026-11-12-sentinel-core-design.md
+git commit -m "docs(sentinel): S4 outcomes, the S5 handoff and make check wiring"
+git push origin feat/sentinel
+```
+
+- [ ] **Step 5: Confirm CI is green before declaring S4 done**
+
+```bash
+gh run watch "$(gh run list --branch feat/sentinel --limit 1 --json databaseId --jq '.[0].databaseId')" --exit-status
+```
+
+Expected: `check` and `audit` both succeed. S4 is not done until a clean runner
+agrees — the dev box hides CI-only gaps, which is how S2 and S3 both ended.
 
 ---
 
@@ -1641,11 +2231,15 @@ code is not yet written.
 | Spec section | Covered by |
 |---|---|
 | §11.1 manifest section: optional, defaults, validated | Tasks 1, 3 |
-| §11.2 plan fails on rule errors; Sentinel summary; `enable = false` warning | Tasks 2, 5 |
-| §11.3 renderer writes both files, managed files, `LoadGeneration` with three outcomes, reboot-only fields | Tasks 4, 6, 8 |
+| §11.2 plan fails on rule errors; Sentinel summary; `enable = false` warning | Tasks 2, 3, 6 |
+| §11.3 renderer writes both files, managed files, `LoadGeneration` with three outcomes, reboot-only fields | Tasks 4, 5, 8 |
 | §11.4 PKGBUILD, binaries, unit directives, build-host tools, log directory | Tasks 9, 10 |
 | §11.5 health check and its ordering | Task 11 |
+| §14 testing bar: unit, e2e, VM | Tasks 12, 13 |
+| §11.4 `make check` and CI green before done | Task 14 |
 | §17.9 decisions 1–3 | Tasks 1–2 (linked validator), 7–8 (shared client), the single-stage scope of this plan |
 
-**Known gap in this document:** Tasks 9–14 are scoped but not written out.
-Write them before executing them.
+All fourteen tasks are written. The APIs quoted in the contract reference and
+in each task were read off the tree at `03fd017`, not remembered; where a task
+tells you to adapt to a fixture or helper that already exists in the file you
+are editing, it says so explicitly rather than inventing a name.

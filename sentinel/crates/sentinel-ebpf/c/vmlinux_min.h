@@ -29,7 +29,9 @@ struct vfsmount {};
 struct path { struct vfsmount *mnt; struct dentry *dentry; };
 struct file { struct inode *f_inode; struct path f_path; unsigned int f_mode; };
 struct mount { struct vfsmount mnt; int mnt_id; };
-struct linux_binprm { struct file *file; };
+/* `filename` is the path execve was given. CO-RE matches by name, so listing
+ * it after `file` costs nothing and does not depend on the kernel's order. */
+struct linux_binprm { struct file *file; const char *filename; };
 typedef unsigned short sa_family_t;
 struct in_addr { __be32 s_addr; };
 struct in6_addr { __u8 s6_addr[16]; };

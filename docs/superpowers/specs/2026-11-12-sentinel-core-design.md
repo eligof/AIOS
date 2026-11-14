@@ -412,6 +412,8 @@ Recorded during S3 (plan `docs/superpowers/plans/2026-11-13-sentinel-s3-daemon.m
 
 12. **One lock order: daemon before kernel (§13).** Every thread that needs both the daemon state and the kernel handle takes them in that order. The ring drain and the varlink methods need the daemon first, so the heartbeat thread and the resolved monitor follow suit; taking the kernel first deadlocked the daemon in the VM, after exactly one `Status` call.
 
+13. **The exec path comes from `bprm`, not from `/proc` (§4, §5.2).** The exec hook runs at `bprm_check_security`, before the new image is installed, so `/proc/<pid>/exe` still names the *caller's* image: resolving an exec event's executable in user space matched every `exe` glob against the forking shell, and the `exe`-keyed rules of §5.5 (`reverse-shell` among them) could not fire. Verified in the VM, where every exec event resolved to `/usr/bin/bash`. A CO-RE shim (`shim_exec_path`) now reads `bprm->filename` into `ExecPayload::exe`, and `resolve` prefers it whenever the kernel supplied an absolute path, falling back to the process table for a relative one. This reverses the "S3 resolves exe/argv from /proc" note of §17.7 for `exe` only; argv still comes from `/proc`. The `freeze` VM scenario is keyed on `exe` and is the regression test.
+
 ### 17.7 S2 outcomes (eBPF kernel object)
 
 Recorded at the end of S2 (plan `docs/superpowers/plans/2026-11-13-sentinel-s2-ebpf.md`). The kernel ABI S3 inherits is documented in `sentinel/crates/sentinel-ebpf/README.md`.
@@ -447,6 +449,7 @@ Recorded at the end of S3.
 - The daemon is synchronous and thread-per-concern; the varlink transport is hand-written (amendment 7). Threads: ring drain (blocking `poll` on the ring fd), heartbeat (500 ms, which also refreshes the `Status` snapshot), varlink listener (one thread per client), resolved monitor.
 - Every kernel effect goes through the `Kernel` trait, so dispatch, actions, the alert chain and `LoadGeneration` are unit-tested on the host with `FakeKernel` (160 unit tests).
 - `env_ld` and `stdio_socket` moved to user space (amendment 8); `ld-preload` is a user rule now.
+- An exec event's executable comes from the kernel's read of `bprm->filename` (amendment 13); argv still comes from `/proc`.
 - Alert ids are ULIDs, and a freeze names its cgroup `q-<alert-id>`, so an alert and its quarantine share one identifier.
 - Alert context comes from one time-bounded ring filtered to the tree (amendment 9).
 - `SOCK_DESTROY` is issued over `NETLINK_SOCK_DIAG` after matching `/proc/<pid>/fd` socket inodes against a `sock_diag` dump, with a 500 ms receive timeout: the freeze runs while the event loop holds both locks, so an unanswered dump must not be able to wedge the daemon.
@@ -463,6 +466,5 @@ Recorded at the end of S3.
 
 **Known gaps:**
 
-- **A rule keyed on `exe` does not match the program being executed.** The daemon resolves an exec event's executable from `/proc/<pid>/exe`, but the LSM hook runs at `bprm_check_security`, before the new image is installed, so the glob is matched against the pre-exec image — the forking shell. Verified in the VM: every exec event in the `freeze` scenario resolved to `/usr/bin/bash` and never to the binary being exec'd. This affects the `exe`-keyed rules of §5.5 (`reverse-shell` among them). The fix belongs in the kernel half: fill `ExecPayload::exe` from `bprm` — the `shim_filename` accessor §17.7 lists as unused dead code exists for exactly this — and have `resolve` prefer the payload when `exe_len > 0`. Until then, only predicates the kernel fills (facts, `mnt_id`) and user predicates about the *parent* are reliable on exec.
 - PID 1 may still signal the daemon (§8.2 known limit, follow-up 5). The lockdown covers that case and the `lockdown_report` scenario proves it.
 - A `memfd` link cannot be pinned (aya gives no `FdLink` for a perf-event `TracePointLink`), so a restart that reuses the pins re-attaches that one program; the other 16 links survive untouched.

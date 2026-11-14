@@ -2,13 +2,11 @@
 # A freeze rule really freezes: the cgroup exists, is frozen, is quarantined,
 # and `release` puts the process back (spec 6).
 #
-# The rule fires on `listen` rather than on `exec`. A rule keyed on `exe`
-# cannot be triggered reliably today: the daemon resolves an exec event's
-# executable from /proc/<pid>/exe, and the LSM hook runs at
-# bprm_check_security -- before the new image is installed -- so the glob is
-# matched against the pre-exec image (the forking shell). `listen` facts come
-# from the kernel's own payload, so this scenario tests the freeze path
-# itself rather than that race.
+# The rule is keyed on `exe`, which also makes this the regression test for
+# the exec path coming from the kernel: the hook runs at bprm_check_security,
+# before the new image is installed, so resolving the executable from
+# /proc/<pid>/exe matched every exec against the forking shell instead. The
+# path now comes from bprm->filename.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 SENTINEL=$(cd "$HERE/../../.." && pwd)
@@ -22,18 +20,15 @@ grep -q " /sys/fs/bpf " /proc/mounts || mount -t bpf bpffs /sys/fs/bpf
 mkdir -p /tmp/fz/rules /tmp/fz/alerts
 cat > /tmp/fz/rules/freeze.toml <<'RULES'
 [[rule]]
-id       = "freeze-listener"
-desc     = "Freeze a listener this shell started"
-on       = "listen"
+id       = "freeze-marker"
+desc     = "Freeze anything exec'ing the marker binary"
+on       = "exec"
 severity = "high"
 action   = "freeze"
-# `**` so the rule does not depend on which shell the harness uses;
-# `parent` is a user-space predicate, resolved from the process table.
-match    = { parent = ["**"] }
+match    = { exe = ["/tmp/marker"] }
 RULES
 
-CC=$(command -v cc || command -v clang)
-"$CC" -o /tmp/listen_hold tests/vm/payloads/listen_hold.c
+cp /bin/sleep /tmp/marker
 
 ./target/debug/sentineld \
     --config /nonexistent/sentinel.toml \
@@ -46,7 +41,7 @@ DAEMON=$!
 sleep 3
 grep -qF "sentineld: ready" /tmp/fz/err || { echo "ASSERT FAIL: not ready"; cat /tmp/fz/err; exit 1; }
 
-/tmp/listen_hold 8899 60 &
+/tmp/marker 60 &
 VICTIM=$!
 sleep 3
 
@@ -55,12 +50,17 @@ cat /tmp/fz/q
 grep -qF "root pid" /tmp/fz/q || {
     echo "ASSERT FAIL: nothing quarantined"
     cat /tmp/fz/err
-    # Whether the rule matched at all, and what the action said if it did.
+    # Whether the rule matched at all, and what exe the exec resolved to.
     ./target/debug/sentinel --socket /tmp/fz/sock alerts --json || true
     exit 1
 }
 QID=$(awk '{print $1; exit}' /tmp/fz/q)
 echo "quarantine $QID"
+
+# The alert must name the program that was executed, not the shell that
+# forked it.
+./target/debug/sentinel --socket /tmp/fz/sock show "$QID" >/tmp/fz/show 2>&1
+assert_contains /tmp/fz/show '"exe": "/tmp/marker"'
 
 CG="/sys/fs/cgroup/aios-sentinel.slice/q-$QID"
 [ -d "$CG" ] || { echo "ASSERT FAIL: $CG missing"; exit 1; }

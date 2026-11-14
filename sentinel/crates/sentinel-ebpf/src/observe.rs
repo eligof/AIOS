@@ -34,7 +34,15 @@ unsafe fn try_exec(ctx: &LsmContext) -> Result<i32, i32> {
         return Ok(0);
     };
     facts_kern::set_uid_facts(p, core.uid);
-    (*p).payload.exec.exe_len = 0; // S3 resolves exe/argv from /proc
+    // The path execve was given. It has to come from bprm: this hook runs
+    // before the new image is installed, so a user-space read of
+    // /proc/<pid>/exe returns the caller's old image and an `exe` rule would
+    // match the wrong program. argv still comes from /proc.
+    (*p).payload.exec.exe_len = shim::exec_path(
+        bprm,
+        (*p).payload.exec.exe.as_mut_ptr(),
+        sentinel_common::wire::EXE_LEN as i32,
+    );
     (*p).payload.exec.argv_len = 0;
     (*p).payload.exec.mnt_id = 0;
     if let Some(info) = shim::exec_info(bprm) {

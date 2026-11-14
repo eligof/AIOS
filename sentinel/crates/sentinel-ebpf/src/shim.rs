@@ -46,6 +46,7 @@ unsafe extern "C" {
     fn shim_path_ino(path: *const c_void, ino: *mut u64) -> i32;
     fn shim_file_name(file: *const c_void, out: *mut u8, cap: i32) -> i32;
     fn shim_filename(filename: *const c_void, out: *mut u8, cap: i32) -> i32;
+    fn shim_exec_path(bprm: *const c_void, out: *mut u8, cap: i32) -> i32;
     fn shim_nd_filename(nd: *const c_void, out: *mut u8, cap: i32) -> i32;
     fn shim_open_flag(op: *const c_void, out: *mut i32) -> i32;
     fn shim_ptrace(child: *const c_void, tgid: *mut u32, uid: *mut u32) -> i32;
@@ -184,6 +185,22 @@ pub unsafe fn bpf_prog_type(attr: *const c_void) -> Option<u32> {
         Some(v)
     } else {
         None
+    }
+}
+
+/// Copy `bprm->filename` -- the path execve was given -- into `out`, and
+/// return its length without the NUL.
+///
+/// This hook runs before the new image is installed, so `/proc/<pid>/exe`
+/// still names the caller's old image; the path has to come from here if an
+/// `exe` rule is to match the program actually being executed.
+pub unsafe fn exec_path(bprm: *const c_void, out: *mut u8, cap: i32) -> u16 {
+    let n = shim_exec_path(bprm, out, cap);
+    // bpf_core_read_str counts the NUL; the wire length does not.
+    if n > 1 {
+        (n - 1) as u16
+    } else {
+        0
     }
 }
 

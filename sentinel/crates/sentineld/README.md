@@ -81,16 +81,17 @@ because a perf-event link cannot be pinned.
 
 ## Tests
 
-`make check` covers the unit tests (160 in `sentineld`, 6 in `sentinel`).
+`make check` covers the unit tests (162 in `sentineld`, 6 in `sentinel`).
 `make sentinel-vmtest` runs 26 scenarios; `daemon`, `freeze` and
 `lockdown_report` are S3's.
 
-## One gap S4 should know about
+## Exec resolution
 
-A rule keyed on `exe` does not match the program being executed: the daemon
-resolves an exec event's executable from `/proc/<pid>/exe`, while the hook runs
-at `bprm_check_security`, before the new image is installed, so the glob sees
-the forking shell. §17.8 records the evidence and the fix (fill
-`ExecPayload::exe` from `bprm` kernel-side, using the `shim_filename` accessor
-that already exists but is unused). Until that lands, the `exe`-keyed rules of
-§5.5 — `reverse-shell` among them — will not fire.
+An exec event's executable comes from the kernel's read of `bprm->filename`
+(`ExecPayload::exe`), not from `/proc/<pid>/exe`: the hook runs at
+`bprm_check_security`, before the new image is installed, so a user-space read
+returns the caller's old image. `resolve` prefers the kernel's path whenever it
+is absolute and falls back to the process table otherwise. argv, `env_ld` and
+`stdio_socket` still come from `/proc`, so they are only available while the
+process lives. Spec amendment 13 records it; the `freeze` scenario is keyed on
+`exe` and is the regression test.

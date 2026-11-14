@@ -126,7 +126,7 @@ impl Resolved {
         let mut facts = Facts(h.facts);
 
         let me = table.get(h.pid);
-        let exe = me.map(|p| p.exe.clone()).unwrap_or_default();
+        let mut exe = me.map(|p| p.exe.clone()).unwrap_or_default();
         let argv = me.map(|p| p.argv.clone()).unwrap_or_default();
         let unit = me.map(|p| p.unit.clone()).unwrap_or_default();
         let chain = table.ancestors(h.pid);
@@ -140,10 +140,19 @@ impl Resolved {
 
         match kind {
             EventKind::Exec => {
-                // The kernel fills only mnt_id and the facts (§17.7); the two
-                // remaining facts are ours to decide.
                 // SAFETY: the kernel wrote the exec variant for this kind.
                 let x = unsafe { ev.payload.exec };
+                // The executable comes from the kernel's own read of
+                // `bprm->filename`, not from `/proc/<pid>/exe`: the hook runs
+                // at bprm_check_security, before the new image is installed,
+                // so the table's entry for this pid is still the *caller's*
+                // image, and resolving from it matched every exec against the
+                // forking shell. A relative path is no use to an absolute
+                // glob, so that case falls back to the table.
+                let from_kernel = field_str(&x.exe, x.exe_len as usize);
+                if from_kernel.starts_with('/') {
+                    exe = from_kernel;
+                }
                 if src.has_env_ld(h.pid) {
                     facts.set(G_FLAGS, F_ENV_LD);
                 }
@@ -354,6 +363,57 @@ mod tests {
         assert_eq!(r.detail["on"], "exec");
         assert_eq!(r.detail["mnt_id"], 42);
         assert_eq!(r.detail["memfd"], true);
+    }
+
+    /// An exec payload carrying the path the kernel read out of `bprm`.
+    fn exec_payload_with_path(path: &[u8]) -> EventPayload {
+        let mut exe = [0u8; 256];
+        exe[..path.len()].copy_from_slice(path);
+        EventPayload {
+            exec: ExecPayload {
+                exe,
+                argv: [0; 256],
+                exe_len: path.len() as u16,
+                argv_len: 0,
+                mnt_id: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn the_kernels_exec_path_wins_over_the_table() {
+        let (t, src) = fixture();
+        // The table holds the caller's image, which is what /proc still says
+        // at bprm_check_security. The rule has to see the new one.
+        let ev = RawEvent {
+            hdr: hdr(EventKind::Exec, 200),
+            payload: exec_payload_with_path(b"/tmp/marker"),
+        };
+        let r = Resolved::from_raw(&ev, &t, &src, &HomeBinds::default()).expect("a known kind");
+        assert_eq!(r.exe, "/tmp/marker");
+        assert_eq!(
+            r.as_event().exe,
+            "/tmp/marker",
+            "the matcher sees the program being executed"
+        );
+        assert_eq!(
+            r.ancestors,
+            vec!["/usr/bin/sshd", "/usr/lib/systemd/systemd"],
+            "the chain still comes from the table"
+        );
+    }
+
+    #[test]
+    fn a_relative_exec_path_falls_back_to_the_table() {
+        let (t, src) = fixture();
+        // `./x` cannot satisfy an absolute glob, and the kernel does not
+        // resolve it for us; the table's answer is the better of the two.
+        let ev = RawEvent {
+            hdr: hdr(EventKind::Exec, 200),
+            payload: exec_payload_with_path(b"./marker"),
+        };
+        let r = Resolved::from_raw(&ev, &t, &src, &HomeBinds::default()).expect("a known kind");
+        assert_eq!(r.exe, "/usr/bin/bash");
     }
 
     #[test]

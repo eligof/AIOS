@@ -49,6 +49,23 @@ int shim_exec_info(const void *bprm, struct sentinel_exec_info *o) {
     return e;
 }
 
+/* bprm->filename: the path execve was given, as a string.
+ *
+ * The exec hook runs before the new image is installed, so /proc/<pid>/exe
+ * still names the caller's old image. Reading the path here is the only way
+ * an `exe` rule can match the program actually being executed.
+ *
+ * Returns the string length including the NUL, or negative on failure. */
+int shim_exec_path(const void *bprm, unsigned char *out, int cap) {
+    const struct linux_binprm *b = bprm;
+    const char *p = 0;
+    if (cap <= 0) return -1;
+    out[0] = 0;
+    if (BPF_CORE_READ_INTO(&p, b, filename)) return -1;
+    if (!p) return -1;
+    return bpf_core_read_str(out, cap, p);
+}
+
 int shim_task_tgid(const void *task, unsigned int *out) {
     const struct task_struct *t = task;
     int v = 0;

@@ -398,6 +398,20 @@ Recorded during S1 (plan `docs/superpowers/plans/2026-11-13-sentinel-s1-core-cra
 
 6. **`exe_on` matches by mount id (§5.2).** Btrfs subvolumes share one `s_dev`, so `exe_on` is matched on the VFS mount's `mnt_id`, not on `s_dev` or path text. `sentineld` resolves each `exe_on` path to its mount at load time and warns when a path is not a mount point (the rule would then never match).
 
+Recorded during S3 (plan `docs/superpowers/plans/2026-11-13-sentinel-s3-daemon.md`).
+
+7. **No tokio, no varlink crate (§3.1).** `sentineld` is synchronous and thread-per-concern, and the varlink transport is implemented directly (`varlink.rs`, over `std::os::unix::net::UnixListener`). Reasons: the §10.1 access rule is per-peer (`SO_PEERCRED`, root versus `wheel`), which a service macro does not express; `WatchAlerts` needs raw `continues: true` framing; everything else the daemon does (cgroupfs writes, `/proc` reads, the alert store) is blocking; and the rest of AIOS (`aios-cli`) is synchronous. The §13 budget (RSS at most 64 MiB) is easier to hold without an async runtime. The wire protocol is unchanged, so `varlinkctl` and any varlink client still work.
+
+8. **`env_ld` and `stdio_socket` are user-space predicates (§5.2, §5.3).** S2 does not fill these two facts in the kernel (§17.7), so a rule matching only on them compiled to a kernel rule that could never fire — `ld-preload` in the default pack (§5.5) is exactly that, and §14 expects it to alert. `classify` now counts both as user-space, so such rules become user rules that `sentineld` evaluates after filling the facts from `/proc`. Consequence, by the existing §5.3 rule: `action = "deny"` together with only these predicates is now a validation error naming the predicate. No default-pack rule uses `deny` with them.
+
+9. **Alert context is a time-bounded global ring (§7).** "The last 20 events of the process tree" is served from one process-wide ring of recent events (5 minutes, capped at 200 000 entries, within the §13 budget), filtered to the tree at alert time, newest 20 kept. A per-tree ring would hold memory for every short-lived process.
+
+10. **TTY broadcast enumerates `/dev/pts/*` and `/dev/tty[1-12]` (§9).** There is no utmp reader in the dependency set; `sentineld` writes high and critical alerts to each of those that opens for writing. Equivalent to `wall` for the VM and the desktop case.
+
+11. **An exited process keeps its place in the ancestry (§7).** The process table keeps an exited pid as a tombstone while anything alive is still below it, rather than dropping it as the kernel's reparenting would. Matching the kernel is what creates a blind spot: fork, let the middle process exit, and the orphan has no `sshd` left in its chain, so `parent` and `ancestors` conditions stop matching and a `freeze` of the original process no longer takes it along. Tombstones are dropped as soon as their last descendant goes, so they are bounded by the live process count.
+
+12. **One lock order: daemon before kernel (§13).** Every thread that needs both the daemon state and the kernel handle takes them in that order. The ring drain and the varlink methods need the daemon first, so the heartbeat thread and the resolved monitor follow suit; taking the kernel first deadlocked the daemon in the VM, after exactly one `Status` call.
+
 ### 17.7 S2 outcomes (eBPF kernel object)
 
 Recorded at the end of S2 (plan `docs/superpowers/plans/2026-11-13-sentinel-s2-ebpf.md`). The kernel ABI S3 inherits is documented in `sentinel/crates/sentinel-ebpf/README.md`.
@@ -423,3 +437,32 @@ Recorded at the end of S2 (plan `docs/superpowers/plans/2026-11-13-sentinel-s2-e
 
 - An unused `shim_filename` dead-code warning remains in the eBPF build.
 - The `socket_sendmsg` quarantine deny and the "daemon can still write guarded files" path were not exercised in the VM suite (behavior is by construction, mirroring the tested `socket_connect` / self-guard paths).
+
+### 17.8 S3 outcomes (`sentineld` and the CLI)
+
+Recorded at the end of S3.
+
+**Settled implementation choices:**
+
+- The daemon is synchronous and thread-per-concern; the varlink transport is hand-written (amendment 7). Threads: ring drain (blocking `poll` on the ring fd), heartbeat (500 ms, which also refreshes the `Status` snapshot), varlink listener (one thread per client), resolved monitor.
+- Every kernel effect goes through the `Kernel` trait, so dispatch, actions, the alert chain and `LoadGeneration` are unit-tested on the host with `FakeKernel` (160 unit tests).
+- `env_ld` and `stdio_socket` moved to user space (amendment 8); `ld-preload` is a user rule now.
+- Alert ids are ULIDs, and a freeze names its cgroup `q-<alert-id>`, so an alert and its quarantine share one identifier.
+- Alert context comes from one time-bounded ring filtered to the tree (amendment 9).
+- `SOCK_DESTROY` is issued over `NETLINK_SOCK_DIAG` after matching `/proc/<pid>/fd` socket inodes against a `sock_diag` dump, with a 500 ms receive timeout: the freeze runs while the event loop holds both locks, so an unanswered dump must not be able to wedge the daemon.
+- A failed action rolls back. A freeze that fails part-way unmaps, unfreezes, puts every moved pid back in its recorded cgroup and removes the quarantine cgroup before reporting, so §6's "neither frozen nor killed" also means "not left in a cgroup nothing has a record of".
+- `hdr.matched_rule` is a position in the kernel's `RULES` map, not an index into the source list; an alert names its rule through `KRule.index`.
+- `sentineld` takes `--no-enforce` and `--no-selfguard`, mirroring `ebpf-loadtest`. Both default to on; the VM gap scenario needs the self-guard opt-out, because with it on nothing may signal the daemon (§8.2).
+
+**Deferred to S4 and S5:**
+
+- The systemd unit, the PKGBUILD, the manifest `[sentinel]` wiring, the plan/apply rendering, the `LoadGeneration` call from `aios apply`, and the health check (all §11) are S4. `sentineld` already implements the daemon half of each: `Type=notify` readiness, `/run/aios-sentinel/state`, and the `LoadGeneration` varlink method.
+- `--home-binds` is a file of manifest-managed home targets; S4 renders it from the home binds so `managed_home` and `persistence-write` work (§5.5, amendment 5). Until then the list is empty and `persistence-write` cannot fire.
+- The resolved DNS monitor is implemented but exercised only by the S5 gauntlet; no VM scenario covers it.
+- §13's CPU and RSS numbers are not measured here; the assertions live in the S5 e2e, as §13 says.
+
+**Known gaps:**
+
+- **A rule keyed on `exe` does not match the program being executed.** The daemon resolves an exec event's executable from `/proc/<pid>/exe`, but the LSM hook runs at `bprm_check_security`, before the new image is installed, so the glob is matched against the pre-exec image — the forking shell. Verified in the VM: every exec event in the `freeze` scenario resolved to `/usr/bin/bash` and never to the binary being exec'd. This affects the `exe`-keyed rules of §5.5 (`reverse-shell` among them). The fix belongs in the kernel half: fill `ExecPayload::exe` from `bprm` — the `shim_filename` accessor §17.7 lists as unused dead code exists for exactly this — and have `resolve` prefer the payload when `exe_len > 0`. Until then, only predicates the kernel fills (facts, `mnt_id`) and user predicates about the *parent* are reliable on exec.
+- PID 1 may still signal the daemon (§8.2 known limit, follow-up 5). The lockdown covers that case and the `lockdown_report` scenario proves it.
+- A `memfd` link cannot be pinned (aya gives no `FdLink` for a perf-event `TracePointLink`), so a restart that reuses the pins re-attaches that one program; the other 16 links survive untouched.

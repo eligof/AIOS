@@ -69,7 +69,7 @@ sentinel-check:
 	cd sentinel && $(CARGO) fmt --all -- --check
 	cd sentinel && $(CARGO) clippy --workspace --all-targets -- -D warnings
 	cd sentinel && $(CARGO) test --workspace
-	cd sentinel && PATH="$$HOME/.cargo/bin:$$PATH" $(CARGO) build -p ebpf-loadtest
+	cd sentinel && PATH="$$HOME/.cargo/bin:$$PATH" $(CARGO) build -p ebpf-loadtest -p sentineld -p sentinel
 
 # The shipped binary reads no AIOS_* variable at all, so any AIOS_ string in it means an
 # override leaked into the release build. Only grep's "no match" (status 1) passes: a read

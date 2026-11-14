@@ -527,6 +527,11 @@ impl Daemon {
     }
 }
 
+/// `Daemon::format_ts`, for callers outside the type.
+pub fn format_ts_pub(ms: u64) -> String {
+    Daemon::format_ts(ms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -885,9 +890,4 @@ match = { exe = ["/usr/bin/bash"], stdio_socket = true }
             "an unknown kind must not be dispatched as an exec"
         );
     }
-}
-
-/// `Daemon::format_ts`, for callers outside the type.
-pub fn format_ts_pub(ms: u64) -> String {
-    Daemon::format_ts(ms)
 }

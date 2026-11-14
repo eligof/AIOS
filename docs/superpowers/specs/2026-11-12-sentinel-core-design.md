@@ -468,3 +468,35 @@ Recorded at the end of S3.
 
 - PID 1 may still signal the daemon (§8.2 known limit, follow-up 5). The lockdown covers that case and the `lockdown_report` scenario proves it.
 - A `memfd` link cannot be pinned (aya gives no `FdLink` for a perf-event `TracePointLink`), so a restart that reuses the pins re-attaches that one program; the other 16 links survive untouched.
+
+### 17.9 S4 design decisions (Base ISO integration)
+
+Settled by brainstorming before S4 was planned. §11 specifies *what* the
+integration does; these record the three choices it leaves open, with the
+reasoning, so the plan does not relitigate them.
+
+1. **`aios-manifest` links `sentinel-rules` directly.** The `[sentinel]`
+   section is modelled by reusing `sentinel_rules::config::SentinelConfig`,
+   and rule files are validated at plan time through
+   `sentinel_rules::{config::validate, load_dir}` — a path dependency across
+   the two workspaces. §11.2 requires rule errors to fail the plan, which
+   rules out leaving rule validation to apply time, and one validator means
+   `aios plan` reports exactly what the daemon would. Verified before
+   choosing: `cargo +stable check -p sentinel-rules` passes, so the crate
+   does not drag `sentinel`'s pinned nightly into `aios-cli`. It does add
+   globset, ipnet and psl to the CLI's dependency set.
+
+2. **One varlink client, in `sentinel/crates/sentinel-client`.** The framing
+   and call logic S3 wrote in the CLI moves into its own crate, used by both
+   the `sentinel` CLI and `aios-exec`. `aios apply` has to distinguish the
+   three §11.3 outcomes — rules rejected, daemon absent, success with a change
+   summary — which a shell-out would have to recover from exit codes or
+   stdout; a typed client returns them directly, and the wire format then has
+   a single implementation that cannot drift between the two callers.
+
+3. **S4 is one stage covering all of §11.** The manifest section, the plan
+   diff, the renderer, the `LoadGeneration` call, the package, the unit and
+   the health check all serve one outcome: a generation carries its Sentinel
+   configuration, and a generation whose Sentinel cannot start fails its
+   health check and rolls back. Splitting them would ship a unit with nothing
+   rendering its config, or rendering with nothing running it.

@@ -1322,6 +1322,12 @@ git commit -m "feat(sentineld): /proc reader behind a ProcSource trait"
 
 Spec §7 and amendment 9. The table is seeded from `/proc` at start and kept up to date from Exec, Fork and Exit. Alerts carry the ancestor chain up to PID 1 and the last 20 events of the process tree.
 
+> **Correction applied during execution (commit `c59f251`).** The Step 3 block below drops an exiting pid outright, which loses every process under it: the children keep a `ppid` pointing at a number that is no longer in the table. That is a one-line bypass of the whole §4 ancestry story — fork, let the middle process exit, and the orphan has no `sshd` (or anything else) left in its chain, so `parent` and `ancestors` conditions stop matching, and a `freeze` of the original process no longer takes the orphan with it (§6). Double-forking to detach is the oldest trick there is, and `reverse-shell` and `ptrace-other` both lean on ancestry.
+>
+> The committed implementation keeps an exited pid as a **tombstone** while something alive is still below it: `procs` holds live entries and tombstones, a `children` index makes the exit path O(children) instead of a table scan, and `prune` drops a childless tombstone and cascades up, so the extra entries stay bounded by the live process count. `get` and `len` report live processes only, `descendants` walks *through* tombstones but never reports one (a dead pid cannot be attached to a quarantine cgroup), and `ancestors` walks through them so the chain still reaches pid 1. `on_exec` goes through `insert` as well, so `/proc` repairs a parent link that a missed or out-of-order fork event left wrong.
+>
+> This deliberately does not mirror the kernel, which reparents an orphan to the nearest subreaper. Matching the kernel is what creates the blind spot, and the subreaper is not cheaply knowable from user space anyway.
+
 - [ ] **Step 1: Write the failing tests**
 
 Append to `sentinel/crates/sentineld/src/table.rs`:

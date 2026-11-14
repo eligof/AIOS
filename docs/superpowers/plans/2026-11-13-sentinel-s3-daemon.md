@@ -1929,6 +1929,14 @@ Spec §7 and §17.7. A `RawEvent` from the ring carries a header and a kind-spec
 
 `sentinel_rules::matcher::ResolvedEvent` borrows its strings, so `Resolved` owns them and lends a `ResolvedEvent` through `as_event`.
 
+> **Corrections applied during execution (commit `155df39`).** `sentinel-common` is the contract, and the blocks below disagree with it in three places.
+>
+> 1. **`EventKind` has a thirteenth variant, `Dns`.** The `match kind` and `kind_name` below cover twelve, so neither compiles. No kernel program emits `Dns` — `grep EventKind:: crates/sentinel-ebpf/src/` lists eleven kinds, and `sentinel-detect` synthesizes the DNS ones from port-53 connects — and the payload union has no variant for it. It therefore decodes to no payload at all: `detail` carries `"on": "dns"` and nothing else, rather than another variant's bytes reinterpreted.
+> 2. **The payload literals in the tests do not match the wire types.** `NetPayload` and `OpenPayload` both carry explicit padding (`_pad`), and `OpenPayload::path_len` is `u16`, not `u32`. The committed tests build their payloads through two helpers instead of repeating the literals.
+> 3. **`from_raw` returns `Option<Resolved>`.** `EventKind::from_u8(h.kind).unwrap_or(EventKind::Exec)` turns a record whose `kind` byte decodes to nothing into an exec: the exec arm then reads the union as an `ExecPayload`, does two `/proc` reads against whatever pid the header claims, and the result goes to every `on = "exec"` rule, including those whose action is `freeze` or `kill`. Since the kernel object is embedded at build time the two sides cannot drift, so an unknown kind means a corrupt or forged record and the event is dropped. **Task 13's `on_event` must handle the `None`** — it already decodes `EventKind::from_u8` for its own table upkeep, so it can drop the event there.
+>
+> Added with it: a test that an unknown kind byte resolves to `None`, and one that a `Dns` kind decodes no payload.
+
 - [ ] **Step 1: Write the failing tests**
 
 Create `sentinel/crates/sentineld/src/resolve.rs` with the tests first:

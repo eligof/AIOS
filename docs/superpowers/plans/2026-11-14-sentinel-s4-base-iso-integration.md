@@ -14,7 +14,7 @@
 
 ## Status of this plan
 
-**Tasks 1–6 are written. Tasks 7–14 are listed under "Remaining tasks" with
+**Tasks 1–8 are written. Tasks 9–14 are listed under "Remaining tasks" with
 their scope and files, and still need to be written out in full before they are
 executed.** They are deliberately not stubbed inside the task format: a task in
 this plan means complete code and commands, and a half-written task invites an
@@ -150,7 +150,7 @@ The §11.2 rule summary is a new `Plan` field (Task 5), not a warning.
 | `aios-cli/crates/aios-plan/src/plan.rs` (modify) | `sentinel_changes: Vec<String>` and the `enable = false` warning |
 | `sentinel/crates/sentinel-client/` (create) | The varlink client, shared by the CLI and `aios-exec` |
 | `sentinel/crates/sentinel/src/client.rs` (modify) | Depend on the shared crate; keep the CLI's own error phrasing |
-| `aios-cli/crates/aios-exec/src/sentinel.rs` (create) | `LoadGeneration` after the generation is built, with §11.3's three outcomes |
+| `aios-cli/crates/aios-exec/src/apply/sentinel.rs` (create) | `LoadGeneration` after the generation is built, with §11.3's three outcomes |
 | `packaging/aios-sentinel/PKGBUILD` (create) | Builds the sentinel workspace, installs both binaries and the unit |
 | `packaging/aios-sentinel/aios-sentinel.service` (create) | §11.4's unit, plus the bpffs ordering S3's handoff flagged |
 | `base/aios-health.sh` (modify) | One check: unit active and `/run/aios-sentinel/state` reads `ok` |
@@ -1160,25 +1160,454 @@ git commit -m "feat(aios-plan): Sentinel summary and the disabled warning"
 
 ---
 
+## Task 7: Extract `sentinel-client`
+
+**Files:**
+- Create: `sentinel/crates/sentinel-client/Cargo.toml`, `sentinel/crates/sentinel-client/src/lib.rs`
+- Modify: `sentinel/Cargo.toml` (workspace members), `sentinel/crates/sentinel/src/client.rs`, `sentinel/crates/sentinel/Cargo.toml`
+- Test: the tests move from `sentinel/crates/sentinel/src/client.rs` into the new crate
+
+Spec §17.9 decision 2. The framing and the call loop move into their own crate
+so `aios-exec` and the CLI speak one implementation of the wire format. This is
+a refactor: **no behaviour changes**, and the moved tests must pass unaltered
+except for their module path.
+
+- [ ] **Step 1: Create the crate with the moved tests**
+
+Create `sentinel/crates/sentinel-client/Cargo.toml`:
+
+```toml
+[package]
+name = "sentinel-client"
+description = "varlink client for io.aios.Sentinel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+```
+
+Create `sentinel/crates/sentinel-client/src/lib.rs` holding, verbatim from
+`sentinel/crates/sentinel/src/client.rs`: `INTERFACE`, `SOCKET_PATH`,
+`encode_call`, `Client` with `connect`, `call`, `call_more` and `read_frame`,
+plus a `reply_error_name` helper split out of the CLI's `reply_error`:
+
+```rust
+//! A varlink client for `io.aios.Sentinel` (spec §10.2, amendment §17.9).
+//!
+//! The wire format lives here, not in a caller: `aios apply` and the
+//! `sentinel` CLI both speak it, and a change to the framing that reached only
+//! one of them would be a protocol split between a daemon and its own tools.
+
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+
+use anyhow::{bail, Result};
+
+pub const INTERFACE: &str = "io.aios.Sentinel";
+pub const SOCKET_PATH: &str = "/run/aios-sentinel/io.aios.Sentinel";
+
+/// The short error name of a reply, or `None` when it is not an error.
+/// Callers map it to their own wording: the CLI advises `run0`, `aios apply`
+/// turns it into a warning (§11.3).
+pub fn reply_error_name(v: &serde_json::Value) -> Option<String> {
+    let full = v.get("error")?.as_str()?;
+    Some(full.rsplit('.').next().unwrap_or(full).to_string())
+}
+```
+
+followed by the `encode_call` and `Client` definitions copied from the CLI
+file, and the tests from that file that cover them — `a_call_is_nul_terminated_and_names_the_interface`
+moves as is, and add one for the new helper:
+
+```rust
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_call_is_nul_terminated_and_names_the_interface() {
+        let out = encode_call("Status", serde_json::json!({}), false);
+        assert_eq!(out.last(), Some(&0u8));
+        let v: serde_json::Value = serde_json::from_slice(&out[..out.len() - 1]).unwrap();
+        assert_eq!(v["method"], "io.aios.Sentinel.Status");
+        assert!(v.get("more").is_none());
+
+        let out = encode_call("WatchAlerts", serde_json::json!({}), true);
+        let v: serde_json::Value = serde_json::from_slice(&out[..out.len() - 1]).unwrap();
+        assert_eq!(v["more"], true);
+    }
+
+    #[test]
+    fn the_error_name_is_the_last_component() {
+        let v = serde_json::json!({"error": "io.aios.Sentinel.InvalidRules",
+                                   "parameters": {"errors": ["x"]}});
+        assert_eq!(reply_error_name(&v).as_deref(), Some("InvalidRules"));
+        assert_eq!(reply_error_name(&serde_json::json!({"parameters": {}})), None);
+    }
+}
+```
+
+- [ ] **Step 2: Add the crate to the workspace and run its tests**
+
+In `sentinel/Cargo.toml`, add `"crates/sentinel-client"` to `members`, and add
+to the workspace dependency table:
+
+```toml
+sentinel-client = { path = "crates/sentinel-client" }
+```
+
+Run: `cd sentinel && cargo test -p sentinel-client`
+Expected: 2 passed.
+
+- [ ] **Step 3: Point the CLI at the crate**
+
+In `sentinel/crates/sentinel/Cargo.toml`, add `sentinel-client.workspace = true`.
+
+In `sentinel/crates/sentinel/src/client.rs`, delete the moved items and re-export
+what `main.rs` imports, keeping the CLI-only formatting in place:
+
+```rust
+//! CLI-side wrapper over `sentinel-client` (spec §10.2).
+
+pub use sentinel_client::{encode_call, Client, INTERFACE, SOCKET_PATH};
+
+/// A readable message for an error reply, or `None` if it is not an error.
+/// The wording is the CLI's: a person is reading it.
+pub fn reply_error(v: &serde_json::Value) -> Option<String> {
+    let short = sentinel_client::reply_error_name(v)?;
+    let params = v.get("parameters").cloned().unwrap_or_default();
+    let detail = match short.as_str() {
+        "PermissionDenied" => {
+            " — this command changes something, so it needs root: re-run it with run0".to_string()
+        }
+        // ... the remaining arms unchanged from the S3 version ...
+        _ => {
+            let p = params.to_string();
+            if p == "{}" { String::new() } else { format!(" {p}") }
+        }
+    };
+    Some(format!("{short}{detail}"))
+}
+```
+
+Keep `since_to_ts`, `format_ts` and `alert_line` in this file: they are output
+formatting, not protocol, and `aios apply` has no use for them.
+
+- [ ] **Step 4: Run the CLI's tests to prove the refactor changed nothing**
+
+Run: `cd sentinel && cargo test -p sentinel`
+Expected: the S3 tests still pass — `an_error_reply_becomes_a_readable_message`,
+`relative_times_become_timestamps`, `the_alert_table_line_is_aligned_and_complete`
+and the rest, unmodified. If one needed editing to pass, the refactor changed
+behaviour and that is a bug, not a test to update.
+
+- [ ] **Step 5: Verify both binaries still build and the gate is green**
+
+Run: `cd sentinel && cargo build -p sentinel -p sentineld && cargo clippy --workspace --all-targets -- -D warnings`
+Expected: builds, no warnings.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add sentinel/Cargo.toml sentinel/Cargo.lock sentinel/crates/sentinel-client sentinel/crates/sentinel/Cargo.toml sentinel/crates/sentinel/src/client.rs
+git commit -m "refactor(sentinel): extract sentinel-client from the CLI"
+```
+
+---
+
+## Task 8: `LoadGeneration` from `aios apply`
+
+**Files:**
+- Create: `aios-cli/crates/aios-exec/src/apply/sentinel.rs`
+- Modify: `aios-cli/crates/aios-exec/src/apply/mod.rs` (declare the module and call it), `aios-cli/crates/aios-exec/Cargo.toml`
+- Test: in `aios-cli/crates/aios-exec/src/apply/sentinel.rs`
+
+Spec §11.3. The call happens after the generation is committed, so every failure
+here is a warning on `ApplyOutcome` — the same "after_commit" rule
+`apply/finalize.rs` already follows for `bootctl` and the UKI. The three
+outcomes stay distinct, which is why §17.9 chose a typed client over a
+shell-out.
+
+- [ ] **Step 1: Add the dependency**
+
+In `aios-cli/crates/aios-exec/Cargo.toml`, under `[dependencies]`:
+
+```toml
+sentinel-client = { path = "../../../sentinel/crates/sentinel-client" }
+```
+
+- [ ] **Step 2: Write the failing tests**
+
+Create `aios-cli/crates/aios-exec/src/apply/sentinel.rs`:
+
+```rust
+//! Telling the running daemon about a new generation (spec §11.3).
+
+use std::path::Path;
+
+/// What `LoadGeneration` did, for the apply report.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Loaded {
+    /// The daemon swapped the rules; the lines are its change summary.
+    Swapped(Vec<String>),
+    /// The daemon rejected them and kept the rules it had.
+    Rejected(Vec<String>),
+    /// No daemon answered: the rules take effect at the next boot.
+    NotRunning(String),
+}
+
+impl Loaded {
+    /// The warnings this outcome adds to the apply report. A swap is not a
+    /// warning: it is what was asked for.
+    pub fn warnings(&self) -> Vec<String> {
+        match self {
+            Loaded::Swapped(_) => Vec::new(),
+            Loaded::Rejected(errors) => vec![format!(
+                "sentineld rejected the new rules and kept the running set: {}",
+                errors.join("; ")
+            )],
+            Loaded::NotRunning(why) => vec![format!(
+                "sentineld is not reachable ({why}); the new rules take effect at the next boot"
+            )],
+        }
+    }
+}
+
+/// Call `LoadGeneration` on `socket` for generation `gen` and rule directory
+/// `dir`.
+pub fn load_generation(socket: &Path, generation: &str, dir: &Path) -> Loaded {
+    let mut c = match sentinel_client::Client::connect(&socket.to_string_lossy()) {
+        Ok(c) => c,
+        Err(e) => return Loaded::NotRunning(e.to_string()),
+    };
+    let params = serde_json::json!({
+        "gen": generation,
+        "dir": dir.to_string_lossy(),
+    });
+    match c.call_raw("LoadGeneration", params) {
+        Ok(v) => {
+            if let Some(name) = sentinel_client::reply_error_name(&v) {
+                let errors = v
+                    .get("parameters")
+                    .and_then(|p| p.get("errors"))
+                    .and_then(|e| e.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|e| e.as_str().map(str::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(|| vec![name]);
+                return Loaded::Rejected(errors);
+            }
+            let changes = v
+                .get("parameters")
+                .and_then(|p| p.get("changes"))
+                .and_then(|c| c.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| c.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Loaded::Swapped(changes)
+        }
+        Err(e) => Loaded::NotRunning(e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+
+    /// A daemon that answers one call with `reply`, then closes.
+    fn fake_daemon(path: std::path::PathBuf, reply: serde_json::Value) {
+        std::thread::spawn(move || {
+            let l = UnixListener::bind(&path).expect("bind");
+            if let Ok((mut s, _)) = l.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf);
+                let mut out = serde_json::to_vec(&reply).unwrap();
+                out.push(0);
+                let _ = s.write_all(&out);
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_successful_swap_returns_the_change_summary_and_no_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sock");
+        fake_daemon(
+            sock.clone(),
+            serde_json::json!({"parameters": {"ok": true,
+                "changes": ["+ exec-shm", "reverse-shell: action freeze -> kill"]}}),
+        );
+        let out = load_generation(&sock, "gen-7", dir.path());
+        assert_eq!(
+            out,
+            Loaded::Swapped(vec![
+                "+ exec-shm".to_string(),
+                "reverse-shell: action freeze -> kill".to_string()
+            ])
+        );
+        assert!(out.warnings().is_empty(), "a swap is not a warning");
+    }
+
+    #[test]
+    fn rejected_rules_warn_and_name_the_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sock");
+        fake_daemon(
+            sock.clone(),
+            serde_json::json!({"error": "io.aios.Sentinel.InvalidRules",
+                "parameters": {"errors": ["default.toml: rule x: unknown predicate `nope`"]}}),
+        );
+        let out = load_generation(&sock, "gen-7", dir.path());
+        match &out {
+            Loaded::Rejected(errs) => assert!(errs[0].contains("unknown predicate"), "{errs:?}"),
+            other => panic!("expected Rejected, got {other:?}"),
+        }
+        let w = out.warnings();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("kept the running set"), "{w:?}");
+    }
+
+    #[test]
+    fn an_absent_daemon_warns_about_the_next_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = load_generation(&dir.path().join("nothing-here"), "gen-7", dir.path());
+        match &out {
+            Loaded::NotRunning(_) => {}
+            other => panic!("expected NotRunning, got {other:?}"),
+        }
+        let w = out.warnings();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("next boot"), "{w:?}");
+    }
+
+    #[test]
+    fn a_reply_with_neither_changes_nor_error_is_still_a_swap() {
+        // The daemon may report no changes; that is success, not a failure.
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("sock");
+        fake_daemon(sock.clone(), serde_json::json!({"parameters": {"ok": true}}));
+        assert_eq!(
+            load_generation(&sock, "gen-7", dir.path()),
+            Loaded::Swapped(Vec::new())
+        );
+    }
+}
+```
+
+- [ ] **Step 3: Run the tests to verify they fail**
+
+Run: `cd aios-cli && cargo test -p aios-exec sentinel`
+Expected: FAIL to compile — ``no method named `call_raw` `` on
+`sentinel_client::Client`.
+
+- [ ] **Step 4: Add `call_raw` to the shared client**
+
+`Client::call` turns an error reply into `Err`, which collapses "rules
+rejected" and "no daemon" into one case; §11.3 needs them apart. Add the raw
+form beside it in `sentinel/crates/sentinel-client/src/lib.rs`:
+
+```rust
+    /// One call, returning the reply as it came — an error reply included.
+    /// `call` is the convenience wrapper that turns those into `Err`; a caller
+    /// that must distinguish an error reply from a dead socket uses this.
+    pub fn call_raw(
+        &mut self,
+        method: &str,
+        parameters: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.sock
+            .write_all(&encode_call(method, parameters, false))?;
+        self.read_frame()
+    }
+```
+
+and a test for it in that crate:
+
+```rust
+    #[test]
+    fn call_raw_hands_back_an_error_reply_instead_of_failing() {
+        // Covered end to end by aios-exec's tests; this pins the contract that
+        // an error reply is Ok(_), not Err(_).
+        let v = serde_json::json!({"error": "io.aios.Sentinel.InvalidRules"});
+        assert!(reply_error_name(&v).is_some());
+    }
+```
+
+Run: `cd sentinel && cargo test -p sentinel-client`
+Expected: 3 passed.
+
+- [ ] **Step 5: Run the aios-exec tests to verify they pass**
+
+Run: `cd aios-cli && cargo test -p aios-exec sentinel`
+Expected: 4 passed.
+
+- [ ] **Step 6: Call it from apply, after the commit**
+
+In `aios-cli/crates/aios-exec/src/apply/mod.rs`, declare the module beside the
+other apply submodules:
+
+```rust
+mod sentinel;
+```
+
+and call it where the generation is already committed — immediately after the
+`Finalize` step's warnings are collected, so a rejected rule set cannot abort a
+generation that is already installed:
+
+```rust
+    // §11.3: tell the running daemon about the generation we just built. Any
+    // failure here is a warning, like everything else after the commit point.
+    let loaded = sentinel::load_generation(
+        std::path::Path::new(sentinel_client::SOCKET_PATH),
+        &format!("gen-{gen}"),
+        std::path::Path::new("/etc/aios/sentinel/rules.d"),
+    );
+    for line in loaded.warnings() {
+        run.warnings.push(line);
+    }
+    if let sentinel::Loaded::Swapped(changes) = &loaded {
+        for line in changes {
+            eprintln!("aios: sentinel: {line}");
+        }
+    }
+```
+
+Skip the call when the generation's `sentinel.toml` has `enable = false`: there
+is no daemon to tell, and §11.3 says the change takes effect at the next boot
+anyway. Read it with `sentinel_rules::config::parse` from the candidate root.
+
+- [ ] **Step 7: Verify the whole workspace still passes**
+
+Run: `cd aios-cli && cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings`
+Expected: all pass, no warnings.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add aios-cli/crates/aios-exec/src/apply/sentinel.rs aios-cli/crates/aios-exec/src/apply/mod.rs aios-cli/crates/aios-exec/Cargo.toml aios-cli/Cargo.lock sentinel/crates/sentinel-client/src/lib.rs
+git commit -m "feat(aios-exec): call LoadGeneration after a generation is built"
+```
+
+---
+
 ## Remaining tasks
 
 Each line is one task still to be written out in the format above — files, a
 failing test with real code, the run command and its expected output, the
 implementation, the verification, the commit. Scope and files are settled; the
 code is not yet written.
-
-- **Task 7: Extract `sentinel-client`.** New crate
-  `sentinel/crates/sentinel-client` holding the framing and `Client` from
-  `sentinel/crates/sentinel/src/client.rs`, with that file's tests moving with
-  it; the CLI keeps `reply_error`'s human phrasing and depends on the crate. No
-  behaviour change — the S3 CLI tests must still pass unmodified.
-- **Task 8: `LoadGeneration` from `aios apply`.** New
-  `aios-cli/crates/aios-exec/src/sentinel.rs`, called once the generation is
-  built, handling §11.3's three outcomes distinctly: rules rejected (warn,
-  naming the errors, generation still built), daemon absent (warn, rules take
-  effect next boot), success (print the change summary). Unit-tested against a
-  fake socket. `enable = false` and `lockdown_after` changes also warn that they
-  need a reboot.
 - **Task 9: The systemd unit.** `packaging/aios-sentinel/aios-sentinel.service`
   with §11.4's directives verbatim, plus `LogsDirectory=aios/sentinel` (0700)
   and the bpffs dependency the S3 handoff flagged (`sys-fs-bpf.mount`), checked
@@ -1218,5 +1647,5 @@ code is not yet written.
 | §11.5 health check and its ordering | Task 11 |
 | §17.9 decisions 1–3 | Tasks 1–2 (linked validator), 7–8 (shared client), the single-stage scope of this plan |
 
-**Known gap in this document:** Tasks 7–14 are scoped but not written out.
+**Known gap in this document:** Tasks 9–14 are scoped but not written out.
 Write them before executing them.

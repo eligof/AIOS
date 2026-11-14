@@ -6,4 +6,5 @@
 pub mod alert;
 pub mod kernel;
 pub mod proc;
+pub mod resolve;
 pub mod table;
